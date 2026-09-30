@@ -352,7 +352,7 @@ def plot_initialization(
             if np.isfinite(rlim) and rlim > 0:
                 axr.set_ylim(-1.15 * rlim, 1.15 * rlim)
         axr.set_ylabel("resid", fontsize=20)
-        axr.set_xlabel("Rest Wavelength (Å)", fontsize=20)
+        axr.set_xlabel("Rest-frame wavelength (Å)", fontsize=20)
         style_axis(ax)
         style_axis(axr)
         if show_plot:
@@ -1189,9 +1189,9 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
         style_axis(ax_resid)
 
     if residual_enabled and ax_resid is not None:
-        ax_resid.set_xlabel('Rest Wavelength (Å)', fontsize=20)
+        ax_resid.set_xlabel('Rest-frame wavelength (Å)', fontsize=20)
     else:
-        ax.set_xlabel('Rest Wavelength (Å)', fontsize=20)
+        ax.set_xlabel('Rest-frame wavelength (Å)', fontsize=20)
     ax.set_ylabel(r'$f_{\lambda}$ (10$^{-17}$ erg s$^{-1}$ cm$^{-2}$ Å$^{-1}$)', fontsize=20)
     style_axis(ax)
     if plot_legend:

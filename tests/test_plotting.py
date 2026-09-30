@@ -131,6 +131,28 @@ def test_plot_fit_sed_writes_output(tmp_path):
 
     output = tmp_path / "sed_plot.png"
     fig = plot_fit_sed(_Fitter(), output_path=output)
+    fitter = _Fitter()
+    fitter.config.observation.redshift = 1.0
+    for residual in (True, False):
+        rest = plot_fit_sed(fitter, rest_frame=True, plot_residual=residual)
+        assert rest.axes[-1].get_xlabel() == "Rest-frame wavelength (Å)"
+        for observed_line, rest_line in zip(fig.axes[0].lines, rest.axes[0].lines):
+            np.testing.assert_allclose(rest_line.get_xdata(), np.asarray(observed_line.get_xdata()) / 2)
+            np.testing.assert_allclose(rest_line.get_ydata(), observed_line.get_ydata())
+        for observed_collection, rest_collection in zip(fig.axes[0].collections, rest.axes[0].collections):
+            if observed_collection.get_label() == "Model photometry":
+                np.testing.assert_allclose(rest_collection.get_offsets()[:, 0], observed_collection.get_offsets()[:, 0] / 2)
+            for observed_path, rest_path in zip(observed_collection.get_paths(), rest_collection.get_paths()):
+                if observed_collection.get_label() != "Model photometry":
+                    np.testing.assert_allclose(rest_path.vertices[:, 0], observed_path.vertices[:, 0] / 2)
+        if residual:
+            np.testing.assert_allclose(rest.axes[1].containers[0].lines[0].get_xdata(), np.array([600, 1250, 3000]))
+        np.testing.assert_allclose(rest.axes[0].get_xlim(), np.asarray(fig.axes[0].get_xlim()) / 2)
+    prediction = fitter.predict()
+    prediction["redshift_fit"] = np.array([2.0, 4.0])
+    fitter.predict = lambda **kwargs: prediction
+    rest = plot_fit_sed(fitter, rest_frame=True, plot_residual=False)
+    np.testing.assert_allclose(rest.axes[0].get_xlim(), np.asarray(fig.axes[0].get_xlim()) / 4)
     assert fig is not None
     spectrum_lines = [
         line
@@ -292,6 +314,17 @@ def test_plot_fit_sed_uses_likelihood_photometry_and_saved_chi2():
     assert len(chi2_labels) == 1
     assert chi2_labels[0].get_text() == r"$\chi^2_\nu = 2.00$"
     assert chi2_labels[0].get_color() == "black"
+
+    # Exercise the public API as well as the single-panel layout.
+    from jaxsedfit.core import JAXSEDFit
+
+    single = JAXSEDFit.plot_sed(fitter, plot_residual=False)
+    assert len(single.axes) == 1
+    assert single.axes[0].get_xlabel() == "Observed-frame wavelength (Å)"
+    assert single.axes[0].get_xscale() == "log"
+    assert single.axes[0].get_yscale() == "log"
+    np.testing.assert_allclose(single.axes[0].get_xlim(), fig.axes[0].get_xlim())
+    assert not any(r"\chi^2_\nu" in text.get_text() for text in single.axes[0].texts)
 
 
 def test_median_effective_variance_matches_nebular_and_lyman_terms():
