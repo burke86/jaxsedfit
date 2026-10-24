@@ -77,6 +77,10 @@ __all__ = [
     "load_chimera_benchmark_dataset",
     "run_chimera_mass_benchmark",
     "select_chimera_subset",
+    "SimulationResult",
+    "make_simulator",
+    "simulate",
+    "simulation_config",
 ]
 
 
@@ -163,4 +167,8 @@ def __getattr__(name):
         from . import filters as _filters
 
         return getattr(_filters, name)
+    if name in {"SimulationResult", "make_simulator", "simulate", "simulation_config"}:
+        from . import simulation as _simulation
+
+        return getattr(_simulation, name)
     raise AttributeError(name)

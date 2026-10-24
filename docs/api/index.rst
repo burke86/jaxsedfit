@@ -20,6 +20,7 @@ API Sections
    :maxdepth: 2
 
    fitting
+   simulation
    config
    model
    spectroscopy
