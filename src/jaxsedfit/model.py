@@ -17,6 +17,7 @@ from __future__ import annotations
 # Upstream license: CeCILL v2. See LICENSES/CeCILL-v2.txt and
 # LICENSES/THIRD_PARTY_NOTICES.md.
 
+import copy
 from dataclasses import replace
 from functools import lru_cache
 from typing import Any
@@ -166,6 +167,11 @@ def _luminosity_distance_m_jax(redshift, h0: float, om0: float):
     scalar_input = redshift.ndim == 0
     try:
         bg, cosmo = _get_jax_cosmo_backend(float(h0), float(om0))
+        # jax_cosmo memoizes its comoving-distance table in cosmo._workspace. Use a copy with
+        # an empty workspace so a table computed inside one jit trace (a tracer) is never
+        # stored on the cached Cosmology and reused by a later, separate trace.
+        cosmo = copy.copy(cosmo)
+        cosmo._workspace = {}
     except ModuleNotFoundError as exc:
         if exc.name != "pkg_resources":
             raise
