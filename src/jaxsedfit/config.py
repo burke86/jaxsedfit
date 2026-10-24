@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence as SequenceABC
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -189,6 +189,10 @@ class GalaxyConfig:
     ssp_imf: str = "kroupa_2001"
     ssp_metallicity_coordinate: str = "absolute_log10_z"
     ssp_solar_metallicity: float = 0.019
+    # Rest-frame FWHM resolution of the SSP templates (MILES-based FSPS: 2.5 A).
+    # Subtracted in quadrature from the host broadening on spectra with a
+    # resolving power; None ignores the template resolution.
+    ssp_template_fwhm_angstrom: float | None = 2.5
     # GRAHSP-like default: use one solar-metallicity SSP and the same
     # metallicity for the stellar and nebular components. Explicit host or
     # nebular metallicity priors can still turn this into one shared sampled Z.
@@ -224,6 +228,10 @@ class GalaxyConfig:
             raise ValueError(f"galaxy.ssp_metallicity_coordinate must be one of: {supported}.")
         if not np.isfinite(float(self.ssp_solar_metallicity)) or float(self.ssp_solar_metallicity) <= 0.0:
             raise ValueError("galaxy.ssp_solar_metallicity must be positive and finite.")
+        if self.ssp_template_fwhm_angstrom is not None and (
+            not np.isfinite(float(self.ssp_template_fwhm_angstrom)) or float(self.ssp_template_fwhm_angstrom) <= 0.0
+        ):
+            raise ValueError("galaxy.ssp_template_fwhm_angstrom must be positive and finite, or None.")
         if not np.isfinite(float(self.stellar_metallicity)) or float(self.stellar_metallicity) <= 0.0:
             raise ValueError("galaxy.stellar_metallicity must be positive and finite.")
         if not np.isfinite(float(self.stellar_metallicity_scatter)) or float(self.stellar_metallicity_scatter) < 0.0:
@@ -396,7 +404,6 @@ class LikelihoodConfig:
     redshift_projection_sigma: float = 6.0
     spectrum_student_t_df: float = 5.0
     spectrum_systematics_width: float = 0.05
-    spectrum_weight_mode: str = "pixels"
     fit_spectrum_scale: bool | None = None
     spectrum_scale_prior_sigma_dex: float = 0.1
 
@@ -508,6 +515,16 @@ def _numpyro_distribution_to_mapping(value: Any) -> dict[str, Any] | None:
                 "low": _scalar_or_list(value.low),
                 "high": _scalar_or_list(value.high),
             }
+    if name in {"LeftTruncatedDistribution", "RightTruncatedDistribution"}:
+        base = value.base_dist
+        if base.__class__.__name__ == "Normal":
+            return {
+                "dist": "TruncatedNormal",
+                "loc": _scalar_or_list(base.loc),
+                "scale": _scalar_or_list(base.scale),
+                "low": _scalar_or_list(getattr(value, "low", -np.inf)),
+                "high": _scalar_or_list(getattr(value, "high", np.inf)),
+            }
     if name == "TruncatedNormal":
         return {
             "dist": name,
@@ -617,44 +634,6 @@ class RedshiftPriorConfig:
 
 
 @dataclass
-class MassMetallicityPriorConfig:
-    """Soft stellar mass-metallicity prior for host metallicity."""
-    enabled: bool = False
-    pivot_mass: float = 10.0
-    pivot_logzsol: float = -0.15
-    pivot_lgmet: float | None = None
-    slope: float = 0.35
-    scale: float = 0.25
-    redshift_ref: float = 0.0
-    redshift_slope: float = -0.15
-    min: float = -1.5
-    max: float = 0.3
-    min_lgmet: float | None = None
-    max_lgmet: float | None = None
-
-    def to_mapping(self) -> dict[str, Any]:
-        """Convert the mass-metallicity relation prior into model settings."""
-        out: dict[str, Any] = {
-            "enabled": bool(self.enabled),
-            "pivot_mass": float(self.pivot_mass),
-            "pivot_logzsol": float(self.pivot_logzsol),
-            "slope": float(self.slope),
-            "scale": float(self.scale),
-            "redshift_ref": float(self.redshift_ref),
-            "redshift_slope": float(self.redshift_slope),
-            "min": float(self.min),
-            "max": float(self.max),
-        }
-        if self.pivot_lgmet is not None:
-            out["pivot_lgmet"] = float(self.pivot_lgmet)
-        if self.min_lgmet is not None:
-            out["min_lgmet"] = float(self.min_lgmet)
-        if self.max_lgmet is not None:
-            out["max_lgmet"] = float(self.max_lgmet)
-        return {"mass_metallicity_relation": out}
-
-
-@dataclass
 class HostPriorConfig:
     """Host-galaxy prior options."""
     gal_lgmet: Any | None = None
@@ -710,8 +689,7 @@ class AGNPriorConfig:
     """AGN prior options."""
     log_amp: Any | None = None
     pl_slope: Any | None = None
-    uv_slope_delta: Any | None = None
-    log_uv_slope_delta: Any | None = None
+    uv_slope: Any | None = None
     pl_bend_loc: Any | None = None
     log_pl_bend_loc: Any | None = None
     pl_bend_width: Any | None = None
@@ -760,8 +738,7 @@ class AGNPriorConfig:
             {
                 "log_amp": "log_agn_amp",
                 "pl_slope": "pl_slope",
-                "uv_slope_delta": "uv_slope_delta",
-                "log_uv_slope_delta": "log_uv_slope_delta",
+                "uv_slope": "uv_slope",
                 "pl_bend_loc": "pl_bend_loc",
                 "log_pl_bend_loc": "log_pl_bend_loc",
                 "pl_bend_width": "pl_bend_width",
@@ -905,8 +882,6 @@ class PriorConfig:
         ``Observation.redshift_mode='fit'``.
     stellar_mass : numpyro.distributions.Distribution, optional
         Prior for ``log_stellar_mass``.
-    mass_metallicity : MassMetallicityPriorConfig or mapping, optional
-        Soft stellar mass-metallicity relation prior.
     host : HostPriorConfig or mapping, optional
         Host-galaxy priors for dust, metallicity, SFH, and stellar kinematics.
     agn : AGNPriorConfig or mapping, optional
@@ -919,7 +894,6 @@ class PriorConfig:
     """
     redshift: RedshiftPriorConfig = field(default_factory=RedshiftPriorConfig)
     stellar_mass: Any | None = None
-    mass_metallicity: MassMetallicityPriorConfig = field(default_factory=MassMetallicityPriorConfig)
     host: HostPriorConfig = field(default_factory=HostPriorConfig)
     agn: AGNPriorConfig = field(default_factory=AGNPriorConfig)
     nebular: NebularPriorConfig = field(default_factory=NebularPriorConfig)
@@ -928,7 +902,6 @@ class PriorConfig:
     def __post_init__(self) -> None:
         """Normalize nested prior sections passed as mappings."""
         self.redshift = _coerce_dataclass(RedshiftPriorConfig, self.redshift)
-        self.mass_metallicity = _coerce_dataclass(MassMetallicityPriorConfig, self.mass_metallicity)
         self.host = _coerce_dataclass(HostPriorConfig, self.host)
         self.agn = _coerce_dataclass(AGNPriorConfig, self.agn)
         self.nebular = _coerce_dataclass(NebularPriorConfig, self.nebular)
@@ -946,7 +919,6 @@ class PriorConfig:
         if self.stellar_mass is not None:
             out["log_stellar_mass"] = _prior_to_mapping(self.stellar_mass)
         out.update(self.redshift.to_mapping())
-        out.update(self.mass_metallicity.to_mapping())
         out.update(self.host.to_mapping())
         out.update(self.agn.to_mapping())
         out.update(self.nebular.to_mapping())
@@ -1120,7 +1092,7 @@ def _coerce_prior_config(value: Any) -> PriorConfig:
         return _coerce_dataclass(PriorConfig, value)
 
     data = dict(value)
-    nested_keys = {"redshift", "stellar_mass", "mass_metallicity", "host", "agn", "nebular", "likelihood"}
+    nested_keys = {"redshift", "stellar_mass", "host", "agn", "nebular", "likelihood"}
     unknown = set(data) - nested_keys
     if unknown:
         unknown_list = ", ".join(sorted(unknown))
@@ -1130,7 +1102,6 @@ def _coerce_prior_config(value: Any) -> PriorConfig:
     return PriorConfig(
         redshift=_coerce_dataclass(RedshiftPriorConfig, data.get("redshift", {})),
         stellar_mass=data.get("stellar_mass"),
-        mass_metallicity=_coerce_dataclass(MassMetallicityPriorConfig, data.get("mass_metallicity", {})),
         host=_coerce_dataclass(HostPriorConfig, data.get("host", {})),
         agn=_coerce_dataclass(AGNPriorConfig, data.get("agn", {})),
         nebular=_coerce_dataclass(NebularPriorConfig, data.get("nebular", {})),
@@ -1217,8 +1188,10 @@ def serialize_config(value: Any) -> Any:
         "spectral_custom_components"
     ):
         return serialize_config(value.to_state())
-    if is_dataclass(value):
-        return {k: serialize_config(v) for k, v in asdict(value).items()}
+    if is_dataclass(value) and not isinstance(value, type):
+        # Recurse field by field: ``asdict`` would flatten nested custom-component
+        # specs before their ``to_state`` branch above could run.
+        return {f.name: serialize_config(getattr(value, f.name)) for f in fields(value)}
     if isinstance(value, dict):
         return {k: serialize_config(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

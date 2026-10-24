@@ -99,8 +99,3 @@ Configuration
    :special-members: __init__
    :show-inheritance:
 
-.. autoclass:: MassMetallicityPriorConfig
-   :members:
-   :undoc-members:
-   :special-members: __init__
-   :show-inheritance:

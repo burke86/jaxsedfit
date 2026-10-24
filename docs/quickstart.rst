@@ -256,7 +256,15 @@ Useful controls include:
 
 ``fit_host_kinematics``
    Enables host velocity and velocity-dispersion parameters for spectroscopic
-   fits.
+   fits. When a spectrum sets ``resolving_power``, the host model on that
+   spectrum is convolved with ``sqrt(sigma*^2 + sigma_inst^2 - sigma_template^2)``
+   so ``gal_sigma_kms`` is the intrinsic dispersion. Without a resolving power
+   it is an effective broadening.
+
+``ssp_template_fwhm_angstrom``
+   Rest-frame FWHM resolution of the SSP templates, 2.5 Å by default for
+   MILES-based FSPS libraries. Set it to match your SSP file, or ``None`` to
+   ignore the template resolution.
 
 ``n_wave``
    Sets the internal rest-frame wavelength grid size. Larger values are more
@@ -443,7 +451,6 @@ Add spectroscopy with :class:`jaxsedfit.SpectroscopyData`. Spectroscopic
        resolving_power=2000.0,
    )
    cfg.likelihood.fit_spectrum_scale = True
-   cfg.likelihood.spectrum_weight_mode = "resolution_elements"
 
 Supplying spectroscopy activates the shared detailed spectral engine. Enable
 quasar-style Fe II, Balmer continuum, and tied emission-line modeling on the

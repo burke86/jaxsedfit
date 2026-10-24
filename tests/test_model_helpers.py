@@ -21,7 +21,6 @@ from jaxsedfit.config import (
     PhotometryData,
     PriorConfig,
     RedshiftPriorConfig,
-    MassMetallicityPriorConfig,
     SpectroscopyData,
     fit_config_from_mapping,
 )
@@ -67,7 +66,6 @@ from jaxsedfit.model import (
     photometric_log_likelihood,
     photometric_loglike,
     sed_numpyro_model,
-    spectroscopic_likelihood_weight,
     spectroscopic_log_likelihood,
 )
 from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, _surviving_fraction_for_imf, build_model_context
@@ -426,7 +424,6 @@ def test_prior_config_object_exposes_flat_mapping():
     prior = PriorConfig(
         redshift=RedshiftPriorConfig(z_grid=[0.1, 0.2, 0.3], pdf=[0.2, 0.6, 0.2]),
         stellar_mass=dist.Uniform(8.0, 12.0),
-        mass_metallicity=MassMetallicityPriorConfig(enabled=False),
     )
     prior.agn.log_amp = dist.Normal(44.0, 1.0)
     prior.agn.log_broad_line_width_kms = dist.TruncatedNormal(
@@ -439,7 +436,7 @@ def test_prior_config_object_exposes_flat_mapping():
 
     assert "redshift_pdf" in mapping
     assert isinstance(mapping["log_stellar_mass"], dist.Uniform)
-    assert mapping["mass_metallicity_relation"]["enabled"] is False
+    assert "mass_metallicity_relation" not in mapping
     assert isinstance(mapping["log_agn_amp"], dist.Normal)
     assert float(mapping["log_agn_amp"].loc) == pytest.approx(44.0)
     width_prior = mapping["log_broad_line_width_kms"]
@@ -1425,25 +1422,6 @@ def test_spectroscopic_chi2_diagnostics_return_nan_without_valid_pixels():
     assert np.isnan(float(diagnostics["reduced_chi2"]))
 
 
-def test_spectroscopic_likelihood_weight_uses_resolution_elements():
-    wave = np.arange(5000.0, 5010.0, 1.0)
-    mask = np.ones_like(wave, dtype=bool)
-    spectrum_index = np.zeros_like(wave, dtype=int)
-
-    weight = float(
-        spectroscopic_likelihood_weight(
-            wave,
-            mask,
-            spectrum_index,
-            likelihood_weight_mode="resolution_elements",
-            resolving_power=2000.0,
-        )
-    )
-
-    assert weight == pytest.approx(0.36, rel=1.0e-2)
-    assert float(spectroscopic_likelihood_weight(wave, mask, spectrum_index, "pixels", 2000.0)) == 1.0
-
-
 def test_filter_projection_flat_flambda_to_mjy_units():
     packed = PackedFiltersJax(
         interp_indices=np.asarray([[0, 1, 2]], dtype=np.int32),
@@ -1527,6 +1505,25 @@ def test_ukidss_dr11plus_vendored_filters_load_in_angstroms():
         assert wave.size == trans.size
         assert lo < wave[np.argmax(trans)] < hi
         assert np.nanmax(trans) > 0.0
+
+
+def test_bandwagon_vhs_and_ukidss_aliases_load_survey_specific_filters():
+    aliases = {
+        "Y_vhs": "paranal.vircam.Y",
+        "J_vhs": "paranal.vircam.J",
+        "H_vhs": "paranal.vircam.H",
+        "Ks_vhs": "paranal.vircam.Ks",
+        "Y_ukidss": "ukirt.wfcam.Y",
+        "J_ukidss": "ukirt.wfcam.J",
+        "H_ukidss": "ukirt.wfcam.H",
+        "K_ukidss": "ukirt.wfcam.K",
+    }
+    for alias, canonical in aliases.items():
+        alias_curve = load_filter_curve(alias)
+        canonical_curve = load_filter_curve(canonical)
+        assert alias_curve.name == alias
+        assert np.array_equal(alias_curve.wave, canonical_curve.wave)
+        assert np.array_equal(alias_curve.transmission, canonical_curve.transmission)
 
 
 def test_legacy_filter_aliases_resolve_to_vendored_curves():
@@ -2021,7 +2018,6 @@ def test_spectral_spectrum_resolution_host_basis_uses_host_kinematics(monkeypatc
         likelihood=LikelihoodConfig(
             variability_uncertainty=False,
             fit_spectrum_scale=False,
-            spectrum_weight_mode="resolution_elements",
         ),
         spectroscopy=SpectroscopyData(
             wave_obs=[5000.0, 5001.0, 5002.0],
@@ -2065,11 +2061,9 @@ def test_spectral_spectrum_resolution_host_basis_uses_host_kinematics(monkeypatc
     }
     assert diagnostic_names <= set(tr)
     assert float(np.asarray(tr["sed_n_eff"]["value"])) == 1.0
-    spectral_weight = float(
-        np.asarray(tr["spectroscopy_likelihood_weight"]["value"])
-    )
-    assert spectral_weight < 1.0
-    expected_spectral_n_eff = spectral_weight * 3.0
+    assert "spectroscopy_likelihood_weight" not in tr
+    # Every unmasked spectral pixel counts fully, regardless of resolving power.
+    expected_spectral_n_eff = 3.0
     expected_joint_n_eff = 1.0 + expected_spectral_n_eff
     assert float(np.asarray(tr["spectroscopy_n_eff"]["value"])) == pytest.approx(
         expected_spectral_n_eff
@@ -2421,6 +2415,8 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
         captured["wave"] = np.asarray(self.wave)
         captured["flux"] = np.asarray(self.flux)
         captured["model_total"] = np.asarray(self.model_total)
+        captured["err"] = np.asarray(self.err)
+        captured["err_effective"] = np.asarray(self.err_effective)
         captured["host"] = np.asarray(self.host)
         captured["line"] = np.asarray(self.f_line_model)
         captured["custom_components"] = dict(self.custom_components)
@@ -2442,6 +2438,7 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
             filter_names=["W1", "r_sdss", "u_sdss", "g_sdss", "z_sdss", "i_sdss"],
             photometry_method=["catalog", "psf", "psf", "catalog", "psf", "psf"],
         ),
+        likelihood=SimpleNamespace(spectrum_systematics_width=0.05),
     )
     fitter.context = SimpleNamespace(
         fluxes=np.asarray([1.0, 2.0, 4.0, 3.0, 5.0, -1.0]),
@@ -2481,6 +2478,10 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
     assert fig == "fig"
     assert captured["wave"].tolist() == [2000.0, 2500.0, 3000.0]
     assert np.all(captured["model_total"] > captured["flux"] * 0.0)
+    np.testing.assert_allclose(
+        captured["err_effective"],
+        np.sqrt(captured["err"] ** 2 + (0.05 * captured["model_total"]) ** 2),
+    )
     assert np.all(captured["host"] > 0.0)
     np.testing.assert_allclose(
         captured["line"],

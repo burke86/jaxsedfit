@@ -18,7 +18,6 @@ from .config import (
     PhotometryData,
     PriorConfig,
     RedshiftPriorConfig,
-    MassMetallicityPriorConfig,
     SpectroscopyData,
 )
 
@@ -54,7 +53,6 @@ __all__ = [
     "SpectrumObservationResult",
     "PriorConfig",
     "RedshiftPriorConfig",
-    "MassMetallicityPriorConfig",
     "SpectroscopyData",
     "CustomComponentSpec",
     "CustomLineComponentSpec",

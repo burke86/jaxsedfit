@@ -16,7 +16,6 @@ from jaxsedfit.config import (
     GalaxyConfig,
     InferenceConfig,
     LikelihoodConfig,
-    MassMetallicityPriorConfig,
     Observation,
     OutputConfig,
     PhotometryData,
@@ -38,7 +37,6 @@ from jaxsedfit.model import (
     _default_gal_lgmet_loc,
     _diffstar_ssp_age_weights,
     _flat_lcdm_age_gyr_jax,
-    _mass_metallicity_relation_logprior,
     _luminosity_distance_m_jax,
     _ssp_log_age_bin_edges,
     grahsp_photometric_model,
@@ -463,102 +461,11 @@ def test_energy_balance_can_be_disabled(monkeypatch):
     assert float(np.asarray(tr["dust_alpha_fit"]["value"])) == cfg.galaxy.dust_alpha
 
 
-def test_optional_mass_metallicity_prior_is_exposed(monkeypatch):
-    class _SSPData:
-        ssp_lgmet = np.array([-2.0, -1.5, -1.0, -0.5])
-        ssp_lg_age_gyr = np.array([-1.0, -0.5, 0.0, 0.5])
-        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
-        ssp_flux = np.ones((4, 4, 4))
-
-    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
-    cfg = _mock_config()
-    cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
-    cfg.prior_config.mass_metallicity = MassMetallicityPriorConfig(
-        enabled=True,
-        pivot_mass=10.0,
-        pivot_logzsol=-0.2,
-        slope=0.3,
-        scale=0.2,
-    )
-    context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
-
-    assert "mass_metallicity_relation_prior" in tr
-    assert np.all(np.isfinite(np.asarray(tr["mass_metallicity_relation_prior"]["value"], dtype=float)))
-    assert np.all(np.isfinite(np.asarray(tr["mass_metallicity_relation_logprior"]["value"], dtype=float)))
-
-
-def test_mass_metallicity_prior_is_disabled_by_default(monkeypatch):
-    class _SSPData:
-        ssp_lgmet = np.array([-2.0, -1.5, -1.0, -0.5])
-        ssp_lg_age_gyr = np.array([-1.0, -0.5, 0.0, 0.5])
-        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
-        ssp_flux = np.ones((4, 4, 4))
-
-    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
-    cfg = _mock_config()
-    cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
-    assert cfg.prior_config.mass_metallicity.enabled is False
-    context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
-
-    assert "mass_metallicity_relation_prior" in tr
-    assert np.allclose(np.asarray(tr["mass_metallicity_relation_prior"]["value"], dtype=float), 0.0)
-    assert np.allclose(np.asarray(tr["mass_metallicity_relation_logprior"]["value"], dtype=float), 0.0)
-
-    missing_config_logprior = _mass_metallicity_relation_logprior(
-        7.0,
-        0.0,
-        {},
-        ssp_lgmet=_SSPData.ssp_lgmet,
-        redshift=0.5,
-    )
-    assert float(np.asarray(missing_config_logprior)) == 0.0
-
-
 def test_default_metallicity_prior_uses_dsps_absolute_lgmet_grid():
     ssp_lgmet = np.array([-4.34771165, -3.34771165, -2.34771165, -1.34771165])
 
     default_loc = float(np.asarray(_default_gal_lgmet_loc(ssp_lgmet)))
     assert np.isclose(default_loc, np.log10(0.019) - 0.3)
-
-    low_mass_prior = _mass_metallicity_relation_logprior(
-        8.0,
-        np.log10(0.019) - 0.85,
-        {"mass_metallicity_relation": {"enabled": True}},
-        ssp_lgmet=ssp_lgmet,
-    )
-    old_convention_prior = _mass_metallicity_relation_logprior(
-        8.0,
-        -0.85,
-        {"mass_metallicity_relation": {"enabled": True}},
-        ssp_lgmet=ssp_lgmet,
-    )
-
-    assert np.isfinite(float(np.asarray(low_mass_prior)))
-    assert float(np.asarray(low_mass_prior)) > float(np.asarray(old_convention_prior))
-
-
-def test_mass_metallicity_prior_can_be_disabled(monkeypatch):
-    class _SSPData:
-        ssp_lgmet = np.array([-2.0, -1.5, -1.0, -0.5])
-        ssp_lg_age_gyr = np.array([-1.0, -0.5, 0.0, 0.5])
-        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
-        ssp_flux = np.ones((4, 4, 4))
-
-    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
-    cfg = _mock_config()
-    cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
-    cfg.prior_config.mass_metallicity = MassMetallicityPriorConfig(enabled=False)
-    context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
-
-    assert "mass_metallicity_relation_prior" in tr
-    assert np.allclose(np.asarray(tr["mass_metallicity_relation_prior"]["value"], dtype=float), 0.0)
-    assert np.allclose(np.asarray(tr["mass_metallicity_relation_logprior"]["value"], dtype=float), 0.0)
 
 
 def test_uniform_log_stellar_mass_prior_is_supported(monkeypatch):

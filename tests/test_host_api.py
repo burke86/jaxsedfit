@@ -24,7 +24,6 @@ def test_public_delayed_host_api_builds_physical_host_state():
     basis = _toy_host_basis()
     prior_config = {
         "log_stellar_mass": {"dist": "normal", "loc": 9.0, "scale": 0.1},
-        "mass_metallicity_relation": {"enabled": True, "scale": 5.0},
     }
 
     def model():
@@ -65,7 +64,6 @@ def test_public_delayed_host_api_builds_physical_host_state():
     assert np.isfinite(np.asarray(state["host_rest"], dtype=float)).all()
     assert np.isfinite(float(np.asarray(state["formed_mass"], dtype=float)))
     assert np.isclose(float(np.asarray(jnp.sum(state["host_ssp_weights"]))), 1.0)
-    assert "mass_metallicity_relation_prior" in tr
     assert "log_sfh_age_gyr" in tr
     assert "log_sfh_tau_over_age" in tr
     assert "log_sfh_tau_gyr" in tr
@@ -82,7 +80,7 @@ def test_public_host_rest_on_basis_reuses_sampled_weights():
     def model():
         state = build_host_state(
             basis,
-            {"mass_metallicity_relation": {"enabled": False}},
+            {},
             host_sfh_model="delayed",
             t_obs_gyr=1.2,
         )
@@ -104,7 +102,7 @@ def _fixed_mass_host_trace(log_stellar_mass):
     def model():
         state = build_host_state(
             basis,
-            {"mass_metallicity_relation": {"enabled": False}},
+            {},
             host_sfh_model="delayed",
             t_obs_gyr=1.2,
         )

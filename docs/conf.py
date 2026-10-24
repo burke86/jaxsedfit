@@ -43,7 +43,6 @@ autodoc_mock_imports = [
     "dustmaps",
     "extinction",
     "jax",
-    "jax_cosmo",
     "jaxlib",
     "matplotlib",
     "numpyro",
