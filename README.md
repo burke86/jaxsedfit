@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/_static/jaxsedfit_logo.png" alt="JAXSEDFit logo" width="600">
+</p>
+
 # JAXSEDFit
 
 `JAXSEDFit` is a Bayesian SED fitting code for AGN and galaxies. It is an experimental JAX-based implementation of `CIGALE` and `GRAHSP`. It ports `GRAHSP`/`pcigale` model components into JAX/NumPyro and combines them with a JAX-native galaxy models based on `Diffstar` + `DSPS`.
