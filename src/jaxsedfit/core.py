@@ -3,7 +3,7 @@ from __future__ import annotations
 import gc
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import h5py
 import jax
@@ -504,7 +504,10 @@ class JAXSEDFit:
         value : mapping or None
             Posterior sample mapping keyed by sample-site name.
         """
-        self._ensure_fit_state().samples = value
+        state = self._ensure_fit_state()
+        state.samples = value
+        state.predictive = None
+        state.predictive_cache = None
 
     @property
     def predictive(self) -> dict[str, Any] | None:
@@ -522,7 +525,12 @@ class JAXSEDFit:
         """
         state = self._ensure_fit_state()
         state.predictive = value
-        state.predictive_cache = None if value is None else {"plot:all": value}
+        if value is None:
+            state.predictive_cache = None
+        else:
+            return_sites = self._prediction_return_sites("plot")
+            cache_key = self._prediction_cache_key("plot", None, return_sites)
+            state.predictive_cache = {cache_key: value}
 
     @property
     def _plot_cache(self) -> dict[str, Any] | None:
@@ -581,13 +589,14 @@ class JAXSEDFit:
         return grahsp_photometric_model(self.context, include_components=False)
 
     def _continuum_init_model(self):
-        """Return the MAP warm start with smooth continuum features but no lines."""
+        """Return the MAP warm start with smooth features but no lines or BAL."""
         return grahsp_photometric_model(
             self.context,
             include_components=False,
             include_sed_agn_features=True,
             include_spectral_features=True,
             include_spectral_lines=False,
+            include_spectral_bal=False,
         )
 
     @staticmethod
@@ -605,6 +614,44 @@ class JAXSEDFit:
         if normalized not in {"plot", "photometry"}:
             raise ValueError("predict(kind=...) must be either 'plot' or 'photometry'.")
         return normalized
+
+    def _prediction_return_sites(
+        self,
+        kind: str,
+        extra_return_sites: Iterable[str] = (),
+        required_return_sites: Iterable[str] = (),
+    ) -> tuple[str, ...]:
+        """Return the ordered, deduplicated sites for one prediction request."""
+        sites = list(self._predictive_return_sites(kind))
+        for argument_name, requested_sites in (
+            ("extra_return_sites", extra_return_sites),
+            ("required_return_sites", required_return_sites),
+        ):
+            if isinstance(requested_sites, (str, bytes)):
+                raise TypeError(
+                    f"{argument_name} must be an iterable of site-name strings, "
+                    "not one string."
+                )
+            for site in requested_sites:
+                if not isinstance(site, str) or not site.strip():
+                    raise ValueError(
+                        f"{argument_name} must contain nonempty site-name strings."
+                    )
+                sites.append(site)
+        return tuple(dict.fromkeys(sites))
+
+    @staticmethod
+    def _prediction_cache_key(
+        kind: str,
+        max_draws: int | None,
+        return_sites: Iterable[str],
+    ) -> tuple[Any, ...]:
+        """Return a cache identity including the complete prediction contract."""
+        return (
+            str(kind),
+            None if max_draws is None else int(max_draws),
+            tuple(sorted(set(return_sites))),
+        )
 
     @staticmethod
     def _subset_prediction_samples(samples: Mapping[str, Any], max_draws: int | None) -> dict[str, Any]:
@@ -661,6 +708,7 @@ class JAXSEDFit:
         *,
         kind: str,
         rng_key: Any,
+        return_sites: Iterable[str] | None = None,
     ) -> dict[str, np.ndarray]:
         """Evaluate posterior predictions one draw at a time.
 
@@ -683,7 +731,9 @@ class JAXSEDFit:
             include_components=include_components,
             force_component_fluxes=(kind == "photometry"),
         )
-        return_sites = self._predictive_return_sites(kind)
+        if return_sites is None:
+            return_sites = self._prediction_return_sites(kind)
+        return_sites = tuple(return_sites)
         streamed: dict[str, np.ndarray] | None = None
 
         for draw_index, draw_rng_key in enumerate(rng_keys):
@@ -948,6 +998,8 @@ class JAXSEDFit:
         _state: _FitState | None = None,
         kind: str = "plot",
         max_draws: int | None = None,
+        extra_return_sites: Iterable[str] = (),
+        required_return_sites: Iterable[str] = (),
         posterior_samples: Mapping[str, Any] | None = None,
         cache: bool = True,
     ) -> dict[str, Any]:
@@ -961,6 +1013,11 @@ class JAXSEDFit:
             kind value.
         max_draws : object
             max_draws value.
+        extra_return_sites : iterable of str, optional
+            Best-effort additional NumPyro sites to include alongside the
+            selected product set.
+        required_return_sites : iterable of str, optional
+            Additional NumPyro sites that must be present in the prediction.
         posterior_samples : object
             posterior_samples value.
         cache : object
@@ -968,20 +1025,52 @@ class JAXSEDFit:
         """
         state = self._ensure_fit_state() if _state is None else _state
         kind = self._prediction_kind(kind)
+        for argument_name, requested_sites in (
+            ("extra_return_sites", extra_return_sites),
+            ("required_return_sites", required_return_sites),
+        ):
+            if isinstance(requested_sites, (str, bytes)):
+                raise TypeError(
+                    f"{argument_name} must be an iterable of site-name strings, "
+                    "not one string."
+                )
+        extra_return_sites = tuple(extra_return_sites)
+        required_return_sites = tuple(required_return_sites)
+        return_sites = self._prediction_return_sites(
+            kind,
+            extra_return_sites,
+            required_return_sites,
+        )
         samples = state.samples if posterior_samples is None else posterior_samples
         if samples is None:
             raise RuntimeError("No fitted posterior available. Run fit_map(), fit_nuts(), or fit_ns() first.")
-        cache_key = f"{kind}:{'all' if max_draws is None else int(max_draws)}"
-        if cache and posterior_samples is None and state.predictive_cache is not None and cache_key in state.predictive_cache:
-            return dict(state.predictive_cache[cache_key])
-        draw_samples = self._subset_prediction_samples(samples, max_draws)
-        rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
-        predictive = self._stream_predictive_draws(
-            draw_samples,
-            kind=kind,
-            rng_key=rng_key,
+        cache_key = self._prediction_cache_key(kind, max_draws, return_sites)
+        cached = (
+            cache
+            and posterior_samples is None
+            and state.predictive_cache is not None
+            and cache_key in state.predictive_cache
         )
-        if cache and posterior_samples is None:
+        if cached:
+            predictive = dict(state.predictive_cache[cache_key])
+        else:
+            draw_samples = self._subset_prediction_samples(samples, max_draws)
+            rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
+            predictive = self._stream_predictive_draws(
+                draw_samples,
+                kind=kind,
+                rng_key=rng_key,
+                return_sites=return_sites,
+            )
+        missing_required_sites = [
+            site for site in required_return_sites if site not in predictive
+        ]
+        if missing_required_sites:
+            raise ValueError(
+                "Model did not produce required prediction sites: "
+                f"{list(dict.fromkeys(missing_required_sites))}."
+            )
+        if not cached and cache and posterior_samples is None:
             if state.predictive_cache is None:
                 state.predictive_cache = {}
             state.predictive_cache[cache_key] = predictive
@@ -1242,6 +1331,7 @@ class JAXSEDFit:
                     include_sed_agn_features=True,
                     include_spectral_features=True,
                     include_spectral_lines=False,
+                    include_spectral_bal=False,
                 )
 
         svi_result, median = self._run_map_svi(
@@ -1272,6 +1362,7 @@ class JAXSEDFit:
                 include_sed_agn_features=True,
                 include_spectral_features=True,
                 include_spectral_lines=True,
+                include_spectral_bal=True,
             )
         self.samples = {k: np.asarray(v)[None, ...] for k, v in median.items()}
         self.predictive = None
@@ -1286,6 +1377,7 @@ class JAXSEDFit:
         include_sed_agn_features: bool,
         include_spectral_features: bool,
         include_spectral_lines: bool,
+        include_spectral_bal: bool,
     ):
         """Plot and retain one MAP solution using the standard SED figure.
 
@@ -1299,11 +1391,13 @@ class JAXSEDFit:
             include_sed_agn_features=include_sed_agn_features,
             include_spectral_features=include_spectral_features,
             include_spectral_lines=include_spectral_lines,
+            include_spectral_bal=include_spectral_bal,
         )
+        return_sites = self._prediction_return_sites("plot")
         pred = Predictive(
             model,
             posterior_samples=samples,
-            return_sites=self._predictive_return_sites("plot"),
+            return_sites=return_sites,
         )(jax.random.PRNGKey(self.config.inference.seed + 16))
         predictive = {key: np.asarray(value) for key, value in pred.items()}
 
@@ -1313,7 +1407,9 @@ class JAXSEDFit:
                 method="map_init",
                 samples=samples,
                 predictive=predictive,
-                predictive_cache={"plot:all": predictive},
+                predictive_cache={
+                    self._prediction_cache_key("plot", None, return_sites): predictive
+                },
             )
             fig = self.plot_sed(show=True, title=stage_name)
         finally:
@@ -1673,6 +1769,9 @@ class JAXSEDFit:
         *,
         kind: str = "plot",
         max_draws: int | None = None,
+        extra_return_sites: Iterable[str] = (),
+        required_return_sites: Iterable[str] = (),
+        cache: bool = True,
         _state: _FitState | None = None,
     ) -> dict[str, Any]:
         """Return cached predictive outputs or generate them on demand.
@@ -1692,6 +1791,15 @@ class JAXSEDFit:
         max_draws : int, optional
             Maximum number of posterior draws to evaluate. If omitted, all
             available draws are used.
+        extra_return_sites : iterable of str, optional
+            Best-effort additional NumPyro sample or deterministic sites to
+            return with the standard products selected by ``kind``.
+        required_return_sites : iterable of str, optional
+            Additional sites to return, raising an error if the active model
+            does not produce any of them.
+        cache : bool, optional
+            Reuse and populate a cache specific to the prediction kind, draw
+            limit, and complete requested-site set.
         _state : _FitState, optional
             Internal fit-state override used by :class:`FitResult`.
 
@@ -1702,17 +1810,22 @@ class JAXSEDFit:
         """
         state = self._ensure_fit_state() if _state is None else _state
         kind = self._prediction_kind(kind)
-        if kind == "plot" and max_draws is None and state.predictive is not None:
-            return dict(state.predictive)
-        if kind == "plot" and max_draws is None and state is self._ensure_fit_state():
-            return self._compute_predictive()
-        return self._compute_predictive(_state=state, kind=kind, max_draws=max_draws)
+        return self._compute_predictive(
+            _state=state,
+            kind=kind,
+            max_draws=max_draws,
+            extra_return_sites=extra_return_sites,
+            required_return_sites=required_return_sites,
+            cache=cache,
+        )
 
     def predict_median(
         self,
         posterior: str = "latest",
         *,
         kind: str = "plot",
+        extra_return_sites: Iterable[str] = (),
+        required_return_sites: Iterable[str] = (),
         _state: _FitState | None = None,
     ) -> dict[str, Any]:
         """Evaluate predictive products once at the posterior median parameters.
@@ -1724,6 +1837,10 @@ class JAXSEDFit:
             fit state attached to the fitter or result.
         kind : {"plot", "photometry"}, optional
             Prediction payload to compute at the posterior median.
+        extra_return_sites : iterable of str, optional
+            Additional NumPyro sample or deterministic sites to return.
+        required_return_sites : iterable of str, optional
+            Additional sites that must be present in the prediction.
         _state : _FitState, optional
             Internal fit-state override used by :class:`FitResult`.
 
@@ -1739,6 +1856,8 @@ class JAXSEDFit:
         return self._compute_predictive(
             _state=state,
             kind=kind,
+            extra_return_sites=extra_return_sites,
+            required_return_sites=required_return_sites,
             posterior_samples=median_samples,
             cache=False,
         )
@@ -2206,6 +2325,8 @@ class JAXSEDFit:
         show: bool = False,
         annotate_band_names: bool = True,
         title: str | None = None,
+        plot_residual: bool = True,
+        rest_frame: bool = False,
     ):
         """Plot the fitted SED using the package plotting helper.
 
@@ -2222,6 +2343,11 @@ class JAXSEDFit:
             If True, label observed photometric points with their filter names.
         title : str, optional
             Optional title for the SED panel.
+        plot_residual : bool, optional
+            If True, draw the standardized photometric residual panel.
+        rest_frame : bool, optional
+            If True, plot rest-frame wavelengths using the posterior median
+            redshift, falling back to the configured value. Flux stays in observed mJy.
 
         Returns
         -------
@@ -2237,6 +2363,8 @@ class JAXSEDFit:
             show=show,
             annotate_band_names=annotate_band_names,
             title=title,
+            plot_residual=plot_residual,
+            rest_frame=rest_frame,
         )
 
     def plot_corner(
@@ -2462,7 +2590,22 @@ class JAXSEDFit:
             raise RuntimeError("No spectroscopy data are available to plot.")
         from .spectral_plotting import plot_fig
 
-        pred = self.predict(posterior=posterior)
+        configured_custom_components = tuple(
+            getattr(getattr(self.config, "agn", None), "custom_components", ())
+            or ()
+        )
+        custom_component_return_sites = tuple(
+            site_name
+            for custom_component in configured_custom_components
+            for site_name in (
+                f"spectral_{custom_component.deterministic_site_name}",
+                str(custom_component.deterministic_site_name),
+            )
+        )
+        pred = self.predict(
+            posterior=posterior,
+            extra_return_sites=custom_component_return_sites,
+        )
         index = np.asarray(self.context.spec_spectrum_index, dtype=int)
         selected = (index == int(spectrum_index)) & np.asarray(self.context.spec_mask, dtype=bool)
         if not np.any(selected):
@@ -2681,6 +2824,25 @@ class JAXSEDFit:
             "jaxsedfit_host_dust": obs_sed_component("dust_obs_sed", multiplier=host_capture),
             "jaxsedfit_sed_balmer": obs_sed_component("balmer_obs_sed"),
         }
+        custom_component_sites = {}
+        for custom_component in configured_custom_components:
+            component_name = str(custom_component.output_name)
+            deterministic_name = str(custom_component.deterministic_site_name)
+            site_name = next(
+                (
+                    candidate
+                    for candidate in (
+                        f"spectral_{deterministic_name}",
+                        deterministic_name,
+                    )
+                    if candidate in pred
+                ),
+                None,
+            )
+            if site_name is None:
+                continue
+            custom_components[component_name] = component(site_name)
+            custom_component_sites[component_name] = site_name
         if show_nebular_lines:
             custom_components["jaxsedfit_nebular_lines"] = obs_sed_component("nebular_lines_obs_sed")
         plotter.custom_components = {
@@ -2729,6 +2891,12 @@ class JAXSEDFit:
         }
         if show_nebular_lines:
             custom_draws["jaxsedfit_nebular_lines"] = obs_sed_draws("nebular_lines_obs_sed")
+        custom_draws.update(
+            {
+                component_name: spectrum_draws(site_name)
+                for component_name, site_name in custom_component_sites.items()
+            }
+        )
         for name, draws in custom_draws.items():
             if name in plotter.custom_components:
                 band = band_from_draws(draws)

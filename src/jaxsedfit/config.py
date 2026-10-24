@@ -1188,10 +1188,11 @@ def serialize_config(value: Any) -> Any:
         "spectral_custom_components"
     ):
         return serialize_config(value.to_state())
-    if is_dataclass(value) and not isinstance(value, type):
-        # Recurse field by field: ``asdict`` would flatten nested custom-component
-        # specs before their ``to_state`` branch above could run.
-        return {f.name: serialize_config(getattr(value, f.name)) for f in fields(value)}
+    if is_dataclass(value):
+        return {
+            item.name: serialize_config(getattr(value, item.name))
+            for item in fields(value)
+        }
     if isinstance(value, dict):
         return {k: serialize_config(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

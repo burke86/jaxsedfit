@@ -573,6 +573,56 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
     return np.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
 
 
+def _place_overlapping_band_annotations(
+    fig,
+    annotations,
+    *,
+    base_offset_points: float = 8.0,
+    horizontal_padding_pixels: float = 2.0,
+):
+    """Place colliding labels above upper points and below lower points."""
+    if not annotations:
+        return
+
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    footprints = sorted(
+        (
+            (annotation.get_window_extent(renderer), annotation)
+            for annotation in annotations
+        ),
+        key=lambda item: item[0].x0,
+    )
+    groups = []
+    current_group = []
+    current_right_edge = -np.inf
+    for bbox, annotation in footprints:
+        if current_group and bbox.x0 >= current_right_edge + horizontal_padding_pixels:
+            groups.append(current_group)
+            current_group = []
+            current_right_edge = -np.inf
+        current_group.append(annotation)
+        current_right_edge = max(current_right_edge, float(bbox.x1))
+    if current_group:
+        groups.append(current_group)
+
+    for group in groups:
+        ordered_by_height = sorted(
+            group,
+            key=lambda annotation: annotation.axes.transData.transform(
+                annotation.xy
+            )[1],
+        )
+        lower_count = len(ordered_by_height) // 2
+        for index, annotation in enumerate(ordered_by_height):
+            if len(group) > 1 and index < lower_count:
+                annotation.set_position((0, -base_offset_points))
+                annotation.set_verticalalignment("top")
+            else:
+                annotation.set_position((0, base_offset_points))
+                annotation.set_verticalalignment("bottom")
+
+
 def plot_fit_sed(
     fitter,
     output_path: str | Path | None = None,
@@ -580,6 +630,8 @@ def plot_fit_sed(
     show: bool = False,
     annotate_band_names: bool = True,
     title: str | None = None,
+    plot_residual: bool = True,
+    rest_frame: bool = False,
 ):
     """Render a component SED plot for a fitted jaxsedfit object.
 
@@ -597,11 +649,27 @@ def plot_fit_sed(
         If True, label observed photometric points by filter name.
     title : str, optional
         Optional title for the SED panel.
+    plot_residual : bool, optional
+        If True, draw the standardized photometric residual panel.
+    rest_frame : bool, optional
+        If True, divide plotted wavelengths by one plus the posterior median
+        redshift (or the configured redshift). Flux density remains in observed mJy.
     """
     pred = fitter.predict(posterior=posterior)
+    wavelength_factor = 1.0
+    if rest_frame:
+        redshift = (
+            float(np.median(np.asarray(pred["redshift_fit"], dtype=float)))
+            if "redshift_fit" in pred
+            else float(fitter.config.observation.redshift)
+        )
+        if not np.isfinite(redshift) or redshift <= -1.0:
+            raise ValueError("Rest-frame plotting requires a finite redshift greater than -1.")
+        wavelength_factor = 1.0 / (1.0 + redshift)
     obs_wave = _median_site(pred, "obs_wave")
-    x_min = min(1.0e2, float(np.nanmin(obs_wave)))
-    x_max = max(1.0e6, float(np.nanmax(obs_wave)))
+    plot_wave = obs_wave * wavelength_factor
+    x_min = min(1.0e2, float(np.nanmin(obs_wave))) * wavelength_factor
+    x_max = max(1.0e6, float(np.nanmax(obs_wave))) * wavelength_factor
     model_flux = _median_site(pred, "pred_fluxes")
     phot_wave = np.asarray([flt.effective_wavelength for flt in fitter.context.filters], dtype=float)
     obs_flux = np.asarray(
@@ -612,19 +680,24 @@ def plot_fit_sed(
         getattr(fitter.context, "errors", fitter.config.photometry.errors),
         dtype=float,
     )
+    phot_wave = phot_wave * wavelength_factor
     labels = list(fitter.config.photometry.filter_names)
     plotted_components: list[np.ndarray] = []
     legend_labels_seen: set[str] = set()
     bridged_agn_lines = _bridged_jaxsedfit_agn_lines(pred)
 
     with use_style():
-        fig, (ax_sed, ax_resid) = plt.subplots(
-            2,
-            1,
-            figsize=(10, 7),
-            sharex=True,
-            gridspec_kw={"height_ratios": [3.0, 1.0], "hspace": 0.05},
-        )
+        if plot_residual:
+            fig, (ax_sed, ax_resid) = plt.subplots(
+                2,
+                1,
+                figsize=(10, 7),
+                sharex=True,
+                gridspec_kw={"height_ratios": [3.0, 1.0], "hspace": 0.05},
+            )
+        else:
+            fig, ax_sed = plt.subplots(figsize=(10, 5))
+            ax_resid = None
 
         component_sums = {}
         for keys, label, color, lw in _COMPONENT_STYLE:
@@ -668,7 +741,7 @@ def plot_fit_sed(
             finite_band = np.isfinite(lo) & np.isfinite(hi) & (hi > 0.0)
             if np.any(finite_band):
                 ax_sed.fill_between(
-                    obs_wave,
+                    plot_wave,
                     np.where(finite_band, np.clip(lo, 1e-300, None), np.nan),
                     np.where(finite_band, np.clip(hi, 1e-300, None), np.nan),
                     color=color,
@@ -681,15 +754,15 @@ def plot_fit_sed(
                 legend_labels_seen.add(label)
             primary_key = keys[0]
             if primary_key == "total_obs_sed":
-                ax_sed.plot(obs_wave, component, color=color, lw=max(lw - 0.2, 1.4), alpha=0.65, label=plot_label, zorder=1)
+                ax_sed.plot(plot_wave, component, color=color, lw=max(lw - 0.2, 1.4), alpha=0.65, label=plot_label, zorder=1)
             elif primary_key == "host_obs_sed":
-                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.3), ls="--", alpha=0.95, label=plot_label, zorder=4)
+                ax_sed.plot(plot_wave, component, color=color, lw=max(lw, 2.3), ls="--", alpha=0.95, label=plot_label, zorder=4)
             elif primary_key == "dust_obs_sed":
-                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.1), ls=(0, (4, 2)), alpha=0.95, label=plot_label, zorder=4)
+                ax_sed.plot(plot_wave, component, color=color, lw=max(lw, 2.1), ls=(0, (4, 2)), alpha=0.95, label=plot_label, zorder=4)
             elif primary_key == "agn_obs_sed":
-                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.2), ls="-.", alpha=0.95, label=plot_label, zorder=4)
+                ax_sed.plot(plot_wave, component, color=color, lw=max(lw, 2.2), ls="-.", alpha=0.95, label=plot_label, zorder=4)
             else:
-                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.0), ls=":", alpha=0.95, label=plot_label, zorder=3)
+                ax_sed.plot(plot_wave, component, color=color, lw=max(lw, 2.0), ls=":", alpha=0.95, label=plot_label, zorder=3)
 
         if "agn_lines_local_obs_wave" in pred and "agn_lines_local_obs_sed" in pred:
             local_wave = _median_site(pred, "agn_lines_local_obs_wave")
@@ -703,7 +776,7 @@ def plot_fit_sed(
             if np.any(finite):
                 plotted_components.append(local_lines)
                 ax_sed.plot(
-                    np.where(np.isfinite(finite_wave), finite_wave, np.nan),
+                    np.where(np.isfinite(finite_wave), finite_wave, np.nan) * wavelength_factor,
                     np.where(finite, finite_lines, np.nan),
                     color="#d53f8c",
                     lw=1.4,
@@ -723,7 +796,7 @@ def plot_fit_sed(
                 if plot_label != "_nolegend_":
                     legend_labels_seen.add("Nebular emission")
                 ax_sed.plot(
-                    obs_wave,
+                    plot_wave,
                     continuum_component,
                     color="#319795",
                     lw=2.0,
@@ -750,7 +823,7 @@ def plot_fit_sed(
             if np.any(finite):
                 plotted_components.append(local_component)
                 ax_sed.plot(
-                    local_wave_plot,
+                    local_wave_plot * wavelength_factor,
                     local_component_plot,
                     color="#319795",
                     lw=1.4,
@@ -768,7 +841,7 @@ def plot_fit_sed(
                 if plot_label != "_nolegend_":
                     legend_labels_seen.add("Nebular emission")
                 ax_sed.plot(
-                    obs_wave,
+                    plot_wave,
                     component,
                     color="#319795",
                     lw=2.0,
@@ -789,7 +862,7 @@ def plot_fit_sed(
             if np.any(finite):
                 plotted_components.append(local_total)
                 ax_sed.plot(
-                    local_wave_plot,
+                    local_wave_plot * wavelength_factor,
                     local_total_plot,
                     color="#000000",
                     lw=1.5,
@@ -810,7 +883,7 @@ def plot_fit_sed(
             if np.any(finite):
                 plotted_components.append(local_total)
                 ax_sed.plot(
-                    np.where(np.isfinite(finite_wave), finite_wave, np.nan),
+                    np.where(np.isfinite(finite_wave), finite_wave, np.nan) * wavelength_factor,
                     np.where(finite, finite_total, np.nan),
                     color="#000000",
                     lw=1.5,
@@ -855,7 +928,7 @@ def plot_fit_sed(
                 scale = scale if np.isfinite(scale) and scale > 0.0 else 1.0
                 corrected_flux = spec_flux[selected] / scale
                 ax_sed.plot(
-                    spec_wave[selected][order],
+                    spec_wave[selected][order] * wavelength_factor,
                     corrected_flux[order],
                     color="#c53030",
                     lw=0.8,
@@ -877,54 +950,79 @@ def plot_fit_sed(
             zorder=7,
         )
         ax_sed.scatter(phot_wave, model_flux, color="#111111", marker="s", s=28, label="Model photometry", zorder=6)
+        band_annotations = []
         if annotate_band_names:
-            for x, y, label in zip(phot_wave, obs_flux, labels):
-                ax_sed.annotate(label, (x, y), xytext=(4, 5), textcoords="offset points", fontsize=8)
+            for index, (x, label) in enumerate(zip(phot_wave, labels)):
+                band_annotations.append(
+                    ax_sed.annotate(
+                        label,
+                        (x, obs_flux[index]),
+                        xytext=(0, 8),
+                        textcoords="offset points",
+                        fontsize=7.5,
+                        ha="center",
+                        va="bottom",
+                        rotation=90,
+                        rotation_mode="default",
+                        annotation_clip=False,
+                        zorder=20,
+                        bbox={
+                            "boxstyle": "round,pad=0.16",
+                            "facecolor": "#fffdf8",
+                            "edgecolor": "#d8d4ca",
+                            "linewidth": 0.45,
+                            "alpha": 0.62,
+                        },
+                    )
+                )
 
-        eff_variance = _median_effective_variance(fitter, pred)
-        eff_sigma = np.sqrt(np.clip(eff_variance, 1e-30, 1.0e60))
-        upper_limits = np.asarray(getattr(fitter.context, "upper_limits", np.zeros_like(obs_flux, dtype=bool)), dtype=bool)
-        finite_chi2 = np.isfinite(obs_flux) & np.isfinite(model_flux) & np.isfinite(eff_sigma) & (eff_sigma > 0.0) & (~upper_limits)
-        resid = _standardized_residuals(obs_flux, model_flux, eff_sigma)
-        resid = np.where(finite_chi2, resid, np.nan)
-        ax_resid.errorbar(
-            phot_wave,
-            resid,
-            yerr=np.where(finite_chi2, 1.0, np.nan),
-            fmt="o",
-            color="black",
-            ms=4,
-            capsize=2,
-        )
-        ax_resid.axhline(0.0, color="black", lw=1.0, ls="--")
-        if "sed_reduced_chi2" in pred:
-            reduced_chi2 = float(
-                np.median(np.asarray(pred["sed_reduced_chi2"], dtype=float))
-            )
-        elif np.any(finite_chi2):
-            chi2 = float(np.sum(resid[finite_chi2] ** 2))
-            reduced_chi2 = chi2 / max(1, int(np.sum(finite_chi2)))
-        else:
-            reduced_chi2 = np.nan
-        if np.isfinite(reduced_chi2):
-            ax_resid.text(
-                0.98,
-                0.05,
-                rf"$\chi^2_\nu = {reduced_chi2:.2f}$",
-                transform=ax_resid.transAxes,
-                va="bottom",
-                ha="right",
+        if ax_resid is not None:
+            eff_variance = _median_effective_variance(fitter, pred)
+            eff_sigma = np.sqrt(np.clip(eff_variance, 1e-30, 1.0e60))
+            upper_limits = np.asarray(getattr(fitter.context, "upper_limits", np.zeros_like(obs_flux, dtype=bool)), dtype=bool)
+            finite_chi2 = np.isfinite(obs_flux) & np.isfinite(model_flux) & np.isfinite(eff_sigma) & (eff_sigma > 0.0) & (~upper_limits)
+            resid = _standardized_residuals(obs_flux, model_flux, eff_sigma)
+            resid = np.where(finite_chi2, resid, np.nan)
+            ax_resid.errorbar(
+                phot_wave,
+                resid,
+                yerr=np.where(finite_chi2, 1.0, np.nan),
+                fmt="o",
                 color="black",
-                fontsize=10,
+                ms=4,
+                capsize=2,
             )
+            ax_resid.axhline(0.0, color="black", lw=1.0, ls="--")
+            if "sed_reduced_chi2" in pred:
+                reduced_chi2 = float(
+                    np.median(np.asarray(pred["sed_reduced_chi2"], dtype=float))
+                )
+            elif np.any(finite_chi2):
+                chi2 = float(np.sum(resid[finite_chi2] ** 2))
+                reduced_chi2 = chi2 / max(1, int(np.sum(finite_chi2)))
+            else:
+                reduced_chi2 = np.nan
+            if np.isfinite(reduced_chi2):
+                ax_resid.text(
+                    0.98,
+                    0.05,
+                    rf"$\chi^2_\nu = {reduced_chi2:.2f}$",
+                    transform=ax_resid.transAxes,
+                    va="bottom",
+                    ha="right",
+                    color="black",
+                    fontsize=10,
+                )
 
         ax_sed.set_xscale("log")
         ax_sed.set_yscale("log")
         ax_sed.set_ylabel("Flux density (mJy)")
         if title is not None:
             ax_sed.set_title(str(title))
-        ax_resid.set_ylabel(_STANDARDIZED_RESIDUAL_LABEL)
-        ax_resid.set_xlabel("Observed-frame wavelength (Å)")
+        if ax_resid is not None:
+            ax_resid.set_ylabel(_STANDARDIZED_RESIDUAL_LABEL)
+        wavelength_label = "Rest-frame wavelength (Å)" if rest_frame else "Observed-frame wavelength (Å)"
+        (ax_resid if ax_resid is not None else ax_sed).set_xlabel(wavelength_label)
         ax_sed.legend(loc="lower right", fontsize=9, ncol=2)
 
         finite_flux_parts = [np.asarray(obs_flux, dtype=float), np.asarray(model_flux, dtype=float)]
@@ -939,11 +1037,13 @@ def plot_fit_sed(
                 visible_flux = finite_flux
             ymin = float(np.nanmin(visible_flux))
             ax_sed.set_ylim(ymin * 0.7, ymax * 1.8)
-        ax_resid.set_xscale("log")
         ax_sed.set_xlim(x_min, x_max)
-        ax_resid.set_xlim(x_min, x_max)
+        if ax_resid is not None:
+            ax_resid.set_xscale("log")
+            ax_resid.set_xlim(x_min, x_max)
 
         fig.tight_layout()
+        _place_overlapping_band_annotations(fig, band_annotations)
         if output_path is not None:
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)

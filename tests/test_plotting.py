@@ -3,6 +3,7 @@ import sys
 import types
 
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import numpy as np
 import pytest
 
@@ -12,9 +13,15 @@ from jaxsedfit.plotting import (
     _bridged_jaxsedfit_agn_lines,
     _grouped_trace_samples,
     _median_effective_variance,
+    _place_overlapping_band_annotations,
     plot_corner,
     plot_fit_sed,
     plot_trace,
+)
+from jaxsedfit.spectral_plotting import (
+    _TOTAL_LINES_COLOR,
+    _spectral_component_color,
+    _spectral_component_linewidth,
 )
 
 
@@ -51,6 +58,16 @@ def test_component_style_separates_feii_from_agn_lines():
 
     assert "feii_obs_sed" not in styles["AGN lines"]
     assert styles["Fe II"] == ("feii_obs_sed",)
+
+
+def test_spectral_line_colors_are_stable_and_semantic():
+    for index in range(12):
+        assert _spectral_component_color("broad_lines", index) == "#CC79A7"
+        assert _spectral_component_color("narrow_lines", index) == "#009E73"
+    assert _spectral_component_color("bal_civ", 2) == "#D55E00"
+    assert _TOTAL_LINES_COLOR == "#56B4E9"
+    assert _spectral_component_linewidth("bal_civ") == pytest.approx(1.8)
+    assert _spectral_component_linewidth("broad_lines") == pytest.approx(1.4)
 
 
 def test_plot_fit_sed_writes_output(tmp_path):
@@ -114,6 +131,28 @@ def test_plot_fit_sed_writes_output(tmp_path):
 
     output = tmp_path / "sed_plot.png"
     fig = plot_fit_sed(_Fitter(), output_path=output)
+    fitter = _Fitter()
+    fitter.config.observation.redshift = 1.0
+    for residual in (True, False):
+        rest = plot_fit_sed(fitter, rest_frame=True, plot_residual=residual)
+        assert rest.axes[-1].get_xlabel() == "Rest-frame wavelength (Å)"
+        for observed_line, rest_line in zip(fig.axes[0].lines, rest.axes[0].lines):
+            np.testing.assert_allclose(rest_line.get_xdata(), np.asarray(observed_line.get_xdata()) / 2)
+            np.testing.assert_allclose(rest_line.get_ydata(), observed_line.get_ydata())
+        for observed_collection, rest_collection in zip(fig.axes[0].collections, rest.axes[0].collections):
+            if observed_collection.get_label() == "Model photometry":
+                np.testing.assert_allclose(rest_collection.get_offsets()[:, 0], observed_collection.get_offsets()[:, 0] / 2)
+            for observed_path, rest_path in zip(observed_collection.get_paths(), rest_collection.get_paths()):
+                if observed_collection.get_label() != "Model photometry":
+                    np.testing.assert_allclose(rest_path.vertices[:, 0], observed_path.vertices[:, 0] / 2)
+        if residual:
+            np.testing.assert_allclose(rest.axes[1].containers[0].lines[0].get_xdata(), np.array([600, 1250, 3000]))
+        np.testing.assert_allclose(rest.axes[0].get_xlim(), np.asarray(fig.axes[0].get_xlim()) / 2)
+    prediction = fitter.predict()
+    prediction["redshift_fit"] = np.array([2.0, 4.0])
+    fitter.predict = lambda **kwargs: prediction
+    rest = plot_fit_sed(fitter, rest_frame=True, plot_residual=False)
+    np.testing.assert_allclose(rest.axes[0].get_xlim(), np.asarray(fig.axes[0].get_xlim()) / 4)
     assert fig is not None
     spectrum_lines = [
         line
@@ -129,8 +168,61 @@ def test_plot_fit_sed_writes_output(tmp_path):
     assert np.array_equal(agn_line_curves[0].get_xdata(), wave)
     assert len([line for line in fig.axes[0].lines if line.get_label() == "Fe II"]) == 1
     assert len([line for line in fig.axes[0].lines if line.get_label() == "Balmer cont."]) == 1
+    assert [text.get_text() for text in fig.axes[0].texts[:3]] == ["f1", "f2", "f3"]
+    for annotation in fig.axes[0].texts[:3]:
+        assert annotation.get_zorder() == 20
+        assert annotation.get_bbox_patch().get_alpha() == pytest.approx(0.62)
+        assert annotation.get_rotation() == pytest.approx(90.0)
+        assert annotation.get_rotation_mode() == "default"
+    assert [annotation.get_position() for annotation in fig.axes[0].texts[:3]] == [
+        (0, 8),
+        (0, 8),
+        (0, 8),
+    ]
+    FigureCanvasAgg(fig)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for annotation in fig.axes[0].texts[:3]:
+        point_y = fig.axes[0].transData.transform(annotation.xy)[1]
+        assert annotation.get_window_extent(renderer).y0 > point_y
     assert output.exists()
     assert output.stat().st_size > 0
+
+
+def test_colliding_band_annotations_follow_point_height():
+    fig, ax = plt.subplots()
+    annotations = [
+        ax.annotate(
+            label,
+            point,
+            xytext=(0, 8),
+            textcoords="offset points",
+            rotation=90,
+        )
+        for label, point in (
+            ("near_lower", (0.5000, 0.3)),
+            ("near_upper", (0.5001, 0.7)),
+            ("far", (0.8, 0.5)),
+        )
+    ]
+
+    _place_overlapping_band_annotations(fig, annotations)
+
+    assert [annotation.get_position() for annotation in annotations] == [
+        (0, -8),
+        (0, 8),
+        (0, 8),
+    ]
+    assert [annotation.get_verticalalignment() for annotation in annotations] == [
+        "top",
+        "bottom",
+        "bottom",
+    ]
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    below_point_y = ax.transData.transform(annotations[0].xy)[1]
+    assert annotations[0].get_window_extent(renderer).y1 < below_point_y
+    plt.close(fig)
 
 
 def test_plot_fit_sed_can_disable_band_annotations(tmp_path):
@@ -222,6 +314,17 @@ def test_plot_fit_sed_uses_likelihood_photometry_and_saved_chi2():
     assert len(chi2_labels) == 1
     assert chi2_labels[0].get_text() == r"$\chi^2_\nu = 2.00$"
     assert chi2_labels[0].get_color() == "black"
+
+    # Exercise the public API as well as the single-panel layout.
+    from jaxsedfit.core import JAXSEDFit
+
+    single = JAXSEDFit.plot_sed(fitter, plot_residual=False)
+    assert len(single.axes) == 1
+    assert single.axes[0].get_xlabel() == "Observed-frame wavelength (Å)"
+    assert single.axes[0].get_xscale() == "log"
+    assert single.axes[0].get_yscale() == "log"
+    np.testing.assert_allclose(single.axes[0].get_xlim(), fig.axes[0].get_xlim())
+    assert not any(r"\chi^2_\nu" in text.get_text() for text in single.axes[0].texts)
 
 
 def test_median_effective_variance_matches_nebular_and_lyman_terms():
