@@ -25,7 +25,7 @@ the priors in the :class:`FitConfig`.
    res.fluxes                          # (10000, 5) total fluxes in mJy
    res.components["agn_fluxes"]        # per-component band fluxes
    res.params["redshift"]              # every sampled parameter, fixed or drawn
-   df = res.to_dataframe()
+   cols = res.to_dict()               # flat columns, e.g. pandas.DataFrame(cols)
 
 Notes:
 
@@ -49,6 +49,6 @@ Notes:
 .. autofunction:: make_simulator
 
 .. autoclass:: SimulationResult
-   :members: to_dataframe
+   :members: to_dict
    :no-undoc-members:
    :no-special-members:

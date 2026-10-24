@@ -110,11 +110,12 @@ def test_simulate_validates_inputs(fake_ssp):
         simulation_config(FILTERS, redshift_range=(1.0, 0.5))
 
 
-def test_simulation_result_dataframe_and_no_components(fake_ssp):
+def test_simulation_result_columns_and_no_components(fake_ssp):
     cfg = _config()
     res = simulate(cfg, n=4, seed=0)
-    df = res.to_dataframe()
-    assert len(df) == 4 and "log_agn_amp" in df and "flux_f2" in df and "host_fluxes_f3" in df
+    cols = res.to_dict()
+    assert {"log_agn_amp", "flux_f2", "host_fluxes_f3"} <= set(cols)
+    assert all(len(v) == 4 for v in cols.values())
     bare = simulate(cfg, n=4, seed=0, include_components=False)
     assert bare.components == {}
     np.testing.assert_allclose(bare.fluxes, res.fluxes)
@@ -130,3 +131,4 @@ def test_luminosity_distance_survives_separate_jit_traces():
     ref = float(_flat_lcdm_luminosity_distance_m_jax(jnp.asarray(0.5), 70.0, 0.3))
     assert d1 == pytest.approx(d2, rel=1e-10)
     assert d1 == pytest.approx(ref, rel=1e-3)
+

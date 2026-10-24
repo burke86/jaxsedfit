@@ -67,10 +67,11 @@ class SimulationResult:
     def __len__(self) -> int:
         return int(self.fluxes.shape[0])
 
-    def to_dataframe(self):
-        """Flatten into a pandas DataFrame: scalar parameters plus ``<site>_<filter>`` flux columns."""
-        import pandas as pd
+    def to_dict(self) -> dict[str, np.ndarray]:
+        """Flat columns: scalar parameters, ``flux_<filter>`` and ``<component>_<filter>``.
 
+        ``pandas.DataFrame(result.to_dict())`` gives a table.
+        """
         cols: dict[str, np.ndarray] = {}
         for name, value in self.params.items():
             if value.ndim == 1:
@@ -80,7 +81,8 @@ class SimulationResult:
         for comp, value in self.components.items():
             for j, f in enumerate(self.filter_names):
                 cols[f"{comp}_{f}"] = value[:, j]
-        return pd.DataFrame(cols)
+        return cols
+
 
 
 def simulation_config(
