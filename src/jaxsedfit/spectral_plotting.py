@@ -1169,7 +1169,9 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             )
 
     if residual_enabled and len(total_model_plot) == len(fitter.wave) and ax_resid is not None:
-        resid = _standardized_residuals(fitter.flux, total_model_plot, fitter.err)
+        resid = _standardized_residuals(
+            fitter.flux, total_model_plot, getattr(fitter, "err_effective", fitter.err)
+        )
         ax_resid.plot(
             fitter.wave,
             resid,

@@ -150,39 +150,6 @@ def _np_to_jnp(x):
     return jnp.asarray(np.asarray(x, dtype=np.float64))
 
 
-def spectral_likelihood_weight_from_resolving_power(wave, resolving_power):
-    """Return the resolution-element spectral likelihood weight.
-
-    Parameters
-    ----------
-    wave : object
-        wave value.
-    resolving_power : object
-        resolving_power value.
-    """
-    if resolving_power is None:
-        return jnp.asarray(1.0, dtype=jnp.float64)
-    try:
-        resolving_power_value = float(resolving_power)
-    except Exception:
-        return jnp.asarray(1.0, dtype=jnp.float64)
-    if not np.isfinite(resolving_power_value) or resolving_power_value <= 0.0:
-        return jnp.asarray(1.0, dtype=jnp.float64)
-
-    wave = jnp.asarray(wave, dtype=jnp.float64)
-    if wave.size < 2:
-        return jnp.asarray(1.0, dtype=jnp.float64)
-    delta = jnp.abs(wave[1:] - wave[:-1])
-    prev_delta = jnp.zeros_like(wave).at[1:].set(delta)
-    next_delta = jnp.zeros_like(wave).at[:-1].set(delta)
-    pixel_width = 0.5 * (prev_delta + next_delta)
-    valid = jnp.isfinite(wave) & (wave > 0.0) & (pixel_width > 0.0)
-    resolution_width = wave / resolving_power_value
-    n_eff = jnp.sum(jnp.where(valid, pixel_width / jnp.maximum(resolution_width, 1.0e-30), 0.0))
-    n_pix = jnp.sum(valid.astype(jnp.float64))
-    return jnp.where(n_pix > 0.0, jnp.minimum(n_eff / n_pix, 1.0), jnp.asarray(1.0, dtype=jnp.float64))
-
-
 def instrumental_sigma_lnwave(resolving_power):
     """Return Gaussian instrumental sigma in ln(wavelength) for scalar R."""
     if resolving_power is None:
@@ -199,6 +166,38 @@ def instrumental_sigma_kms(resolving_power):
 def combine_gaussian_sigma(intrinsic_sigma, instrumental_sigma):
     """Combine intrinsic and instrumental Gaussian sigmas in quadrature."""
     return jnp.sqrt(jnp.square(intrinsic_sigma) + jnp.square(instrumental_sigma))
+
+
+DEFAULT_SSP_TEMPLATE_FWHM_ANGSTROM = 2.5
+
+
+def host_kernel_sigma_kms(gal_sigma_kms, sigma_inst_kms, template_fwhm_angstrom, rest_wave_ref):
+    """Return the Gaussian sigma to convolve SSP templates with to model observed starlight.
+
+    Observed starlight is broadened by the stellar velocity dispersion and the
+    instrument, but the SSP templates already carry their own spectral resolution
+    (MILES-based FSPS: 2.5 A FWHM). The template kernel is therefore
+    ``sqrt(sigma*^2 + sigma_inst^2 - sigma_template^2)``, floored near zero where the
+    template is coarser than the data can resolve. Without an instrumental width
+    (resolving power unknown) the fitted dispersion stays an effective broadening.
+
+    Parameters
+    ----------
+    gal_sigma_kms : object
+        Intrinsic stellar velocity dispersion in km/s.
+    sigma_inst_kms : object
+        Instrumental Gaussian sigma in km/s; zero when the resolving power is unknown.
+    template_fwhm_angstrom : float or None
+        SSP template FWHM resolution in rest-frame Angstrom; None disables the correction.
+    rest_wave_ref : object
+        Rest wavelength in Angstrom at which the template resolution is converted to km/s.
+    """
+    combined = combine_gaussian_sigma(gal_sigma_kms, sigma_inst_kms)
+    if template_fwhm_angstrom is None:
+        return combined
+    sigma_template_kms = C_KMS * float(template_fwhm_angstrom) / 2.354820045 / rest_wave_ref
+    corrected = jnp.sqrt(jnp.maximum(jnp.square(combined) - jnp.square(sigma_template_kms), 1.0e-6))
+    return jnp.where(jnp.asarray(sigma_inst_kms) > 0.0, corrected, combined)
 
 
 def _normalize_template_flux(flux: np.ndarray, target_amp: float = 1.0) -> np.ndarray:
@@ -2128,7 +2127,6 @@ def _delayed_sfh_template_weights_compat(fsps_grid, prior_config, host_amp):
     numpyro.deterministic("sfh_tau_gyr", host_state["sfh_tau_gyr"])
     numpyro.deterministic("formed_stellar_mass", host_state["formed_mass"])
     numpyro.deterministic("surviving_mass_fraction", host_state["surviving_mass_fraction"])
-    numpyro.deterministic("mass_metallicity_relation_logprior", host_state["mass_metallicity_relation_logprior"])
     return host_amp * weights_frac, weights_frac
 
 
@@ -2171,7 +2169,6 @@ def _delayed_sfh_host_spectrum(fsps_grid, prior_config, host_amp, z_qso):
     numpyro.deterministic("sfh_tau_gyr", host_state["sfh_tau_gyr"])
     numpyro.deterministic("formed_stellar_mass", host_state["formed_mass"])
     numpyro.deterministic("surviving_mass_fraction", host_state["surviving_mass_fraction"])
-    numpyro.deterministic("mass_metallicity_relation_logprior", host_state["mass_metallicity_relation_logprior"])
     return gal_intrinsic, fsps_weights, fsps_weights_frac
 
 
@@ -2234,6 +2231,43 @@ def _evaluate_custom_line_component_jax(wave, samples_or_values, comp, sample_va
         for param_name in comp.parameter_priors
     }
     return jnp.asarray(comp.evaluate(wave, params, comp.metadata), dtype=jnp.float64)
+
+
+def _custom_component_eval_wave(wave_rest, comp, z_qso):
+    """Return the wavelength grid a custom component's evaluator expects.
+
+    Parameters
+    ----------
+    wave_rest : object
+        Rest-frame model wavelength grid in Angstrom.
+    comp : object
+        Custom component spec with a ``frame`` attribute.
+    z_qso : object
+        Source redshift.
+    """
+    if getattr(comp, "frame", "rest") == "observed":
+        return wave_rest * (1.0 + z_qso)
+    return wave_rest
+
+
+def _custom_fnu_mjy_to_rest_flambda_1e17(wave_rest, fnu_mjy, z_qso):
+    """Convert an observed-frame f_nu (mJy) component to the model's rest f_lambda units.
+
+    The standalone spectral model works in rest-frame f_lambda in 1e-17 erg/s/cm^2/A,
+    with ``f_lambda_rest = f_lambda_obs * (1 + z)``; custom specs declare ``fnu_mjy``.
+
+    Parameters
+    ----------
+    wave_rest : object
+        Rest-frame model wavelength grid in Angstrom.
+    fnu_mjy : object
+        Component flux density in observed-frame mJy.
+    z_qso : object
+        Source redshift.
+    """
+    wave_obs = wave_rest * (1.0 + z_qso)
+    flam_obs_1e17 = fnu_mjy * (1.0e-26 * 2.99792458e18 / 1.0e-17) / (wave_obs * wave_obs)
+    return flam_obs_1e17 * (1.0 + z_qso)
 
 
 @dataclass
@@ -2425,6 +2459,7 @@ def reconstruct_posterior_components(
     n_draws: int | None = None,
     return_components: bool = True,
     decompose_host: bool = True,
+    redshift: float | None = None,
 ) -> Dict[str, Any]:
     """Rebuild posterior spectral components on an arbitrary rest-frame grid.
 
@@ -2468,6 +2503,9 @@ def reconstruct_posterior_components(
         return_components value.
     decompose_host : object
         decompose_host value.
+    redshift : float, optional
+        Source redshift; required when additive custom components are present so their
+        observed-frame f_nu (mJy) output can be converted to rest-frame f_lambda.
     """
     wave_out = np.asarray(wave_out, dtype=float)
     if wave_out.ndim != 1 or wave_out.size < 2 or not np.all(np.isfinite(wave_out)):
@@ -2497,6 +2535,15 @@ def reconstruct_posterior_components(
     lnwave = np.log(wave_out)
     custom_components = normalize_custom_components(custom_components)
     custom_line_components = normalize_custom_line_components(custom_line_components)
+    if redshift is None and (
+        custom_line_components
+        or any(not _is_multiplicative_bal_component(comp) for comp in custom_components)
+    ):
+        raise ValueError(
+            "redshift is required to convert custom components (observed f_nu mJy) "
+            "to rest-frame f_lambda."
+        )
+    z_custom = 0.0 if redshift is None else float(redshift)
     convolution_method = str(prior_config.get("convolution_method", "fft")).lower()
     apply_instrumental_resolution = bool(prior_config.get("apply_instrumental_resolution", False))
     resolving_power = prior_config.get("resolving_power", None)
@@ -2650,7 +2697,12 @@ def reconstruct_posterior_components(
             poly_coeffs_i value.
         """
         host_intrinsic = templates_j @ weights_i
-        gal_sigma_model_i = combine_gaussian_sigma(gal_sigma_i, sigma_inst_kms)
+        gal_sigma_model_i = host_kernel_sigma_kms(
+            gal_sigma_i,
+            sigma_inst_kms,
+            prior_config.get("ssp_template_fwhm_angstrom", DEFAULT_SSP_TEMPLATE_FWHM_ANGSTROM),
+            jnp.median(wave_j),
+        )
         host_model_ext = _shift_and_broaden_single_spectrum_lnlam(
             host_lnwave_j,
             host_intrinsic,
@@ -2779,9 +2831,17 @@ def reconstruct_posterior_components(
                 return val
 
             comp_draw = np.asarray(
-                _evaluate_custom_component_jax(wave_out, samples, comp, _sample_value),
+                _evaluate_custom_component_jax(
+                    _custom_component_eval_wave(wave_out, comp, z_custom), samples, comp, _sample_value
+                ),
                 dtype=float,
-            ) * reddening_atten_draws_np[i] * poly_draws_np[i]
+            )
+            if _is_multiplicative_bal_component(comp):
+                comp_draw = comp_draw * reddening_atten_draws_np[i] * poly_draws_np[i]
+            else:
+                comp_draw = np.asarray(
+                    _custom_fnu_mjy_to_rest_flambda_1e17(wave_out, comp_draw, z_custom), dtype=float
+                ) * poly_draws_np[i]
             comp_draws[i] = comp_draw
             custom_total_draws[i] = custom_total_draws[i] + comp_draw
         component_draws[comp.output_name] = comp_draws
@@ -2829,8 +2889,12 @@ def reconstruct_posterior_components(
                 return float(values[i])
 
             comp_draws[i] = np.asarray(
-                _evaluate_custom_line_component_jax(
-                    wave_out, samples, comp, _sample_value
+                _custom_fnu_mjy_to_rest_flambda_1e17(
+                    wave_out,
+                    _evaluate_custom_line_component_jax(
+                        _custom_component_eval_wave(wave_out, comp, z_custom), samples, comp, _sample_value
+                    ),
+                    z_custom,
                 ),
                 dtype=float,
             ) * poly_draws_np[i]
@@ -3424,7 +3488,12 @@ def _build_host_component(
         default_log_distribution=dist.Normal(np.log(150.0), 0.4),
         default_to_log=True,
     )
-    sigma_effective_kms = combine_gaussian_sigma(gal_sigma_kms, sigma_inst_kms)
+    sigma_effective_kms = host_kernel_sigma_kms(
+        gal_sigma_kms,
+        sigma_inst_kms,
+        prior_config.get("ssp_template_fwhm_angstrom", DEFAULT_SSP_TEMPLATE_FWHM_ANGSTROM),
+        jnp.median(jnp.asarray(wave, dtype=jnp.float64)),
+    )
     broadened_ext = _shift_and_broaden_single_spectrum_lnlam(
         host_lnwave,
         intrinsic_total_ext,
@@ -3535,6 +3604,7 @@ def _build_line_component(
     use_psf_phot,
     fit_reddening,
     emit_deterministics,
+    z_qso=0.0,
 ):
     """Sample and synthesize built-in and custom emission-line components."""
     custom_models = {}
@@ -3547,8 +3617,12 @@ def _build_line_component(
             cfg = prior_config.get(key, None)
             return default if cfg is None else _sample_from_prior_config(key, cfg)
 
-        component_model = _evaluate_custom_line_component_jax(
-            wave, prior_config, component, sample_value
+        component_model = _custom_fnu_mjy_to_rest_flambda_1e17(
+            wave,
+            _evaluate_custom_line_component_jax(
+                _custom_component_eval_wave(wave, component, z_qso), prior_config, component, sample_value
+            ),
+            z_qso,
         )
         if apply_instrumental_resolution:
             component_model = _convolve_velocity_space(
@@ -3674,9 +3748,10 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     Intrinsic reddening behavior
     ----------------------------
     When ``fit_reddening=True``, a single fitted E(B-V) attenuation screen is
-    applied to the power-law continuum, Fe II templates, Balmer continuum,
-    and custom nuclear continuum components. Emission lines and host-galaxy
-    starlight are not attenuated by this screen. This is distinct from the
+    applied to the power-law continuum, Fe II templates, and Balmer continuum.
+    Emission lines, host-galaxy starlight, and custom components (which
+    declare ``attenuation='none'`` and observed-frame f_nu in mJy) are not
+    attenuated by this screen. This is distinct from the
     separately configured Milky Way foreground correction.
 
     Parameters
@@ -4122,8 +4197,14 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
                 return default
             return _sample_from_prior_config(key, cfg)
 
-        custom_model_intrinsic = _evaluate_custom_component_jax(wave, prior_config, comp, _sample_value)
-        custom_model = custom_model_intrinsic * reddening_atten
+        # Custom specs are observed f_nu (mJy) with attenuation='none' by contract.
+        custom_model = _custom_fnu_mjy_to_rest_flambda_1e17(
+            wave,
+            _evaluate_custom_component_jax(
+                _custom_component_eval_wave(wave, comp, z_qso), prior_config, comp, _sample_value
+            ),
+            z_qso,
+        )
         custom_models[comp.output_name] = custom_model
         custom_total_model = custom_total_model + custom_model
     poly_model = jnp.ones_like(wave)
@@ -4210,6 +4291,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         use_psf_phot=use_psf_phot,
         fit_reddening=fit_reddening,
         emit_deterministics=emit_deterministics,
+        z_qso=z_qso,
     )
     custom_line_models = dict(line_state.custom_models)
     line_model_intrinsic = line_state.intrinsic
@@ -4419,16 +4501,9 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         numpyro.deterministic('fsps_weights_frac', fsps_weights_frac)
 
     student_t_df = float(prior_config.get('student_t_df', 3.0))
-    spectral_likelihood_weight = (
-        jnp.asarray(1.0, dtype=jnp.float64)
-        if apply_instrumental_resolution
-        else spectral_likelihood_weight_from_resolving_power(wave, resolving_power)
-    )
-    if emit_deterministics:
-        numpyro.deterministic('spectral_likelihood_weight', spectral_likelihood_weight)
     if has_observed_flux:
         pixel_log_prob = dist.StudentT(df=student_t_df, loc=fiber_model, scale=sigma_tot).log_prob(flux)
-        numpyro.factor('obs', spectral_likelihood_weight * jnp.sum(pixel_log_prob))
+        numpyro.factor('obs', jnp.sum(pixel_log_prob))
 
 
 def quasar_spectral_model(*args, **kwargs):

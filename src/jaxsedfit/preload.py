@@ -6,6 +6,7 @@ from __future__ import annotations
 # See LICENSES/CeCILL-v2.txt, LICENSES/THIRD_PARTY_NOTICES.md, and the README
 # files in src/jaxsedfit/resources/ for provenance details.
 
+import hashlib
 from importlib import resources
 from dataclasses import dataclass
 from pathlib import Path
@@ -302,7 +303,7 @@ _SSP_DATA_CACHE: dict[str, SSPData] = {}
 _FILTER_RESPONSE_CACHE: dict[tuple[Any, ...], list[Any]] = {}
 _TEMPLATE_CACHE: dict[tuple[Any, ...], LoadedTemplates] = {}
 _DALE2014_CACHE: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-_HOST_BASIS_CACHE: dict[tuple[str, float, float, int], HostBasis] = {}
+_HOST_BASIS_CACHE: dict[tuple[Any, ...], HostBasis] = {}
 _REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray]] = {}
 _NEBULAR_TEMPLATE_CACHE: dict[str, NebularTemplatesJax] = {}
 _NEBULAR_REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray | None, np.ndarray]] = {}
@@ -310,6 +311,24 @@ _FIXED_NEBULAR_LINE_PROFILE_CACHE: dict[tuple[Any, ...], np.ndarray] = {}
 _REDSHIFT_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 _FIXED_LOCAL_LINE_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
 _FIXED_LOCAL_NEBULAR_LINE_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+_FILTER_MAX_OUTSIDE_FRACTION = 0.01
+
+
+def _array_content_key(values: Any) -> tuple[str, str] | None:
+    """Return a content hash for cache keys; ``id()`` is unsafe because ids are reused.
+
+    Parameters
+    ----------
+    values : object
+        Array-like, optionally an astropy Quantity, or None.
+    """
+    if values is None:
+        return None
+    unit = str(getattr(values, "unit", ""))
+    raw = np.ascontiguousarray(np.asarray(getattr(values, "value", values), dtype=float))
+    digest = hashlib.sha1(raw.tobytes())
+    digest.update(str(raw.shape).encode())
+    return unit, digest.hexdigest()
 
 
 def _package_resource_path(relpath: str) -> Path:
@@ -478,7 +497,15 @@ def _filter_response_cache_key(cfg: FitConfig) -> tuple[Any, ...]:
     """
     return (
         tuple(str(name) for name in cfg.photometry.filter_names) if cfg.photometry is not None else (),
-        tuple((curve.name, id(curve.wave), id(curve.transmission), curve.effective_wavelength) for curve in cfg.filters.curves),
+        tuple(
+            (
+                curve.name,
+                _array_content_key(curve.wave),
+                _array_content_key(curve.transmission),
+                curve.effective_wavelength,
+            )
+            for curve in cfg.filters.curves
+        ),
     )
 
 
@@ -581,12 +608,12 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
         feii.name,
         feii.wavelength_unit,
         em.wavelength_unit,
-        id(feii.wave),
-        id(feii.lumin),
-        id(em.wave),
-        id(em.lumin_blagn),
-        id(em.lumin_sy2),
-        id(em.lumin_liner),
+        _array_content_key(feii.wave),
+        _array_content_key(feii.lumin),
+        _array_content_key(em.wave),
+        _array_content_key(em.lumin_blagn),
+        _array_content_key(em.lumin_sy2),
+        _array_content_key(em.lumin_liner),
     )
     cached = _TEMPLATE_CACHE.get(cache_key)
     if cached is not None:
@@ -631,33 +658,32 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
         )
         _TEMPLATE_CACHE[cache_key] = loaded
         return loaded
-    if feii.wave is not None and em.wave is not None:
-        loaded = LoadedTemplates(
-            feii_wave=_inline_wavelengths_to_angstrom(feii.wave, feii.wavelength_unit, "agn.feii_template"),
-            feii_lumin=np.asarray(feii.lumin, dtype=float),
-            line_wave=_inline_wavelengths_to_angstrom(em.wave, em.wavelength_unit, "agn.emission_line_template"),
-            line_blagn=np.asarray(em.lumin_blagn, dtype=float),
-            line_sy2=np.asarray(em.lumin_sy2, dtype=float),
-            line_liner=np.asarray(em.lumin_liner, dtype=float),
-            dust_alpha_grid=dust_alpha_grid,
-            dust_wave=dust_wave,
-            dust_lumin=dust_lumin,
-            dl07_umin_grid=dl07_umin_grid,
-            dl07_qpah_grid=dl07_qpah_grid,
-            dl07_single_u=dl07_single_u,
-            dl07_powerlaw=dl07_powerlaw,
-        )
-        _TEMPLATE_CACHE[cache_key] = loaded
-        return loaded
-    if feii.name == "BruhweilerVerner08" and em.wave is None:
+    # Resolve the Fe II and emission-line templates independently, so an inline
+    # template for one is never silently replaced by the vendored default.
+    if feii.wave is not None:
+        feii_wave = _inline_wavelengths_to_angstrom(feii.wave, feii.wavelength_unit, "agn.feii_template")
+        feii_lumin = np.asarray(feii.lumin, dtype=float)
+    elif feii.name == "BruhweilerVerner08":
         feii_path = _package_resource_path("resources/templates/Fe_d11-m20-20.5.txt")
         feii_data = np.loadtxt(feii_path)
         wave_observed = np.asarray(feii_data[:, 0], dtype=float)
         lnu = np.asarray(feii_data[:, 1], dtype=float)
         z_shift = 4593.4 / 4575.0 - 1.0
-        wave_rest = wave_observed / (1.0 + z_shift)
+        feii_wave = wave_observed / (1.0 + z_shift)
         llam = lnu * 2.99792458e18 / np.clip(wave_observed * wave_observed, 1e-30, None)
-        norm = float(llam[int(np.argmin(np.abs(wave_rest - 4575.0)))])
+        norm = float(llam[int(np.argmin(np.abs(feii_wave - 4575.0)))])
+        feii_lumin = np.asarray(llam / max(norm, 1e-30), dtype=float)
+    else:
+        raise ValueError(
+            f"Unsupported Fe II template {feii.name!r}. Provide inline agn.feii_template "
+            "wave/lumin arrays or use the vendored BruhweilerVerner08 template."
+        )
+    if em.wave is not None:
+        line_wave = _inline_wavelengths_to_angstrom(em.wave, em.wavelength_unit, "agn.emission_line_template")
+        line_blagn = np.asarray(em.lumin_blagn, dtype=float)
+        line_sy2 = np.asarray(em.lumin_sy2, dtype=float)
+        line_liner = np.asarray(em.lumin_liner, dtype=float)
+    else:
         line_path = _package_resource_path("resources/templates/emission_line_table.formatted")
         line_data = np.loadtxt(
             line_path,
@@ -670,28 +696,27 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
                 ("LINER", "f8"),
             ],
         )
-        loaded = LoadedTemplates(
-            feii_wave=np.asarray(wave_rest, dtype=float),
-            feii_lumin=np.asarray(llam / max(norm, 1e-30), dtype=float),
-            line_wave=np.asarray(line_data["wave"], dtype=float),
-            line_blagn=np.asarray(line_data["broad"], dtype=float),
-            line_sy2=np.asarray(line_data["S2"], dtype=float),
-            line_liner=np.asarray(line_data["LINER"], dtype=float),
-            dust_alpha_grid=dust_alpha_grid,
-            dust_wave=dust_wave,
-            dust_lumin=dust_lumin,
-            dl07_umin_grid=dl07_umin_grid,
-            dl07_qpah_grid=dl07_qpah_grid,
-            dl07_single_u=dl07_single_u,
-            dl07_powerlaw=dl07_powerlaw,
-        )
-        _TEMPLATE_CACHE[cache_key] = loaded
-        return loaded
-    raise ValueError(
-        "Unsupported AGN template configuration. Provide inline feii_template and "
-        "emission_line_template arrays, or use the vendored BruhweilerVerner08/default "
-        "emission-line templates."
+        line_wave = np.asarray(line_data["wave"], dtype=float)
+        line_blagn = np.asarray(line_data["broad"], dtype=float)
+        line_sy2 = np.asarray(line_data["S2"], dtype=float)
+        line_liner = np.asarray(line_data["LINER"], dtype=float)
+    loaded = LoadedTemplates(
+        feii_wave=np.asarray(feii_wave, dtype=float),
+        feii_lumin=feii_lumin,
+        line_wave=line_wave,
+        line_blagn=line_blagn,
+        line_sy2=line_sy2,
+        line_liner=line_liner,
+        dust_alpha_grid=dust_alpha_grid,
+        dust_wave=dust_wave,
+        dust_lumin=dust_lumin,
+        dl07_umin_grid=dl07_umin_grid,
+        dl07_qpah_grid=dl07_qpah_grid,
+        dl07_single_u=dl07_single_u,
+        dl07_powerlaw=dl07_powerlaw,
     )
+    _TEMPLATE_CACHE[cache_key] = loaded
+    return loaded
 
 
 def _load_vendored_dale2014_templates() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -759,15 +784,28 @@ def _prepare_loaded_filter(obs_wave: np.ndarray, response: FilterCurve) -> Loade
         if response.effective_wavelength is None
         else _scalar_angstrom_value(response.effective_wavelength)
     )
+    # Reject bands whose response falls materially outside the model grid; projecting them
+    # would otherwise extrapolate the SED linearly from the last two grid points.
+    total_response = float(np.trapezoid(trans, filt_wave))
+    inside = (filt_wave >= obs_wave[0]) & (filt_wave <= obs_wave[-1])
+    outside_response = total_response - float(np.trapezoid(np.where(inside, trans, 0.0), filt_wave))
+    if total_response <= 0.0 or outside_response > _FILTER_MAX_OUTSIDE_FRACTION * total_response:
+        raise ValueError(
+            f"Filter {response.name!r} ({filt_wave[0]:.4g}-{filt_wave[-1]:.4g} A) is not covered by the "
+            f"observed-frame model grid ({obs_wave[0]:.4g}-{obs_wave[-1]:.4g} A); adjust "
+            "galaxy.rest_wave_min/rest_wave_max or drop the band."
+        )
     mask = (obs_wave >= filt_wave[0]) & (obs_wave <= filt_wave[-1])
     work_wave = obs_wave[mask]
     if work_wave.size < 2:
-        work_wave = np.linspace(filt_wave[0], filt_wave[-1], min(max(obs_wave.size // 4, 16), 512))
+        lo = max(filt_wave[0], obs_wave[0])
+        hi = min(filt_wave[-1], obs_wave[-1])
+        work_wave = np.linspace(lo, hi, min(max(obs_wave.size // 4, 16), 512))
     trans_r = np.interp(work_wave, filt_wave, trans, left=0.0, right=0.0)
     interp_indices = np.searchsorted(obs_wave, work_wave) - 1
     interp_indices = np.clip(interp_indices, 0, obs_wave.size - 2)
     denom = obs_wave[interp_indices + 1] - obs_wave[interp_indices]
-    interp_weight = (work_wave - obs_wave[interp_indices]) / np.clip(denom, 1e-12, None)
+    interp_weight = np.clip((work_wave - obs_wave[interp_indices]) / np.clip(denom, 1e-12, None), 0.0, 1.0)
     return LoadedFilter(
         name=response.name,
         wave=filt_wave,
@@ -1211,9 +1249,7 @@ def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData, ssp_imf: str = "
     """
     cache_key = (
         str(ssp_data.ssp_flux.__array_interface__["data"][0]),
-        float(rest_wave[0]),
-        float(rest_wave[-1]),
-        int(rest_wave.size),
+        _array_content_key(rest_wave),
         str(ssp_imf),
     )
     cached = _HOST_BASIS_CACHE.get(cache_key)
@@ -1284,15 +1320,13 @@ def _build_rest_template_cache(
         templates value.
     """
     cache_key = (
-        id(templates.feii_wave),
-        id(templates.feii_lumin),
-        id(templates.dust_wave),
-        id(templates.dust_lumin),
-        id(templates.dl07_single_u),
-        id(templates.dl07_powerlaw),
-        float(rest_wave[0]),
-        float(rest_wave[-1]),
-        int(rest_wave.size),
+        _array_content_key(templates.feii_wave),
+        _array_content_key(templates.feii_lumin),
+        _array_content_key(templates.dust_wave),
+        _array_content_key(templates.dust_lumin),
+        _array_content_key(templates.dl07_single_u),
+        _array_content_key(templates.dl07_powerlaw),
+        _array_content_key(rest_wave),
     )
     cached = _REST_TEMPLATE_CACHE.get(cache_key)
     if cached is not None:

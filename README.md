@@ -30,8 +30,6 @@ At a high level, `jaxsedfit` currently includes:
 python -m pip install .
 curl -L -o tempdata.h5 https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_continuum_fsps_v3.2_lgmet_age.h5
 ```
-`jaxsedfit` now also requires `jax_cosmo` and `setuptools` in the runtime environment so the redshift-dependent luminosity-distance path stays JAX-native during inference.
-
 You will also need a continuum-only DSPS SSP template file such as `ssp_data_continuum_fsps_v3.2_lgmet_age.h5`, downloaded above, and then referenced from your configuration via `cfg.galaxy.dsps_ssp_fn`. The continuum-only template is preferred because `jaxsedfit` models nebular emission lines separately.
 
 This repo assumes `dustmaps` is already configured and SFD maps are available.

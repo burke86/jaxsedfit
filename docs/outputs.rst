@@ -107,10 +107,7 @@ Host galaxy and star formation
      - Host line-of-sight velocity offset.
    * - ``gal_sigma_kms``
      - km / s
-     - Host intrinsic velocity dispersion (Gaussian sigma, not FWHM).
-   * - ``mass_metallicity_relation_logprior``
-     - log probability
-     - Optional soft mass-metallicity prior contribution; zero when disabled.
+     - Host velocity dispersion (Gaussian sigma, not FWHM); intrinsic for spectra with a resolving power, otherwise an effective broadening.
    * - ``u_lgmcrit``, ``u_lgy_at_mcrit``, ``u_indx_lo``, ``u_indx_hi``
      - dimensionless
      - Unbounded Diffstar main-sequence coordinates for critical halo mass, efficiency, low/high mass slopes. These are transformed model coordinates, not direct physical measurements.
@@ -302,9 +299,6 @@ Aperture, calibration, and likelihood outputs
    * - ``systematics_width``, ``agn_systematics_width``
      - fraction
      - Extra photometric uncertainty scales; log_systematics_width and log_agn_systematics_width use ln. The AGN term scales with the variable AGN contribution.
-   * - ``spectroscopy_likelihood_weight``
-     - dimensionless
-     - Resolution-dependent spectroscopy log-likelihood weight.
    * - ``spectroscopy_loglike``
      - log probability
      - Spectroscopic log-likelihood contribution.
@@ -674,7 +668,10 @@ parameter names depend on the supplied prior mapping. ``fsps_weights`` are
 template amplitudes and ``fsps_weights_frac`` their normalized fractions.
 ``host_aperture_scale`` is a dimensionless host multiplier and
 ``log_host_aperture_scale`` its natural logarithm;
-``gal_sigma_effective_kms`` includes effective host broadening.
+``gal_sigma_effective_kms`` is the kernel applied to the SSP templates: the
+dispersion and instrument combined in quadrature, minus the template resolution
+(``prior_config["ssp_template_fwhm_angstrom"]``, 2.5 Å by default) when
+``apply_instrumental_resolution`` is on.
 
 Standalone ``line_amp_per_component`` uses the f_lambda unit above;
 ``line_mu_per_component`` is ln(rest wavelength / Å), and
@@ -685,12 +682,11 @@ follow the same ``line_*`` families as above without the ``spectral_`` prefix.
 ``delta_m_psf`` is a magnitude offset, ``scale_psf`` its flux scale,
 ``eta_psf`` a host fraction, and their ``*_raw`` sites are latent coordinates.
 ``sigma_phot_extra`` is extra photometric scatter in mag in the backend's magnitude
-likelihood. ``spectral_likelihood_weight`` is dimensionless.
+likelihood.
 ``log_lambda_Llambda_<wavelength>_agn`` is log10(lambda L_lambda / erg s^-1)
 at the named rest wavelength. Physical-host fits can also expose
-``sfh_age_gyr``, ``sfh_tau_gyr``, ``formed_stellar_mass``,
-``surviving_mass_fraction``, and ``mass_metallicity_relation_logprior``
-with the host units defined above.
+``sfh_age_gyr``, ``sfh_tau_gyr``, ``formed_stellar_mass``, and
+``surviving_mass_fraction`` with the host units defined above.
 
 For scientific use, retain the fit configuration with the samples: it records
 which components, metallicity convention, template normalizations, line ties,

@@ -206,7 +206,8 @@ def test_attenuation_uncertainty_uses_dimensionless_band_flux_ratio(monkeypatch)
 
 def test_native_agn_lines_use_distinct_broad_and_narrow_widths(monkeypatch):
     _patch_ssp(monkeypatch)
-    cfg = _cfg(fit_host=False, n_wave=4096, rest_wave_max=1000.0)
+    # Grid must cover the 1500-2500 A test filter; n_wave keeps ~4096 points per decade.
+    cfg = _cfg(fit_host=False, n_wave=5800, rest_wave_max=2500.0)
     cfg.nebular.enabled = False
     cfg.agn.fit_balmer_continuum = False
     context = build_model_context(cfg)
@@ -731,23 +732,31 @@ def test_agn_disk_defaults_match_grahsp_support(monkeypatch):
     tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "fcov": np.array(0.2), "si": np.array(0.0)})
 
     assert "uv_slope_gt_pl_slope" not in tr
-    assert "uv_slope_delta" not in tr
+    assert _site(tr, "uv_slope") == 0.0
+    assert tr["uv_slope"]["type"] == "deterministic"
     assert _site(tr, "pl_cutoff") == GRAHSP_PL_CUTOFF_A
 
     slope_prior = tr["pl_slope"]["fn"]
-    uv_slope_prior = tr["uv_slope"]["fn"]
     bend_loc_prior = tr["pl_bend_loc"]["fn"]
     bend_width_prior = tr["pl_bend_width"]["fn"]
     assert np.isclose(slope_prior.low, -2.7)
     assert np.isclose(slope_prior.high, -1.0)
-    assert np.isclose(uv_slope_prior.base_dist.loc, -0.6)
-    assert np.isclose(uv_slope_prior.base_dist.scale, 0.4)
-    assert np.isclose(uv_slope_prior.low, -1.5)
-    assert np.isclose(uv_slope_prior.high, 0.3)
     assert np.isclose(bend_loc_prior.low, 500.0)
     assert np.isclose(bend_loc_prior.high, 1500.0)
     assert np.isclose(bend_width_prior.low, 0.1)
     assert np.isclose(bend_width_prior.high, 10.0)
+
+
+def test_uv_slope_is_sampled_only_when_a_prior_is_supplied(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(fit_host=False)
+    cfg.prior_config.agn.uv_slope = dist.TruncatedNormal(-0.6, 0.4, low=-1.5, high=0.3)
+    context = build_model_context(cfg)
+    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "fcov": np.array(0.2), "si": np.array(0.0)})
+
+    assert tr["uv_slope"]["type"] == "sample"
+    assert np.isclose(tr["uv_slope"]["fn"].low, -1.5)
+    assert np.isclose(tr["uv_slope"]["fn"].high, 0.3)
 
 
 def test_host_kinematics_default_off_skips_broadening_call(monkeypatch):

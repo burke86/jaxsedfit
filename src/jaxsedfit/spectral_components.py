@@ -11,6 +11,7 @@ import numpyro.distributions as dist
 
 from .spectral_defaults import _build_default_prior_config
 from .spectral_model import (
+    C_KMS,
     _balmer_continuum_jax,
     _line_meta_array,
     _line_meta_broad_mask,
@@ -334,12 +335,90 @@ def build_joint_tied_line_meta(config: SpectralComponentConfig | None = None):
     return tied_line_meta if int(tied_line_meta["n_lines"]) > 0 else None
 
 
+def _instrumental_sigma_pixels(instrumental_sigma_ln, wave_obs):
+    """Return per-pixel instrumental sigma in ln(wavelength), or None when absent.
+
+    Parameters
+    ----------
+    instrumental_sigma_ln : object
+        Scalar or per-pixel Gaussian instrumental sigma in ln(wavelength); must be
+        static (known before sampling), e.g. derived from the spectrum's resolving power.
+    wave_obs : object
+        Observed-frame wavelength grid the sigma applies to.
+    """
+    if instrumental_sigma_ln is None:
+        return None
+    sigma = np.broadcast_to(np.asarray(instrumental_sigma_ln, dtype=float), np.shape(wave_obs))
+    sigma = np.where(np.isfinite(sigma) & (sigma > 0.0), sigma, 0.0)
+    return sigma if np.any(sigma > 0.0) else None
+
+
+def _split_instrument_broadened_gauss_lnlam(lnwave, amps, mus, sigs, broad_mask, sigma_inst_ln):
+    """Evaluate ln-wavelength Gaussians convolved with a per-pixel instrumental Gaussian.
+
+    Amplitudes are rescaled so each line's integrated flux is unchanged; ``amps`` and
+    ``sigs`` stay the intrinsic values.
+
+    Parameters
+    ----------
+    lnwave : object
+        ln(rest wavelength) of each pixel.
+    amps, mus, sigs : object
+        Intrinsic per-component amplitudes, ln-centers, and ln-sigmas.
+    broad_mask : object
+        1 for broad components, 0 for narrow.
+    sigma_inst_ln : object
+        Per-pixel instrumental sigma in ln(wavelength).
+    """
+    sigma_inst = jnp.asarray(sigma_inst_ln, dtype=jnp.float64)[:, None]
+    effective_sigs = jnp.sqrt(jnp.square(sigs[None, :]) + jnp.square(sigma_inst))
+    effective_amps = (
+        amps[None, :]
+        * sigs[None, :]
+        / jnp.maximum(effective_sigs, 1.0e-30)
+        * jnp.exp(0.5 * (jnp.square(sigs[None, :]) - jnp.square(effective_sigs)))
+    )
+    profiles = effective_amps * jnp.exp(-0.5 * jnp.square((lnwave[:, None] - mus[None, :]) / effective_sigs))
+    total = jnp.sum(profiles, axis=1)
+    broad = jnp.sum(profiles * broad_mask[None, :], axis=1)
+    return total, broad, total - broad
+
+
+def _add_in_quadrature(width, instrumental_width: float):
+    """Combine an intrinsic and a static instrumental width; exact when the latter is zero."""
+    if instrumental_width == 0.0:
+        return width
+    return jnp.sqrt(jnp.square(width) + instrumental_width**2)
+
+
+def _broaden_per_instrument(evaluate, sigma_inst_ln, like):
+    """Evaluate a broadened template once per distinct instrumental sigma and merge.
+
+    Parameters
+    ----------
+    evaluate : callable
+        ``evaluate(sigma_inst_ln)`` returning the component on every pixel for one
+        scalar instrumental sigma in ln(wavelength).
+    sigma_inst_ln : object
+        Static per-pixel instrumental sigma, or None.
+    like : object
+        Array whose shape the result takes.
+    """
+    if sigma_inst_ln is None:
+        return evaluate(0.0)
+    model = jnp.zeros_like(like)
+    for value in np.unique(sigma_inst_ln):
+        model = jnp.where(jnp.asarray(sigma_inst_ln == value), evaluate(float(value)), model)
+    return model
+
+
 def _evaluate_tied_line_components(
     wave_rest,
     cfg: SpectralComponentConfig,
     *,
     site_prefix: str,
     feature_amplitude_scale=1.0,
+    instrumental_sigma_ln=None,
 ):
     """Evaluate the grouped tied-line model on a rest-frame grid.
 
@@ -399,13 +478,18 @@ def _evaluate_tied_line_components(
         jnp.asarray(float(cfg.narrow_fwhm_kms_default), dtype=jnp.float64),
     )
     lnwave = jnp.log(wave_rest)
-    total, broad, narrow, _ = _split_many_gauss_lnlam(
-        lnwave,
-        amps,
-        mus,
-        sigs,
-        broad_mask,
-    )
+    if instrumental_sigma_ln is None:
+        total, broad, narrow, _ = _split_many_gauss_lnlam(
+            lnwave,
+            amps,
+            mus,
+            sigs,
+            broad_mask,
+        )
+    else:
+        total, broad, narrow = _split_instrument_broadened_gauss_lnlam(
+            lnwave, amps, mus, sigs, broad_mask, instrumental_sigma_ln
+        )
     diagnostics = {
         "line_amp_per_component": amps,
         "line_mu_per_component": mus,
@@ -424,6 +508,7 @@ def _evaluate_simple_line_components(
     *,
     site_prefix: str,
     feature_amplitude_scale=1.0,
+    instrumental_sigma_ln=None,
 ):
     """Backward-compatible explicit Gaussian line list.
 
@@ -450,6 +535,7 @@ def _evaluate_simple_line_components(
         1.0e-12,
     )
     cont_scale = jnp.maximum(jnp.nanmedian(jnp.abs(continuum_model)) * amplitude_scale, 1.0e-8)
+    amps, mus, sigs, broad_flags = [], [], [], []
     for name, center in zip(line_names, cfg.line_centers_rest):
         is_broad = str(name) in broad_names
         default_fwhm = cfg.broad_fwhm_kms_default if is_broad else cfg.narrow_fwhm_kms_default
@@ -472,11 +558,29 @@ def _evaluate_simple_line_components(
         )
         center_shifted = jnp.asarray(float(center), dtype=jnp.float64) * (1.0 + velocity / 299792.458)
         sigma = jnp.maximum(center_shifted * fwhm / 299792.458 / 2.354820045, 1.0e-6)
-        component = amp * jnp.exp(-0.5 * jnp.square((wave_rest - center_shifted) / sigma))
+        if instrumental_sigma_ln is None:
+            component = amp * jnp.exp(-0.5 * jnp.square((wave_rest - center_shifted) / sigma))
+        else:
+            # Convolve with the instrument; amp * sigma (the line flux) is conserved.
+            sigma_eff = jnp.sqrt(
+                jnp.square(sigma) + jnp.square(center_shifted * jnp.asarray(instrumental_sigma_ln))
+            )
+            component = amp * sigma / sigma_eff * jnp.exp(
+                -0.5 * jnp.square((wave_rest - center_shifted) / sigma_eff)
+            )
         line_model = line_model + component
         broad_model = broad_model + jnp.where(is_broad, component, 0.0)
         narrow_model = narrow_model + jnp.where(is_broad, 0.0, component)
+        # ln-lambda equivalent of this Gaussian, so photometric line projection sees it.
+        amps.append(amp)
+        mus.append(jnp.log(center_shifted))
+        sigs.append(jnp.maximum(fwhm / 299792.458 / 2.354820045, 1.0e-12))
+        broad_flags.append(1.0 if is_broad else 0.0)
     return line_model, broad_model, narrow_model, {
+        "line_amp_per_component": jnp.stack(amps),
+        "line_mu_per_component": jnp.stack(mus),
+        "line_sig_per_component": jnp.stack(sigs),
+        "line_broad_mask_per_component": jnp.asarray(broad_flags, dtype=jnp.float64),
         "line_narrow_fwhm_kms": (
             jnp.maximum(jnp.asarray(cfg.fixed_narrow_fwhm_kms, dtype=jnp.float64), 1.0)
             if cfg.fixed_narrow_fwhm_kms is not None
@@ -615,6 +719,7 @@ def evaluate_joint_spectral_components(
     feii_template_flux=None,
     site_prefix: str = "spectral",
     feature_amplitude_scale=1.0,
+    instrumental_sigma_ln=None,
     bal_continuum_mjy=None,
 ):
     """Evaluate shared spectral components around an external continuum.
@@ -628,6 +733,12 @@ def evaluate_joint_spectral_components(
     continuum_mjy
         External continuum prediction on ``wave_obs`` in mJy. In a joint
         grahspj fit this is the shared AGN+host continuum.
+    instrumental_sigma_ln
+        Optional static Gaussian instrumental sigma in ln(wavelength), scalar or
+        per pixel of ``wave_obs`` (``1 / (2.3548 R)``). Lines, Fe II, and Balmer
+        continuum are convolved with it on this grid only; sampled widths and
+        the returned per-component line state stay intrinsic. Zero or None
+        leaves the model unconvolved.
     feature_amplitude_scale
         Multiplicative calibration of the reference observed spectrum. Line,
         Fe II, and Balmer amplitudes are sampled in that observed coordinate
@@ -656,6 +767,7 @@ def evaluate_joint_spectral_components(
     continuum_mjy = jnp.asarray(continuum_mjy, dtype=jnp.float64)
     redshift = jnp.maximum(jnp.asarray(redshift, dtype=jnp.float64), 0.0)
     wave_rest = wave_obs / jnp.maximum(1.0 + redshift, 1.0e-8)
+    sigma_inst_ln = _instrumental_sigma_pixels(instrumental_sigma_ln, wave_obs)
     feature_amplitude_scale = jnp.maximum(
         jnp.asarray(feature_amplitude_scale, dtype=jnp.float64),
         1.0e-12,
@@ -684,6 +796,7 @@ def evaluate_joint_spectral_components(
                 cfg,
                 site_prefix=site_prefix,
                 feature_amplitude_scale=feature_amplitude_scale,
+                instrumental_sigma_ln=sigma_inst_ln,
             )
         else:
             line_model, line_broad_model, line_narrow_model, line_diagnostics = _evaluate_simple_line_components(
@@ -692,6 +805,7 @@ def evaluate_joint_spectral_components(
                 cfg,
                 site_prefix=site_prefix,
                 feature_amplitude_scale=feature_amplitude_scale,
+                instrumental_sigma_ln=sigma_inst_ln,
             )
 
     feii_model = jnp.zeros_like(wave_obs)
@@ -709,14 +823,19 @@ def evaluate_joint_spectral_components(
             f"{site_prefix}_feii_shift",
             dist.Normal(0.0, 0.01),
         )
-        feii_flambda_shape = _fe_template_component(
+        # Fe II widths are FWHM; add the instrumental FWHM in quadrature.
+        feii_flambda_shape = _broaden_per_instrument(
+            lambda sigma_inst: _fe_template_component(
+                wave_rest,
+                jnp.asarray(feii_template_wave_rest, dtype=jnp.float64),
+                jnp.asarray(feii_template_flux, dtype=jnp.float64),
+                feii_norm,
+                _add_in_quadrature(feii_fwhm, 2.354820045 * C_KMS * sigma_inst),
+                feii_shift,
+                convolution_method=cfg.broadening_convolution,
+            ),
+            sigma_inst_ln,
             wave_rest,
-            jnp.asarray(feii_template_wave_rest, dtype=jnp.float64),
-            jnp.asarray(feii_template_flux, dtype=jnp.float64),
-            feii_norm,
-            feii_fwhm,
-            feii_shift,
-            convolution_method=cfg.broadening_convolution,
         )
         feii_model = _flambda_shape_to_fnu_mjy_shape(
             wave_rest,
@@ -739,13 +858,18 @@ def evaluate_joint_spectral_components(
             f"{site_prefix}_balmer_vel",
             dist.LogNormal(jnp.log(max(cfg.balmer_velocity_kms_default, 1.0)), 0.4),
         )
-        balmer_flambda_shape = _balmer_continuum_jax(
+        # Balmer broadening is a velocity sigma; add the instrumental sigma in quadrature.
+        balmer_flambda_shape = _broaden_per_instrument(
+            lambda sigma_inst: _balmer_continuum_jax(
+                wave_rest,
+                balmer_norm,
+                15000.0,
+                balmer_tau,
+                _add_in_quadrature(balmer_vel, C_KMS * sigma_inst),
+                convolution_method=cfg.broadening_convolution,
+            ),
+            sigma_inst_ln,
             wave_rest,
-            balmer_norm,
-            15000.0,
-            balmer_tau,
-            balmer_vel,
-            convolution_method=cfg.broadening_convolution,
         )
         balmer_model = _flambda_shape_to_fnu_mjy_shape(
             wave_rest,

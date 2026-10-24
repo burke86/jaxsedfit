@@ -17,9 +17,7 @@ from __future__ import annotations
 # Upstream license: CeCILL v2. See LICENSES/CeCILL-v2.txt and
 # LICENSES/THIRD_PARTY_NOTICES.md.
 
-import copy
 from dataclasses import replace
-from functools import lru_cache
 from typing import Any
 
 import jax
@@ -97,37 +95,8 @@ def _bool_to_jnp(x):
     return jnp.asarray(np.asarray(x, dtype=bool))
 
 
-@lru_cache(maxsize=16)
-def _get_jax_cosmo_backend(h0: float, om0: float):
-    """Return cached jax_cosmo helpers for a flat LCDM luminosity distance.
-
-    Parameters
-    ----------
-    h0 : object
-        h0 value.
-    om0 : object
-        om0 value.
-    """
-    import jax_cosmo.background as bg
-    from jax_cosmo.core import Cosmology
-
-    omega_b = min(0.05, max(float(om0) - 1.0e-6, 1.0e-6))
-    omega_c = max(float(om0) - omega_b, 1.0e-6)
-    cosmo = Cosmology(
-        Omega_c=omega_c,
-        Omega_b=omega_b,
-        h=float(h0) / 100.0,
-        n_s=0.96,
-        sigma8=0.8,
-        Omega_k=0.0,
-        w0=-1.0,
-        wa=0.0,
-    )
-    return bg, cosmo
-
-
 def _flat_lcdm_luminosity_distance_m_jax(redshift, h0: float, om0: float):
-    """Fallback flat-LCDM luminosity distance when jax_cosmo is unavailable.
+    """Flat-LCDM luminosity distance by trapezoid integration (matches astropy to ~1e-5).
 
     Parameters
     ----------
@@ -163,24 +132,11 @@ def _luminosity_distance_m_jax(redshift, h0: float, om0: float):
     om0 : object
         om0 value.
     """
+    # jax_cosmo is not used here: its tabulated background is biased by ~2% at z~0.001
+    # and disagrees with the astropy distances used by the fixed-redshift caches.
     redshift = jnp.asarray(redshift, dtype=jnp.float64)
     scalar_input = redshift.ndim == 0
-    try:
-        bg, cosmo = _get_jax_cosmo_backend(float(h0), float(om0))
-        # jax_cosmo memoizes its comoving-distance table in cosmo._workspace. Use a copy with
-        # an empty workspace so a table computed inside one jit trace (a tracer) is never
-        # stored on the cached Cosmology and reused by a later, separate trace.
-        cosmo = copy.copy(cosmo)
-        cosmo._workspace = {}
-    except ModuleNotFoundError as exc:
-        if exc.name != "pkg_resources":
-            raise
-        d_l_m = _flat_lcdm_luminosity_distance_m_jax(redshift, h0, om0)
-    else:
-        a = 1.0 / (1.0 + jnp.maximum(redshift, 0.0))
-        d_a_mpc_over_h = bg.angular_diameter_distance(cosmo, a)
-        d_l_mpc_over_h = d_a_mpc_over_h / jnp.maximum(a * a, 1.0e-30)
-        d_l_m = d_l_mpc_over_h / cosmo.h * MPC_TO_M
+    d_l_m = _flat_lcdm_luminosity_distance_m_jax(redshift, h0, om0)
     return jnp.reshape(d_l_m, ()) if scalar_input else d_l_m
 
 
@@ -631,34 +587,6 @@ def _default_gal_lgmet_loc(
     return jnp.clip(loc, jnp.nanmin(ssp_lgmet), jnp.nanmax(ssp_lgmet))
 
 
-def _cfg_lgmet_value(
-    cfg: dict[str, Any],
-    solar_relative_key: str,
-    default_logzsol: float,
-    solar_offset,
-    *,
-    absolute_key: str | None = None,
-):
-    """Read metallicity config values and convert log(Z/Zsun) defaults to log10(Z).
-
-    Parameters
-    ----------
-    cfg : object
-        cfg value.
-    solar_relative_key : object
-        solar_relative_key value.
-    default_logzsol : object
-        default_logzsol value.
-    solar_offset : object
-        solar_offset value.
-    absolute_key : object
-        absolute_key value.
-    """
-    if absolute_key is not None and absolute_key in cfg:
-        return jnp.asarray(cfg[absolute_key], dtype=jnp.float64)
-    return jnp.asarray(cfg.get(solar_relative_key, default_logzsol), dtype=jnp.float64) + solar_offset
-
-
 def _cigale_delayed_sfh_shape(elapsed_gyr, tau_gyr, age_gyr):
     """Return the no-burst CIGALE v2025.1 delayed-tau SFH shape.
 
@@ -892,82 +820,6 @@ def _cigale_delayed_burst_sfh_shape(
         / jnp.maximum(burst_integral, 1.0e-30)
     )
     return main + burst_scale * burst
-
-
-def _mass_metallicity_relation_logprior(
-    log_stellar_mass,
-    gal_lgmet,
-    prior_config: dict[str, Any],
-    *,
-    ssp_lgmet=None,
-    redshift: float = 0.0,
-    metallicity_coordinate: str = "absolute_log10_z",
-    solar_metallicity: float = DSPS_SOLAR_METALLICITY,
-):
-    """Return an optional soft stellar mass-metallicity log-prior.
-
-    The ``prior_config["mass_metallicity_relation"]`` mapping defines a broad,
-    heuristic Gaussian prior on the host metallicity sampled by the stellar
-    population model. By default the metallicity keys are solar-relative
-    ``log10(Z/Zsun)`` values and are converted into the active SSP grid
-    convention before evaluating the prior. For example, ``pivot_logzsol=-0.15``
-    means 0.15 dex below solar regardless of whether the SSP grid stores
-    absolute ``log10(Z)`` or relative ``log10(Z/Zsun)`` metallicities.
-
-    Supported keys are:
-
-    - ``enabled``: set ``False`` to disable the prior.
-    - ``pivot_mass``: stellar-mass pivot in ``log10(M*/Msun)``.
-    - ``pivot_logzsol``: solar-relative metallicity at ``pivot_mass``.
-    - ``pivot_lgmet``: absolute value in the SSP grid convention, overriding
-      ``pivot_logzsol``.
-    - ``slope``: metallicity slope per dex in stellar mass.
-    - ``scale``: Gaussian prior width in dex.
-    - ``redshift_ref`` and ``redshift_slope``: optional linear redshift trend.
-    - ``min`` and ``max``: solar-relative lower and upper bounds for the prior
-      location, clipped to the SSP grid range.
-    - ``min_lgmet`` and ``max_lgmet``: bounds in the SSP grid convention,
-      overriding ``min`` and ``max``.
-
-    Parameters
-    ----------
-    log_stellar_mass : object
-        log_stellar_mass value.
-    gal_lgmet : object
-        gal_lgmet value.
-    prior_config : object
-        prior_config value.
-    ssp_lgmet : object
-        ssp_lgmet value.
-    redshift : object
-        redshift value.
-    """
-    cfg = prior_config.get("mass_metallicity_relation", None)
-    if not isinstance(cfg, dict) or cfg.get("enabled", False) is not True:
-        return jnp.asarray(0.0, dtype=jnp.float64)
-
-    solar_offset = (
-        _ssp_lgmet_solar_offset(ssp_lgmet, metallicity_coordinate, solar_metallicity)
-        if ssp_lgmet is not None
-        else jnp.asarray(0.0, dtype=jnp.float64)
-    )
-    pivot_mass = jnp.asarray(cfg.get("pivot_mass", 10.0), dtype=jnp.float64)
-    pivot_lgmet = _cfg_lgmet_value(cfg, "pivot_logzsol", -0.15, solar_offset, absolute_key="pivot_lgmet")
-    slope = jnp.asarray(cfg.get("slope", 0.35), dtype=jnp.float64)
-    scale = jnp.maximum(jnp.asarray(cfg.get("scale", 0.25), dtype=jnp.float64), 1.0e-6)
-    redshift_ref = jnp.asarray(cfg.get("redshift_ref", 0.0), dtype=jnp.float64)
-    redshift_slope = jnp.asarray(cfg.get("redshift_slope", -0.15), dtype=jnp.float64)
-    min_loc = _cfg_lgmet_value(cfg, "min", -1.5, solar_offset, absolute_key="min_lgmet")
-    max_loc = _cfg_lgmet_value(cfg, "max", 0.3, solar_offset, absolute_key="max_lgmet")
-    if ssp_lgmet is not None:
-        ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
-        min_loc = jnp.maximum(min_loc, jnp.nanmin(ssp_lgmet))
-        max_loc = jnp.minimum(max_loc, jnp.nanmax(ssp_lgmet))
-
-    loc = pivot_lgmet + slope * (jnp.asarray(log_stellar_mass, dtype=jnp.float64) - pivot_mass)
-    loc = loc + redshift_slope * (jnp.asarray(redshift, dtype=jnp.float64) - redshift_ref)
-    loc = jnp.clip(loc, jnp.minimum(min_loc, max_loc), jnp.maximum(min_loc, max_loc))
-    return dist.Normal(loc, scale).log_prob(jnp.asarray(gal_lgmet, dtype=jnp.float64))
 
 
 def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=256):
@@ -2119,16 +1971,6 @@ def _build_diffstar_host(
         prior_config,
         shared_gal_lgmet,
     )
-    mmr_logprior = _mass_metallicity_relation_logprior(
-        log_stellar_mass,
-        gal_lgmet,
-        prior_config,
-        ssp_lgmet=ssp_lgmet,
-        redshift=redshift,
-        metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
-        solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
-    )
-    numpyro.factor("mass_metallicity_relation_prior", mmr_logprior)
     age_weights, _ = _diffstar_ssp_age_weights(
         bounded,
         ssp_lg_age_gyr,
@@ -2160,7 +2002,6 @@ def _build_diffstar_host(
         "sfh_scale": sfh_scale,
         "gal_lgmet": gal_lgmet,
         "gal_lgmet_scatter": gal_lgmet_scatter,
-        "mass_metallicity_relation_logprior": mmr_logprior,
         "host_age_weights": age_weights,
         "host_lgmet_weights": lgmet_weights,
         "host_ssp_weights": host_weights,
@@ -2356,16 +2197,6 @@ def _build_delayed_host(
         prior_config,
         shared_gal_lgmet,
     )
-    mmr_logprior = _mass_metallicity_relation_logprior(
-        log_stellar_mass,
-        gal_lgmet,
-        prior_config,
-        ssp_lgmet=ssp_lgmet,
-        redshift=redshift,
-        metallicity_coordinate=cfg.ssp_metallicity_coordinate,
-        solar_metallicity=cfg.ssp_solar_metallicity,
-    )
-    numpyro.factor("mass_metallicity_relation_prior", mmr_logprior)
     if use_burst:
         age_weights = _analytic_delayed_burst_age_weights(
             age_gyr,
@@ -2399,7 +2230,6 @@ def _build_delayed_host(
         "sfh_scale": sfh_scale,
         "gal_lgmet": gal_lgmet,
         "gal_lgmet_scatter": gal_lgmet_scatter,
-        "mass_metallicity_relation_logprior": mmr_logprior,
         "host_age_weights": age_weights,
         "host_lgmet_weights": lgmet_weights,
         "host_ssp_weights": host_weights,
@@ -2513,7 +2343,6 @@ def _empty_host_state(context: ModelContext):
         "sfh_scale": jnp.asarray(0.0, dtype=jnp.float64),
         "gal_lgmet": jnp.asarray(0.0, dtype=jnp.float64),
         "gal_lgmet_scatter": jnp.asarray(0.0, dtype=jnp.float64),
-        "mass_metallicity_relation_logprior": jnp.asarray(0.0, dtype=jnp.float64),
         "sfh_age_gyr": jnp.asarray(0.0, dtype=jnp.float64),
         "sfh_tau_gyr": jnp.asarray(0.0, dtype=jnp.float64),
         "gal_sfr_table": jnp.zeros_like(gal_t_table),
@@ -3127,54 +2956,6 @@ def spectroscopic_loglike(
     }
 
 
-def spectroscopic_likelihood_weight(wave_obs, mask, spectrum_index, likelihood_weight_mode, resolving_power):
-    """Return a scalar spectral likelihood weight.
-
-    Parameters
-    ----------
-    wave_obs : object
-        wave_obs value.
-    mask : object
-        mask value.
-    spectrum_index : object
-        spectrum_index value.
-    likelihood_weight_mode : object
-        likelihood_weight_mode value.
-    resolving_power : object
-        resolving_power value.
-    """
-    if str(likelihood_weight_mode).lower() not in {"resolution_elements", "resolution"}:
-        return jnp.asarray(1.0, dtype=jnp.float64)
-    resolving_power = np.asarray(resolving_power, dtype=float)
-    if resolving_power.size == 0 or not np.any(np.isfinite(resolving_power) & (resolving_power > 0.0)):
-        return jnp.asarray(1.0, dtype=jnp.float64)
-    wave_obs = jnp.asarray(wave_obs, dtype=jnp.float64)
-    mask = jnp.asarray(mask, dtype=bool)
-    spectrum_index = jnp.asarray(spectrum_index, dtype=jnp.int32)
-    if wave_obs.size < 2:
-        return jnp.asarray(1.0, dtype=jnp.float64)
-
-    prev_delta = jnp.zeros_like(wave_obs)
-    next_delta = jnp.zeros_like(wave_obs)
-    same_adjacent = spectrum_index[1:] == spectrum_index[:-1]
-    delta = jnp.abs(wave_obs[1:] - wave_obs[:-1])
-    prev_delta = prev_delta.at[1:].set(jnp.where(same_adjacent, delta, 0.0))
-    next_delta = next_delta.at[:-1].set(jnp.where(same_adjacent, delta, 0.0))
-    pixel_width = 0.5 * (prev_delta + next_delta)
-    valid = mask & jnp.isfinite(wave_obs) & (wave_obs > 0.0) & (pixel_width > 0.0)
-    resolving_power = jnp.asarray(resolving_power, dtype=jnp.float64)
-    if resolving_power.ndim == 0:
-        resolving_power_at_pixel = jnp.full_like(wave_obs, resolving_power)
-    else:
-        safe_index = jnp.clip(spectrum_index, 0, max(int(resolving_power.shape[0]) - 1, 0))
-        resolving_power_at_pixel = resolving_power[safe_index]
-    valid = valid & jnp.isfinite(resolving_power_at_pixel) & (resolving_power_at_pixel > 0.0)
-    resolution_width = wave_obs / jnp.maximum(resolving_power_at_pixel, 1.0e-30)
-    n_eff = jnp.sum(jnp.where(valid, pixel_width / jnp.maximum(resolution_width, 1.0e-30), 0.0))
-    n_pix = jnp.sum(valid.astype(jnp.float64))
-    return jnp.where(n_pix > 0.0, jnp.minimum(n_eff / n_pix, 1.0), jnp.asarray(1.0, dtype=jnp.float64))
-
-
 def _spectrum_continuum_log_pivot(
     continuum_fluxes,
     observed_fluxes,
@@ -3308,6 +3089,54 @@ def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave,
     return 1.0 - covered_weight
 
 
+def _spectral_instrumental_sigma_ln(context):
+    """Return each spectral pixel's instrumental sigma in ln(wavelength), or None.
+
+    Built from the per-spectrum ``SpectroscopyData.resolving_power``; pixels of
+    spectra without a resolving power get zero (no convolution).
+    """
+    resolving_power = np.asarray(context.spec_resolving_power, dtype=float)
+    spectrum_index = np.asarray(context.spec_spectrum_index, dtype=int)
+    if resolving_power.size == 0 or spectrum_index.size == 0:
+        return None
+    pixel_r = resolving_power[np.clip(spectrum_index, 0, resolving_power.size - 1)]
+    valid = np.isfinite(pixel_r) & (pixel_r > 0.0)
+    if not np.any(valid):
+        return None
+    return np.where(valid, 1.0 / (2.354820045 * np.where(valid, pixel_r, 1.0)), 0.0)
+
+
+def _broaden_spectral_host(context, spec_rest_wave, spec_host_intrinsic, gal_v_kms, gal_sigma_kms):
+    """Apply stellar kinematics, instrument, and SSP template resolution to the spectral host.
+
+    Each spectrum with a resolving power gets its own kernel from
+    ``host_kernel_sigma_kms``; spectra without one keep the fitted dispersion as an
+    effective broadening. ``gal_sigma_kms`` itself stays the intrinsic dispersion.
+    """
+    from .spectral_model import host_kernel_sigma_kms
+
+    lnwave = jnp.log(spec_rest_wave)
+    sigma_inst_ln = _spectral_instrumental_sigma_ln(context)
+    if sigma_inst_ln is None:
+        return _shift_and_broaden_single_spectrum_lnlam(lnwave, spec_host_intrinsic, gal_v_kms, gal_sigma_kms)
+    template_fwhm = context.fit_config.galaxy.ssp_template_fwhm_angstrom
+    spectrum_index = np.asarray(context.spec_spectrum_index, dtype=int)
+    rest_wave_np = np.asarray(spec_rest_wave, dtype=float)
+    broadened = jnp.zeros_like(spec_host_intrinsic)
+    for index in np.unique(spectrum_index):
+        pixels = spectrum_index == index
+        sigma_inst_kms = C_KMS * float(sigma_inst_ln[pixels][0])
+        kernel_sigma = host_kernel_sigma_kms(
+            gal_sigma_kms, sigma_inst_kms, template_fwhm, float(np.median(rest_wave_np[pixels]))
+        )
+        broadened = jnp.where(
+            jnp.asarray(pixels),
+            _shift_and_broaden_single_spectrum_lnlam(lnwave, spec_host_intrinsic, gal_v_kms, kernel_sigma),
+            broadened,
+        )
+    return broadened
+
+
 def _evaluate_spectral_components(
     wave_obs,
     redshift,
@@ -3321,6 +3150,7 @@ def _evaluate_spectral_components(
     fixed_narrow_amp_scale=None,
     feature_amplitude_scale=1.0,
     include_lines=True,
+    instrumental_sigma_ln=None,
     bal_continuum_mjy=None,
     include_bal_components=True,
 ):
@@ -3351,6 +3181,8 @@ def _evaluate_spectral_components(
     feature_amplitude_scale : object
         Calibration scale defining the observed-spectrum coordinate system for
         sampled line, Fe II, and Balmer amplitudes.
+    instrumental_sigma_ln : object
+        Optional static per-pixel instrumental sigma in ln(wavelength).
     bal_continuum_mjy : object, optional
         Compact AGN disk continuum subject to BAL absorption.
     include_bal_components : bool, optional
@@ -3412,6 +3244,7 @@ def _evaluate_spectral_components(
         feii_template_flux=feii_template_flux,
         site_prefix="spectral",
         feature_amplitude_scale=feature_amplitude_scale,
+        instrumental_sigma_ln=instrumental_sigma_ln,
         bal_continuum_mjy=bal_continuum_mjy,
     )
     result["component_config"] = component_cfg
@@ -3908,13 +3741,17 @@ def evaluate_photometric_state(
             "pl_slope",
             dist.TruncatedNormal(-1.85, 0.6, low=GRAHSP_PL_SLOPE_LOW, high=GRAHSP_PL_SLOPE_HIGH),
         )
-        # The EUV composite slope alpha_nu ~= -1.4 corresponds to
-        # beta_lambda ~= -0.6 for F_lambda proportional to lambda**beta.
-        uv_slope = _sample_prior(
-            prior_config,
-            "uv_slope",
-            dist.TruncatedNormal(-0.6, 0.4, low=-1.5, high=0.3),
-        )
+        # GRAHSP fixes the short-wavelength slope to zero. Keeping this
+        # deterministic by default also removes a weakly identified UV-shape
+        # degree of freedom from broadband-only fits: with the default bend
+        # width it also reshapes the optical/NIR continuum. Supply a
+        # ``uv_slope`` prior to fit it, e.g. TruncatedNormal(-0.6, 0.4,
+        # low=-1.5, high=0.3) for the EUV composite alpha_nu ~= -1.4.
+        if prior_config.get("uv_slope") is not None:
+            uv_slope = _sample_prior(prior_config, "uv_slope", dist.Normal(0.0, 1.0))
+        else:
+            uv_slope = jnp.asarray(0.0, dtype=jnp.float64)
+            numpyro.deterministic("uv_slope", uv_slope)
         pl_bend_loc = _sample_positive_distribution(
             prior_config,
             value_key="pl_bend_loc",
@@ -4586,7 +4423,6 @@ def evaluate_photometric_state(
     spectrum_scale = jnp.asarray(1.0, dtype=jnp.float64)
     log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
     feature_amplitude_scale = jnp.asarray(1.0, dtype=jnp.float64)
-    spec_likelihood_weight = jnp.asarray(1.0, dtype=jnp.float64)
     spec_chi2 = jnp.asarray(jnp.nan, dtype=jnp.float64)
     spec_n_eff = jnp.asarray(0.0, dtype=jnp.float64)
     spec_reduced_chi2 = jnp.asarray(jnp.nan, dtype=jnp.float64)
@@ -4646,11 +4482,8 @@ def evaluate_photometric_state(
             )
             spec_host_intrinsic = _host_rest_on_basis(host_state, context.spec_host_basis_jax)
             if host_kinematics_enabled:
-                spec_host_intrinsic = _shift_and_broaden_single_spectrum_lnlam(
-                    jnp.log(spec_rest_wave),
-                    spec_host_intrinsic,
-                    gal_v_kms,
-                    gal_sigma_kms,
+                spec_host_intrinsic = _broaden_spectral_host(
+                    context, spec_rest_wave, spec_host_intrinsic, gal_v_kms, gal_sigma_kms
                 )
             spec_host_rest = (spec_host_intrinsic + spec_nebular_absorption_rest) * spec_gal_att_factor
             spec_disk_rest = (
@@ -4787,6 +4620,7 @@ def evaluate_photometric_state(
                 line_coverage_rest=spectral_line_coverage_rest,
                 feature_amplitude_scale=feature_amplitude_scale,
                 include_lines=include_spectral_lines,
+                instrumental_sigma_ln=_spectral_instrumental_sigma_ln(context),
                 bal_continuum_mjy=spec_disk_model_fluxes,
                 include_bal_components=include_spectral_bal,
             )
@@ -5013,21 +4847,13 @@ def evaluate_photometric_state(
             cfg.likelihood.spectrum_student_t_df,
             return_diagnostics=True,
         )
-        spec_likelihood_weight = spectroscopic_likelihood_weight(
-            spec_wave_obs,
-            spec_mask,
-            spec_spectrum_index,
-            cfg.likelihood.spectrum_weight_mode,
-            context.spec_resolving_power,
-        )
-        spec_chi2 = spec_likelihood_weight * spec_chi2_diagnostics["chi2"]
-        spec_n_eff = spec_likelihood_weight * spec_chi2_diagnostics["n_eff"]
+        spec_chi2 = spec_chi2_diagnostics["chi2"]
+        spec_n_eff = spec_chi2_diagnostics["n_eff"]
         spec_reduced_chi2 = jnp.where(
             spec_n_eff > 0.0,
             spec_chi2 / jnp.maximum(spec_n_eff, 1.0e-30),
             jnp.asarray(jnp.nan, dtype=jnp.float64),
         )
-        spec_logl = spec_likelihood_weight * spec_logl
         if add_likelihood:
             numpyro.factor("spectroscopy_loglike_factor", spec_logl)
     else:
@@ -5349,7 +5175,6 @@ def evaluate_photometric_state(
     numpyro.deterministic("log_spectrum_scale_fit", log_spectrum_scale)
     numpyro.deterministic("spectral_feature_amplitude_scale", feature_amplitude_scale)
     numpyro.deterministic("spectrum_host_capture_fraction", spec_host_capture_fraction_by_spectrum)
-    numpyro.deterministic("spectroscopy_likelihood_weight", spec_likelihood_weight)
     numpyro.deterministic("spectroscopy_loglike", spec_logl)
     numpyro.deterministic("sed_chi2", sed_chi2)
     numpyro.deterministic("sed_n_eff", sed_n_eff)
@@ -5380,7 +5205,6 @@ def evaluate_photometric_state(
     numpyro.deterministic("surviving_mass_fraction", host_state["surviving_mass_fraction"])
     numpyro.deterministic("gal_lgmet_fit", host_state["gal_lgmet"])
     numpyro.deterministic("gal_lgmet_scatter_fit", host_state["gal_lgmet_scatter"])
-    numpyro.deterministic("mass_metallicity_relation_logprior", host_state["mass_metallicity_relation_logprior"])
     numpyro.deterministic("sfh_age_gyr_fit", host_state["sfh_age_gyr"])
     numpyro.deterministic("sfh_tau_gyr_fit", host_state["sfh_tau_gyr"])
     numpyro.deterministic("log_sfr_fit", _safe_log10(host_state["current_sfr"]))
@@ -5493,7 +5317,6 @@ def evaluate_photometric_state(
         "redshift_fit": redshift,
         "photometry_loglike": logl,
         "spectroscopy_loglike": spec_logl,
-        "spectroscopy_likelihood_weight": spec_likelihood_weight,
         "sed_chi2": sed_chi2,
         "sed_n_eff": sed_n_eff,
         "sed_reduced_chi2": sed_reduced_chi2,
