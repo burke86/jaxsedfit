@@ -1964,9 +1964,15 @@ class JAXSEDFit:
         return out
 
     @staticmethod
-    def _hdf5_scalar_string_dtype():
-        """Return the UTF-8 scalar string dtype used in HDF5 bundles."""
-        return h5py.string_dtype(encoding="utf-8")
+    def _gzip_kwargs(arr) -> dict[str, Any]:
+        """Return dataset compression options: gzip + shuffle for non-scalar arrays."""
+        return {"compression": "gzip", "shuffle": True} if np.ndim(arr) > 0 else {}
+
+    @staticmethod
+    def _node_type(node, default: str) -> str:
+        """Return a node's ``node_type`` attribute as ``str``."""
+        node_type = node.attrs.get("node_type", default)
+        return node_type.decode("utf-8") if isinstance(node_type, bytes) else node_type
 
     @classmethod
     def _write_hdf5_node(cls, parent, name, value):
@@ -1995,57 +2001,38 @@ class JAXSEDFit:
                 cls._write_hdf5_node(item_grp, "value", item)
             return
 
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
+            kind = "list" if isinstance(value, list) else "tuple"
             compact = cls._compact_scalar_sequence(value)
             if compact is not None:
                 ds = parent.create_dataset(name, data=compact, compression="gzip", shuffle=True)
-                ds.attrs["node_type"] = "list_array"
+                ds.attrs["node_type"] = f"{kind}_array"
                 return
             grp = parent.create_group(name)
-            grp.attrs["node_type"] = "list"
-            for idx, item in enumerate(value):
-                cls._write_hdf5_node(grp, f"item_{idx:08d}", item)
-            return
-
-        if isinstance(value, tuple):
-            compact = cls._compact_scalar_sequence(value)
-            if compact is not None:
-                ds = parent.create_dataset(name, data=compact, compression="gzip", shuffle=True)
-                ds.attrs["node_type"] = "tuple_array"
-                return
-            grp = parent.create_group(name)
-            grp.attrs["node_type"] = "tuple"
+            grp.attrs["node_type"] = kind
             for idx, item in enumerate(value):
                 cls._write_hdf5_node(grp, f"item_{idx:08d}", item)
             return
 
         if isinstance(value, (np.ndarray, np.generic)):
             arr = np.asarray(value)
-            ds_kwargs = {}
-            if arr.ndim > 0:
-                ds_kwargs["compression"] = "gzip"
-                ds_kwargs["shuffle"] = True
-            ds = parent.create_dataset(name, data=arr, **ds_kwargs)
+            ds = parent.create_dataset(name, data=arr, **cls._gzip_kwargs(arr))
             ds.attrs["node_type"] = "ndarray"
             return
 
-        if isinstance(value, bool):
-            ds = parent.create_dataset(name, data=np.bool_(value))
-            ds.attrs["node_type"] = "scalar_bool"
-            return
-
-        if isinstance(value, int):
-            ds = parent.create_dataset(name, data=np.int64(value))
-            ds.attrs["node_type"] = "scalar_int"
-            return
-
-        if isinstance(value, float):
-            ds = parent.create_dataset(name, data=np.float64(value))
-            ds.attrs["node_type"] = "scalar_float"
-            return
+        # bool before int: bool is a subclass of int
+        for py_type, np_type, node_type in (
+            (bool, np.bool_, "scalar_bool"),
+            (int, np.int64, "scalar_int"),
+            (float, np.float64, "scalar_float"),
+        ):
+            if isinstance(value, py_type):
+                ds = parent.create_dataset(name, data=np_type(value))
+                ds.attrs["node_type"] = node_type
+                return
 
         if isinstance(value, str):
-            ds = parent.create_dataset(name, data=np.array(value, dtype=cls._hdf5_scalar_string_dtype()))
+            ds = parent.create_dataset(name, data=np.array(value, dtype=h5py.string_dtype(encoding="utf-8")))
             ds.attrs["node_type"] = "scalar_str"
             return
 
@@ -2074,9 +2061,7 @@ class JAXSEDFit:
         """
         node = parent[name]
         if isinstance(node, h5py.Dataset):
-            node_type = node.attrs.get("node_type", "ndarray")
-            if isinstance(node_type, bytes):
-                node_type = node_type.decode("utf-8")
+            node_type = cls._node_type(node, "ndarray")
             if node_type == "scalar_str":
                 return node.asstr()[()]
             value = node[()]
@@ -2092,9 +2077,7 @@ class JAXSEDFit:
                 return tuple(np.asarray(value).tolist())
             return np.asarray(value)
 
-        node_type = node.attrs.get("node_type", "")
-        if isinstance(node_type, bytes):
-            node_type = node_type.decode("utf-8")
+        node_type = cls._node_type(node, "")
         if node_type == "none":
             return None
         if node_type == "dict":
@@ -2123,11 +2106,7 @@ class JAXSEDFit:
         """
         for name, value in values.items():
             arr = np.asarray(value)
-            ds_kwargs = {}
-            if arr.ndim > 0:
-                ds_kwargs["compression"] = "gzip"
-                ds_kwargs["shuffle"] = True
-            parent.create_dataset(str(name), data=arr, **ds_kwargs)
+            parent.create_dataset(str(name), data=arr, **JAXSEDFit._gzip_kwargs(arr))
 
     @classmethod
     def _posterior_bundle_path(cls, path: str | Path | None, object_id: str) -> Path:
