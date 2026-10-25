@@ -7,7 +7,6 @@ from __future__ import annotations
 # files in src/jaxsedfit/resources/ for provenance details.
 
 import hashlib
-from importlib import resources
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -23,6 +22,7 @@ import extinction
 
 from .config import EmissionLineTemplate, FeIITemplate, FilterCurve, FitConfig, PhotometryData
 from .filters import (
+    _package_resource_path,
     filter_effective_wavelength,
     load_filter_curve,
     normalize_filter_curve,
@@ -333,17 +333,6 @@ def _array_content_key(values: Any) -> tuple[str, str] | None:
     return unit, digest.hexdigest()
 
 
-def _package_resource_path(relpath: str) -> Path:
-    """Return an absolute path to a packaged jaxsedfit resource.
-
-    Parameters
-    ----------
-    relpath : str
-        Resource path relative to the ``jaxsedfit`` package root.
-    """
-    return Path(str(resources.files("jaxsedfit").joinpath(relpath)))
-
-
 def _load_ssp_templates(dsps_ssp_fn: str):
     """Load DSPS SSP templates from the configured HDF5 file.
 
@@ -553,16 +542,10 @@ def _build_spectral_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_m
     spec_mask : numpy.ndarray
         Boolean mask of usable spectral pixels, shape (n_pix,).
     """
-    spec_cfg = cfg.agn
-    spectral_cfg = spec_cfg
+    spectral_cfg = cfg.agn
     if not bool(spectral_cfg.use_smart_line_priors):
         return None
-    try:
-        from .spectroscopy import build_spectral_prior_config
-    except Exception as exc:  # pragma: no cover - exercised only without optional dependency
-        raise ImportError(
-            "Unable to load the built-in spectral smart-prior machinery."
-        ) from exc
+    from .spectroscopy import build_spectral_prior_config
 
     flux = np.asarray(spec_fluxes, dtype=float)
     mask = np.asarray(spec_mask, dtype=bool)

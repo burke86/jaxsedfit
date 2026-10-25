@@ -278,42 +278,39 @@ def _joint_dense_mass_blocks(
         cfg = context.fit_config
         spectral_cfg = cfg.agn
         if bool(spectral_cfg.fit_lines) and bool(spectral_cfg.tied_lines):
-            try:
-                from .spectroscopy import (
-                    SpectralComponentConfig,
-                    build_joint_tied_line_meta,
-                    line_complex_dense_mass_blocks,
-                )
-                from .model import _fixed_spectral_line_coverage_rest
+            from .spectroscopy import (
+                SpectralComponentConfig,
+                build_joint_tied_line_meta,
+                line_complex_dense_mass_blocks,
+            )
+            from .model import _fixed_spectral_line_coverage_rest
 
-                component_cfg = SpectralComponentConfig(
-                    use_lines=True,
-                    tied_lines=True,
-                    line_table=spectral_cfg.line_table,
-                    line_prior_config=context.spectral_prior_config,
-                    line_coverage_rest=_fixed_spectral_line_coverage_rest(context, cfg),
-                    include_elg_narrow_lines=bool(spectral_cfg.include_elg_narrow_lines),
-                    include_high_ionization_lines=bool(spectral_cfg.include_high_ionization_lines),
+            component_cfg = SpectralComponentConfig(
+                use_lines=True,
+                tied_lines=True,
+                line_table=spectral_cfg.line_table,
+                line_prior_config=context.spectral_prior_config,
+                line_coverage_rest=_fixed_spectral_line_coverage_rest(context, cfg),
+                include_elg_narrow_lines=bool(spectral_cfg.include_elg_narrow_lines),
+                include_high_ionization_lines=bool(spectral_cfg.include_high_ionization_lines),
+            )
+            tied_line_meta = build_joint_tied_line_meta(component_cfg)
+            if tied_line_meta is not None:
+                native_blocks = line_complex_dense_mass_blocks(
+                    tied_line_meta,
+                    standardized_amplitudes=True,
                 )
-                tied_line_meta = build_joint_tied_line_meta(component_cfg)
-                if tied_line_meta is not None:
-                    native_blocks = line_complex_dense_mass_blocks(
-                        tied_line_meta,
-                        standardized_amplitudes=True,
+                for native_block in native_blocks:
+                    block = tuple(
+                        f"spectral_{site}"
+                        for site in native_block
+                        if f"spectral_{site}" in names and f"spectral_{site}" not in assigned
                     )
-                    for native_block in native_blocks:
-                        block = tuple(
-                            f"spectral_{site}"
-                            for site in native_block
-                            if f"spectral_{site}" in names and f"spectral_{site}" not in assigned
-                        )
-                        if block:
-                            value = np.asarray(latent_values[block[0]])
-                            if len(block) > 1 or value.size > 1:
-                                blocks.append(block)
-                            assigned.update(block)
-            except ImportError:
-                pass
+                    if block:
+                        value = np.asarray(latent_values[block[0]])
+                        if len(block) > 1 or value.size > 1:
+                            blocks.append(block)
+                        assigned.update(block)
     # Group any active line sites not known to the native geometry helper
     # (for example, a newer custom coordinate) instead of silently leaving
     # them diagonal. When no native metadata was available this also supplies

@@ -13,7 +13,7 @@ from jaxsedfit.model import (
     _attenuation_curve,
     _cigale_nebular_correction,
     _project_filters,
-    _project_local_nebular_line_filters,
+    _project_integrated_local_line_filters,
     _redshift_to_obs,
 )
 from jaxsedfit.preload import (
@@ -137,7 +137,7 @@ def test_filter_integrated_line_flux_tracks_redshift(gold):
     distance = 2.0e25
 
     for redshift in (0.05, 0.25, 0.45, 0.70):
-        actual = float(_project_local_nebular_line_filters(
+        actual = float(_project_integrated_local_line_filters(
             context, line_wave, line_lumin, 80.0, 0.0, redshift, distance, jnp.ones(rest_wave.shape)
         )[0])
         transmission = np.interp(line_wave[0] * (1.0 + redshift), filter_wave[0], filter_trans[0])
@@ -175,7 +175,7 @@ def test_full_fsps_stellar_plus_cigale_nebular_broadband_photometry(gold):
         work_wave=jnp.asarray(filter_wave), effective_wavelength=jnp.asarray(effective), valid_mask=jnp.ones_like(jnp.asarray(filter_trans), dtype=bool),
     )
     actual = np.array(_project_filters(obs, packed), copy=True)
-    actual = actual + np.asarray(_project_local_nebular_line_filters(
+    actual = actual + np.asarray(_project_integrated_local_line_filters(
         context, gold["line_wave_a"], gold["line_lumin_w_per_photon"] * n_ly * correction,
         100.0, 0.0, redshift, distance, jnp.ones_like(jnp.asarray(rest_wave)),
     ))

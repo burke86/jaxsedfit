@@ -48,9 +48,7 @@ DEFAULT_NARROW_LINE_WIDTH_KMS_MIN = 100.0
 DEFAULT_NARROW_LINE_WIDTH_KMS_MAX = 1500.0
 DEFAULT_BROAD_LINE_WIDTH_KMS = 3000.0
 DEFAULT_NARROW_LINE_WIDTH_KMS = 500.0
-DEFAULT_BROAD_LINES_STRENGTH = 1.0
 DEFAULT_NARROW_LINES_STRENGTH = 1.0
-DEFAULT_FEII_STRENGTH = 5.0
 DEFAULT_BALMER_CONTINUUM_STRENGTH = 1.0e-3
 _SSP_BIN_QUAD_NODES, _SSP_BIN_QUAD_WEIGHTS = np.polynomial.legendre.leggauss(16)
 BURST_RISE_GYR = 0.002
@@ -835,44 +833,6 @@ def _cigale_delayed_burst_sfh_shape(
         / jnp.maximum(burst_integral, 1.0e-30)
     )
     return main + burst_scale * burst
-
-
-def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=256):
-    """Build a normalized 1D Gaussian convolution kernel.
-
-    Parameters
-    ----------
-    sigma_pix : float or jax.Array
-        Gaussian sigma in pixels (floored at 1e-3).
-    radius_mult : float
-        Kernel truncation radius in units of sigma.
-    max_half : int
-        Static kernel half-length in pixels.
-    """
-    sigma_pix = jnp.maximum(sigma_pix, 1e-3)
-    x = jnp.arange(-max_half, max_half + 1, dtype=jnp.float64)
-    half_dyn = jnp.maximum(3.0, jnp.ceil(radius_mult * sigma_pix))
-    mask = jnp.abs(x) <= half_dyn
-    k = jnp.exp(-0.5 * (x / sigma_pix) ** 2)
-    k = jnp.where(mask, k, 0.0)
-    return k / jnp.maximum(jnp.sum(k), 1e-30)
-
-
-def _convolve_same_length(signal, kernel):
-    """Convolve a signal and return an output with the original length.
-
-    Parameters
-    ----------
-    signal : jax.Array
-        1D signal, shape (n,).
-    kernel : jax.Array
-        1D convolution kernel.
-    """
-    full = jnp.convolve(signal, kernel, mode="same")
-    n = signal.shape[0]
-    m = full.shape[0]
-    start = jnp.maximum((m - n) // 2, 0)
-    return jax.lax.dynamic_slice(full, (start,), (n,))
 
 
 def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms):
@@ -1738,29 +1698,6 @@ def _project_integrated_local_line_filters(
     )
 
 
-def _project_local_nebular_line_filters(
-    context: ModelContext,
-    line_wave,
-    line_lumin,
-    width_kms,
-    ebv_total,
-    redshift,
-    luminosity_distance_m,
-    igm,
-):
-    """Backward-compatible nebular wrapper for integrated line projection."""
-    return _project_integrated_local_line_filters(
-        context,
-        line_wave,
-        line_lumin,
-        width_kms,
-        ebv_total,
-        redshift,
-        luminosity_distance_m,
-        igm,
-    )
-
-
 def _local_integrated_line_obs_sed(
     context: ModelContext,
     line_wave,
@@ -1824,20 +1761,6 @@ def _local_integrated_line_obs_sed(
     obs_plot = jnp.concatenate([obs_line_wave, separator], axis=1)
     flux_plot = jnp.concatenate([flux_lambda, separator], axis=1)
     return jnp.ravel(obs_plot), jnp.ravel(flux_plot)
-
-
-def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, width_kms, ebv_total, redshift, luminosity_distance_m, igm):
-    """Backward-compatible wrapper for locally rendered nebular lines."""
-    return _local_integrated_line_obs_sed(
-        context,
-        line_wave,
-        line_lumin,
-        width_kms,
-        ebv_total,
-        redshift,
-        luminosity_distance_m,
-        igm,
-    )
 
 
 def _interp_fixed_local_line_terms(width_kms, cache):
@@ -4557,7 +4480,7 @@ def evaluate_photometric_state(
                 host_screen,
             )
         else:
-            local_nebular_line_fluxes = _project_local_nebular_line_filters(
+            local_nebular_line_fluxes = _project_integrated_local_line_filters(
                 context,
                 context.nebular_templates_jax.line_wave_a,
                 nebular["line_lumin"],
@@ -4658,7 +4581,6 @@ def evaluate_photometric_state(
     extended_capture_source_fluxes = host_capture_source_fluxes + agn_narrow_line_fluxes_total
     host_fluxes = host_fluxes_total * host_capture_fraction
     captured_host_dust_fluxes = host_dust_fluxes_total * host_capture_fraction
-    captured_host_source_fluxes = host_capture_source_fluxes * host_capture_fraction
     captured_agn_narrow_line_fluxes = agn_narrow_line_fluxes_total * host_capture_fraction
     captured_extended_source_fluxes = extended_capture_source_fluxes * host_capture_fraction
     pred_fluxes = (
@@ -5126,7 +5048,7 @@ def evaluate_photometric_state(
         nebular_obs = _redshift_to_obs(rest_wave, nebular_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         nebular_lines_obs = _redshift_to_obs(rest_wave, nebular_lines_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         nebular_continuum_obs = _redshift_to_obs(rest_wave, nebular_continuum_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        nebular_lines_local_obs_wave, nebular_lines_local_obs = _local_nebular_line_obs_sed(
+        nebular_lines_local_obs_wave, nebular_lines_local_obs = _local_integrated_line_obs_sed(
             context,
             context.nebular_templates_jax.line_wave_a,
             nebular["line_lumin"],

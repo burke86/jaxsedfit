@@ -55,7 +55,7 @@ from jaxsedfit.model import (
     _local_flux_conserving_line_grid,
     _evaluate_spectral_components,
     _powerlaw_jax,
-    _project_local_nebular_line_filters,
+    _project_integrated_local_line_filters,
     _project_spectral_custom_state_filters,
     _project_spectral_line_state_filters,
     _project_filters,
@@ -380,7 +380,7 @@ def test_local_nebular_line_projection_matches_dense_edge_cases(
 ):
     context = _local_projection_context(filter_wave, filter_trans)
     local = float(
-        _project_local_nebular_line_filters(
+        _project_integrated_local_line_filters(
             context,
             jax.numpy.asarray([line_wave], dtype=jax.numpy.float64),
             jax.numpy.asarray([line_lumin], dtype=jax.numpy.float64),

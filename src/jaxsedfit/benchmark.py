@@ -10,7 +10,6 @@ import argparse
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from importlib import resources
 import multiprocessing as mp
 from pathlib import Path
 from typing import Any, Iterable
@@ -22,6 +21,7 @@ from astropy.io import fits
 from tqdm.auto import tqdm
 
 from .config import AGNConfig, EmissionLineTemplate, FeIITemplate, FilterCurve, FilterSet, FitConfig, InferenceConfig, Observation, PhotometryData
+from .filters import _package_resource_path
 from .mplstyle import use_style
 
 CHIMERA_FILTER_NAMES = (
@@ -55,18 +55,6 @@ _CHIMERA_FILTER_COLUMN_MAP = {
     "spitzer.irac.I2": "IRAC2",
 }
 _BENCHMARK_RESOURCE_CACHE: dict[str, Any] = {}
-_CHIMERA_EFFECTIVE_WAVELENGTHS_A = {
-    "u_sdss": 3543.0,
-    "r_sdss": 6231.0,
-    "i_sdss": 7625.0,
-    "z_sdss": 9134.0,
-    "J_2mass": 12350.0,
-    "H_2mass": 16620.0,
-    "Ks_2mass": 21590.0,
-    "spitzer.irac.I1": 35500.0,
-    "spitzer.irac.I2": 44930.0,
-}
-_C_MS = 2.99792458e8
 
 
 @dataclass
@@ -95,17 +83,6 @@ class _BenchmarkWorkerTask:
 def _package_root() -> Path:
     """Return the jaxsedfit project root from the installed package layout."""
     return Path(__file__).resolve().parents[2]
-
-
-def _package_resource_path(relpath: str) -> Path:
-    """Return an absolute path to a packaged benchmark resource.
-
-    Parameters
-    ----------
-    relpath : str
-        Resource path relative to the ``jaxsedfit`` package.
-    """
-    return Path(str(resources.files("jaxsedfit").joinpath(relpath)))
 
 
 def chimera_data_dir(root: str | Path | None = None) -> Path:

@@ -22,7 +22,7 @@ from jaxsedfit.config import (
     SpectroscopyData,
 )
 from jaxsedfit.core import JAXSEDFit
-from jaxsedfit.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _project_fixed_cached_local_line_filters, _project_fixed_cached_local_nebular_line_filters, _project_local_line_filters, _project_local_nebular_line_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
+from jaxsedfit.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _project_fixed_cached_local_line_filters, _project_fixed_cached_local_nebular_line_filters, _project_local_line_filters, _project_integrated_local_line_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
 from jaxsedfit.preload import build_model_context
 
 
@@ -1142,7 +1142,7 @@ def test_fixed_local_nebular_line_cache_matches_exact_projection(monkeypatch):
         return jnp.sum(_project_fixed_cached_local_nebular_line_filters(cached_context, line_lumin, width_kms, 0.2))
 
     def exact_projection(width_kms):
-        return jnp.sum(_project_local_nebular_line_filters(
+        return jnp.sum(_project_integrated_local_line_filters(
             exact_context,
             exact_context.nebular_templates_jax.line_wave_a,
             line_lumin,
