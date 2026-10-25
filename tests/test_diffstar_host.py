@@ -221,7 +221,9 @@ def test_smooth_delayed_burst_sfh_preserves_requested_formed_mass_fraction():
     burst = combined - main
     recovered_fraction = np.trapezoid(burst, elapsed_gyr) / np.trapezoid(combined, elapsed_gyr)
 
-    assert recovered_fraction == pytest.approx(f_burst, rel=2.0e-12)
+    # the normalization uses the components' analytic integrals; on this dense grid the
+    # trapezoidal estimate recovers the requested fraction to its discretization error
+    assert recovered_fraction == pytest.approx(f_burst, rel=1.0e-5)
     assert np.all(burst >= 0.0)
     assert np.max(burst[elapsed_gyr < 4.78]) < 5.0e-5 * np.max(burst)
 

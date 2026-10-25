@@ -203,6 +203,12 @@ class GalaxyConfig:
     rest_wave_max: float = 3.0e6
     n_wave: int = 1024
     tau_host_prior_scale: float = 0.5
+    # SFH prior for the delayed and delayed_burst host models. "age_tau" (default): the
+    # GRAHSP-like priors on age and tau. "ssfr_uniform": uniform in log10 sSFR (current SFR
+    # per formed stellar mass, yr^-1) within ssfr_prior_range, with tau solved from it, so the
+    # prior on the reported sSFR is flat instead of implied by the age and tau priors.
+    sfh_prior: str = "age_tau"
+    ssfr_prior_range: tuple[float, float] = (-14.0, -8.0)
     sfh_n_steps: int = 64
     sfh_t_min_gyr: float = 0.01
     cosmology_h0: float = 70.0
@@ -242,6 +248,14 @@ class GalaxyConfig:
             raise ValueError("galaxy.rest_wave_max must be finite and greater than rest_wave_min (Angstrom).")
         if int(self.n_wave) < 2:
             raise ValueError("galaxy.n_wave must be at least 2.")
+        self.sfh_prior = str(self.sfh_prior).strip().lower()
+        if self.sfh_prior not in {"age_tau", "ssfr_uniform"}:
+            raise ValueError("galaxy.sfh_prior must be one of: 'age_tau', 'ssfr_uniform'.")
+        lo, hi = (float(v) for v in self.ssfr_prior_range)
+        if not (np.isfinite(lo) and np.isfinite(hi) and lo < hi):
+            raise ValueError("galaxy.ssfr_prior_range must be finite (lo, hi) with lo < hi (log10 yr^-1).")
+        if self.sfh_prior == "ssfr_uniform" and str(self.host_sfh_model).strip().lower() == "diffstar":
+            raise ValueError("galaxy.sfh_prior='ssfr_uniform' applies to the delayed and delayed_burst SFHs, not diffstar.")
         self.dust_model = str(self.dust_model).strip().lower()
         if self.dust_model not in {"dale2014", "dl07"}:
             raise ValueError("galaxy.dust_model must be one of: 'dale2014', 'dl07'.")
@@ -647,6 +661,7 @@ class HostPriorConfig:
     log_sfh_tau_gyr: Any | None = None
     log_sfh_age_gyr: Any | None = None
     log_sfh_tau_over_age: Any | None = None
+    log_sfh_ssfr: Any | None = None
     log_sfh_burst_fraction: Any | None = None
     log_sfh_burst_age_gyr: Any | None = None
     log_sfh_burst_tau_gyr: Any | None = None
@@ -672,6 +687,7 @@ class HostPriorConfig:
                 "log_sfh_tau_gyr": "log_sfh_tau_gyr",
                 "log_sfh_age_gyr": "log_sfh_age_gyr",
                 "log_sfh_tau_over_age": "log_sfh_tau_over_age",
+                "log_sfh_ssfr": "log_sfh_ssfr",
                 "log_sfh_burst_fraction": "log_sfh_burst_fraction",
                 "log_sfh_burst_age_gyr": "log_sfh_burst_age_gyr",
                 "log_sfh_burst_tau_gyr": "log_sfh_burst_tau_gyr",

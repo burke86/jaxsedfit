@@ -392,9 +392,10 @@ def test_numeric_lists_use_compact_hdf5_datasets(monkeypatch, tmp_path):
             and node.attrs.get("node_type") == "list_array"
             else None
         )
-        assert len(compact_sequences) == 4
+        assert len(compact_sequences) == 5  # includes galaxy.ssfr_prior_range
     loaded = JAXSEDFit.load(saved_path)
     assert loaded.config.photometry.fluxes == [1.0]
+    assert [float(v) for v in loaded.config.galaxy.ssfr_prior_range] == [-14.0, -8.0]
     assert loaded.config.filters.curves[0].wave == [1000.0, 2000.0, 3000.0]
 
 

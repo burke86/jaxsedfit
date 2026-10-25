@@ -240,6 +240,26 @@ FSPS default Kroupa (2001) IMF. Supported IMFs are ``chabrier_2003``, ``salpeter
 ``absolute_log10_z`` and ``log10_z_over_zsun``. Custom IMFs require an SSP format
 that supplies its own surviving-mass fractions and are not silently approximated.
 
+By default the delayed (and ``delayed_burst``) SFH uses GRAHSP-like priors on the
+SFH age and ``tau``. Flat priors on age and ``tau`` are not flat in the derived
+quantities: they imply a fairly informative prior on the specific star-formation
+rate. When the photometry does not constrain the SFH well, you can instead put the
+prior directly on the sSFR (current SFR per formed stellar mass, in yr^-1):
+
+.. code-block:: python
+
+   cfg.galaxy.sfh_prior = "ssfr_uniform"          # default: "age_tau"
+   cfg.galaxy.ssfr_prior_range = (-14.0, -8.0)    # log10 sSFR / yr^-1
+
+This samples ``log_sfh_ssfr`` uniformly in that range (or from a prior you set on
+``cfg.prior_config.host.log_sfh_ssfr``), draws the SFH age log-uniformly up to the
+largest age that can still reach that sSFR, and solves for ``tau``. With
+``host_sfh_model="delayed_burst"`` the burst parameters keep their usual priors and
+``tau`` is chosen so that the total (main + burst) sSFR equals the sampled value;
+where the burst alone already exceeds it, the total sSFR is higher than sampled.
+Priors on ``log_sfh_age_gyr`` or ``log_sfh_tau_gyr`` cannot be combined with this
+mode, and it does not apply to Diffstar.
+
 Use ``host_sfh_model="diffstar"`` when you want the Diffstar-based SFH
 parameterization:
 

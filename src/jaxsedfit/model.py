@@ -795,8 +795,9 @@ def _cigale_delayed_burst_sfh_shape(
     ``burst_fraction`` is the fraction of total formed mass in the recent
     component.  CIGALE scales the exponential burst so that its time integral
     relative to the main delayed component is ``f_burst / (1 - f_burst)``.
-    This continuous-grid implementation applies the same normalization using
-    trapezoidal integration on the JAXSEDFIT SFH grid.
+    The normalization uses the analytic time integrals of both components (the
+    same ones used for the formed mass), so it does not depend on how well the
+    SFH grid resolves a short main e-folding time.
     """
     elapsed_gyr = jnp.asarray(elapsed_gyr, dtype=jnp.float64)
     age_gyr = jnp.asarray(age_gyr, dtype=jnp.float64)
@@ -811,8 +812,8 @@ def _cigale_delayed_burst_sfh_shape(
         burst_age_gyr,
         burst_tau_gyr,
     )
-    main_integral = jnp.trapezoid(main, elapsed_gyr)
-    burst_integral = jnp.trapezoid(burst, elapsed_gyr)
+    main_integral = _delayed_sfh_cumulative_mass(age_gyr, tau_gyr)
+    burst_integral = _exponential_burst_cumulative_mass(age_gyr, age_gyr, burst_age_gyr, burst_tau_gyr)
     burst_scale = (
         burst_fraction
         / jnp.maximum(1.0 - burst_fraction, 1.0e-8)
@@ -2027,6 +2028,127 @@ def _build_diffstar_host(
     return state
 
 
+def _delayed_ssfr_age_product(x):
+    """sSFR x age for a delayed-tau SFH at ``x = age / tau`` (sSFR per formed mass).
+
+    Equals ``x**2 exp(-x) / (1 - exp(-x) (1 + x))``; it decreases monotonically from 2
+    (``x -> 0``, constant SFR) to 0 (``x -> infinity``, quenched).
+    """
+    x = jnp.maximum(jnp.asarray(x, dtype=jnp.float64), 1.0e-12)
+    small = x < 1.0e-3
+    xs = jnp.where(small, 1.0, x)
+    formed = -jnp.expm1(-xs) - xs * jnp.exp(-xs)
+    return jnp.where(small, 2.0 - 2.0 * x / 3.0, xs * xs * jnp.exp(-xs) / jnp.maximum(formed, 1.0e-300))
+
+
+def _solve_delayed_x(target_product, n_bisect=60):
+    """``x = age / tau`` with ``_delayed_ssfr_age_product(x) = target_product`` (0 < target < 2).
+
+    Bisection in log x (without gradients) followed by one Newton step, so the result carries
+    the exact implicit derivative with respect to ``target_product`` for gradient-based samplers.
+    """
+    target = jnp.clip(jnp.asarray(target_product, dtype=jnp.float64), 1.0e-300, 2.0 - 1.0e-9)
+    t0 = jax.lax.stop_gradient(target)
+
+    def body(_, bounds):
+        lo, hi = bounds
+        mid = 0.5 * (lo + hi)
+        above = _delayed_ssfr_age_product(jnp.exp(mid)) > t0
+        return jnp.where(above, mid, lo), jnp.where(above, hi, mid)
+
+    lo, hi = jax.lax.fori_loop(0, n_bisect, body, (jnp.log(1.0e-6), jnp.log(700.0)))
+    x0 = jax.lax.stop_gradient(jnp.exp(0.5 * (lo + hi)))
+    h0, dh = jax.jvp(_delayed_ssfr_age_product, (x0,), (jnp.ones_like(x0),))
+    dh = jnp.where(jnp.abs(dh) > 1.0e-300, dh, -1.0e-300)
+    return jnp.maximum(x0 - (h0 - target) / dh, 1.0e-6)
+
+
+def _burst_ssfr_per_yr(age_gyr, burst_age_gyr, burst_tau_gyr):
+    """Current SFR of the smooth exponential burst divided by the mass it formed (yr^-1)."""
+    current = _smooth_exponential_burst_shape(age_gyr, age_gyr, burst_age_gyr, burst_tau_gyr)
+    formed = _exponential_burst_cumulative_mass(age_gyr, age_gyr, burst_age_gyr, burst_tau_gyr)
+    return current / jnp.maximum(formed * 1.0e9, 1.0e-300)
+
+
+def _sample_delayed_burst_parameters(prior_config, age_gyr):
+    """Sample the burst fraction, age and e-folding time of the delayed + burst SFH."""
+    log_burst_fraction = numpyro.sample(
+        "log_sfh_burst_fraction",
+        _prior_distribution(
+            prior_config,
+            "log_sfh_burst_fraction",
+            dist.Uniform(np.log(1.0e-4), np.log(0.2)),
+        ),
+    )
+    burst_age_upper = jnp.minimum(age_gyr, 0.5)
+    log_burst_age_gyr = numpyro.sample(
+        "log_sfh_burst_age_gyr",
+        _prior_distribution(
+            prior_config,
+            "log_sfh_burst_age_gyr",
+            dist.Uniform(np.log(0.01), jnp.log(burst_age_upper)),
+        ),
+    )
+    log_burst_tau_gyr = numpyro.sample(
+        "log_sfh_burst_tau_gyr",
+        _prior_distribution(
+            prior_config,
+            "log_sfh_burst_tau_gyr",
+            dist.Uniform(np.log(0.01), np.log(0.2)),
+        ),
+    )
+    return jnp.exp(log_burst_fraction), jnp.exp(log_burst_age_gyr), jnp.exp(log_burst_tau_gyr)
+
+
+def _sample_ssfr_uniform_sfh(prior_config, cfg, physical_min_age, physical_max_age, use_burst):
+    """Optional SFH prior uniform in log10 sSFR (``GalaxyConfig.sfh_prior = "ssfr_uniform"``).
+
+    Samples ``log_sfh_ssfr`` (log10 of the current SFR per formed stellar mass, yr^-1) uniformly
+    in ``GalaxyConfig.ssfr_prior_range`` (or a user prior under that name), then the SFH age
+    log-uniformly between the default minimum age and the largest age that can still reach that
+    sSFR (a delayed-tau SFH has sSFR x age < 2), then solves for tau. With the delayed + burst
+    SFH the burst parameters are sampled as usual and tau is chosen so that the total sSFR,
+    ``(1 - f_burst) sSFR_main + f_burst sSFR_burst``, equals the sampled value; when the burst
+    alone already exceeds it (or the main component cannot reach it) the main sSFR is clipped
+    to the feasible range, so the burst-mode prior is uniform only approximately there.
+    Returns ``(log_age_gyr, log_tau_gyr, burst_params)``.
+    """
+    for key in ("log_sfh_age_gyr", "log_sfh_tau_gyr", "log_sfh_tau_over_age"):
+        if key in prior_config:
+            raise ValueError(
+                f"galaxy.sfh_prior='ssfr_uniform' sets the {key} prior itself; "
+                "set a prior on log_sfh_ssfr instead, or use sfh_prior='age_tau'."
+            )
+    default_max_age = jnp.minimum(10.0, physical_max_age)
+    default_min_age = jnp.minimum(max(10.0**-0.8, physical_min_age), default_max_age / 1.01)
+    lo, hi = (float(v) for v in cfg.ssfr_prior_range)
+    # a delayed-tau SFH reaches at most sSFR = 2 / age; leave 5% margin at the minimum age
+    hi_eff = jnp.minimum(hi, jnp.log10(1.9 / (default_min_age * 1.0e9)))
+    lo_eff = jnp.minimum(lo, hi_eff - 1.0e-3)
+    log_ssfr = numpyro.sample(
+        "log_sfh_ssfr",
+        _prior_distribution(prior_config, "log_sfh_ssfr", dist.Uniform(lo_eff, hi_eff)),
+    )
+    ssfr = 10.0**log_ssfr
+    age_cap = jnp.clip(1.9 / (ssfr * 1.0e9), default_min_age * 1.0001, default_max_age)
+    log_age_gyr = numpyro.sample(
+        "log_sfh_age_gyr",
+        dist.Uniform(jnp.log(default_min_age), jnp.log(age_cap)),
+    )
+    age_gyr = jnp.exp(log_age_gyr)
+    burst = (None, None, None)
+    ssfr_main = ssfr
+    if use_burst:
+        burst = _sample_delayed_burst_parameters(prior_config, age_gyr)
+        burst_fraction, burst_age_gyr, burst_tau_gyr = burst
+        ssfr_burst = _burst_ssfr_per_yr(age_gyr, burst_age_gyr, burst_tau_gyr)
+        ssfr_main = (ssfr - burst_fraction * ssfr_burst) / jnp.maximum(1.0 - burst_fraction, 1.0e-8)
+    product = jnp.clip(ssfr_main * age_gyr * 1.0e9, 1.0e-300, 1.999)
+    x = _solve_delayed_x(product)
+    log_tau_gyr = numpyro.deterministic("log_sfh_tau_gyr", log_age_gyr - jnp.log(x))
+    return log_age_gyr, log_tau_gyr, burst
+
+
 def _build_delayed_host(
     context: ModelContext,
     prior_config: dict[str, Any],
@@ -2071,7 +2193,15 @@ def _build_delayed_host(
     log_stellar_mass = _sample_log_stellar_mass(prior_config)
     physical_min_age = max(float(cfg.sfh_t_min_gyr), 1.0e-3)
     physical_max_age = jnp.maximum(t_obs_gyr, physical_min_age * 1.01)
-    if "log_sfh_age_gyr" in prior_config:
+    model_name = str(cfg.host_sfh_model).lower()
+    use_burst = model_name in {"delayed_burst", "sfhdelayed_burst", "delayed-burst"}
+    burst_params = None
+    if str(getattr(cfg, "sfh_prior", "age_tau")).lower() == "ssfr_uniform":
+        log_age_gyr, log_tau_gyr, burst_params = _sample_ssfr_uniform_sfh(
+            prior_config, cfg, physical_min_age, physical_max_age, use_burst
+        )
+        log_tau_over_age = numpyro.deterministic("log_sfh_tau_over_age", log_tau_gyr - log_age_gyr)
+    elif "log_sfh_age_gyr" in prior_config:
         log_age_gyr = _sample_bounded_normal(
             prior_config,
             "log_sfh_age_gyr",
@@ -2093,7 +2223,9 @@ def _build_delayed_host(
             dist.Uniform(jnp.log(default_min_age), jnp.log(default_max_age)),
         )
     age_gyr = jnp.exp(log_age_gyr)
-    if "log_sfh_tau_over_age" in prior_config:
+    if burst_params is not None:
+        pass  # sSFR-uniform prior: tau already solved from the sampled sSFR
+    elif "log_sfh_tau_over_age" in prior_config:
         log_tau_over_age = _sample_bounded_normal(
             prior_config,
             "log_sfh_tau_over_age",
@@ -2123,37 +2255,11 @@ def _build_delayed_host(
     tau_gyr = jnp.exp(log_tau_gyr)
     stellar_age_gyr = jnp.maximum(t_obs_gyr - gal_t_table, 0.0)
     sfh_age_gyr = age_gyr - stellar_age_gyr
-    model_name = str(cfg.host_sfh_model).lower()
-    use_burst = model_name in {"delayed_burst", "sfhdelayed_burst", "delayed-burst"}
     if use_burst:
-        log_burst_fraction = numpyro.sample(
-            "log_sfh_burst_fraction",
-            _prior_distribution(
-                prior_config,
-                "log_sfh_burst_fraction",
-                dist.Uniform(np.log(1.0e-4), np.log(0.2)),
-            ),
-        )
-        burst_fraction = jnp.exp(log_burst_fraction)
-        burst_age_upper = jnp.minimum(age_gyr, 0.5)
-        log_burst_age_gyr = numpyro.sample(
-            "log_sfh_burst_age_gyr",
-            _prior_distribution(
-                prior_config,
-                "log_sfh_burst_age_gyr",
-                dist.Uniform(np.log(0.01), jnp.log(burst_age_upper)),
-            ),
-        )
-        burst_age_gyr = jnp.exp(log_burst_age_gyr)
-        log_burst_tau_gyr = numpyro.sample(
-            "log_sfh_burst_tau_gyr",
-            _prior_distribution(
-                prior_config,
-                "log_sfh_burst_tau_gyr",
-                dist.Uniform(np.log(0.01), np.log(0.2)),
-            ),
-        )
-        burst_tau_gyr = jnp.exp(log_burst_tau_gyr)
+        if burst_params is not None and burst_params[0] is not None:
+            burst_fraction, burst_age_gyr, burst_tau_gyr = burst_params
+        else:
+            burst_fraction, burst_age_gyr, burst_tau_gyr = _sample_delayed_burst_parameters(prior_config, age_gyr)
         base_sfh = _cigale_delayed_burst_sfh_shape(
             sfh_age_gyr,
             tau_gyr,
