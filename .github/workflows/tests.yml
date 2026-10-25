@@ -32,3 +32,59 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -q
+
+  downstream-jaxqsofit:
+    # Advisory: run jaxqsofit's unit tests against this jaxsedfit, so changes that
+    # break jaxqsofit show up here instead of when jaxqsofit next bumps its pin.
+    # Intended behaviour changes need a companion jaxqsofit PR.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out jaxsedfit
+        uses: actions/checkout@v4
+        with:
+          path: jaxsedfit
+
+      - name: Check out jaxqsofit main
+        uses: actions/checkout@v4
+        with:
+          repository: burke86/jaxqsofit
+          path: jaxqsofit
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            jaxsedfit/requirements.txt
+            jaxqsofit/pyproject.toml
+
+      - name: Install jaxqsofit, then this jaxsedfit over its pinned version
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./jaxqsofit
+          cd jaxsedfit && python -m pip install -r requirements.txt
+          python -m pip install pytest astroquery
+          python -c "import jaxsedfit, jaxqsofit; print('jaxsedfit from', jaxsedfit.__file__)"
+
+      - name: Restore DSPS SSP template cache
+        id: cache-dsps-ssp
+        uses: actions/cache@v4
+        with:
+          path: jaxqsofit/tempdata.h5
+          key: dsps-ssp-fsps-v3.2-lgmet-age-v1
+
+      - name: Download DSPS SSP template on cache miss
+        if: steps.cache-dsps-ssp.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 300 \
+            https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_fsps_v3.2_lgmet_age.h5 \
+            --output jaxqsofit/tempdata.h5
+          test -s jaxqsofit/tempdata.h5
+
+      - name: Run jaxqsofit unit tests
+        working-directory: jaxqsofit
+        run: python -m pytest -q tests -m "not integration"
