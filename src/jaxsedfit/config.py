@@ -425,6 +425,11 @@ class LikelihoodConfig:
     use_redshift_projection_cache: bool = True
     redshift_projection_n_grid: int = 128
     redshift_projection_sigma: float = 6.0
+    # Photo-z fits: tabulate the IGM transmission on this many redshifts over the projection
+    # range and interpolate, instead of evaluating the full Lyman-series model every step
+    # (it only feeds the local-line photometry; the continuum projection cache already holds
+    # the IGM). 0 evaluates the exact model every step.
+    igm_redshift_table_n_grid: int = 2048
     spectrum_student_t_df: float = 5.0
     spectrum_systematics_width: float = 0.05
     fit_spectrum_scale: bool | None = None
