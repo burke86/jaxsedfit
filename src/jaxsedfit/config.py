@@ -209,6 +209,12 @@ class GalaxyConfig:
     # prior on the reported sSFR is flat instead of implied by the age and tau priors.
     sfh_prior: str = "age_tau"
     ssfr_prior_range: tuple[float, float] = (-14.0, -8.0)
+    # Galaxy (host-screen) attenuation curve. "grahsp" (default): the GRAHSP broken power
+    # law. "noll2009": Calzetti with a 2175 A bump times (lambda/5500 A)^delta (Noll et al.
+    # 2009), the bump strength tied to delta by Kriek & Conroy (2013), so delta (site
+    # "dust_delta") is the one extra parameter; ebv_gal stays an E(B-V). AGN light sees the
+    # host screen through this curve and its own screen (ebv_agn) through the GRAHSP curve.
+    attenuation_curve: str = "grahsp"
     sfh_n_steps: int = 64
     sfh_t_min_gyr: float = 0.01
     cosmology_h0: float = 70.0
@@ -256,6 +262,9 @@ class GalaxyConfig:
             raise ValueError("galaxy.ssfr_prior_range must be finite (lo, hi) with lo < hi (log10 yr^-1).")
         if self.sfh_prior == "ssfr_uniform" and str(self.host_sfh_model).strip().lower() == "diffstar":
             raise ValueError("galaxy.sfh_prior='ssfr_uniform' applies to the delayed and delayed_burst SFHs, not diffstar.")
+        self.attenuation_curve = str(self.attenuation_curve).strip().lower()
+        if self.attenuation_curve not in {"grahsp", "noll2009"}:
+            raise ValueError("galaxy.attenuation_curve must be one of: 'grahsp', 'noll2009'.")
         self.dust_model = str(self.dust_model).strip().lower()
         if self.dust_model not in {"dale2014", "dl07"}:
             raise ValueError("galaxy.dust_model must be one of: 'dale2014', 'dl07'.")
@@ -658,6 +667,7 @@ class HostPriorConfig:
     dust_umin: Any | None = None
     ebv_gal: Any | None = None
     log_ebv_gal: Any | None = None
+    dust_delta: Any | None = None
     log_sfh_tau_gyr: Any | None = None
     log_sfh_age_gyr: Any | None = None
     log_sfh_tau_over_age: Any | None = None
@@ -684,6 +694,7 @@ class HostPriorConfig:
                 "dust_umin": "dust_umin",
                 "ebv_gal": "ebv_gal",
                 "log_ebv_gal": "log_ebv_gal",
+                "dust_delta": "dust_delta",
                 "log_sfh_tau_gyr": "log_sfh_tau_gyr",
                 "log_sfh_age_gyr": "log_sfh_age_gyr",
                 "log_sfh_tau_over_age": "log_sfh_tau_over_age",

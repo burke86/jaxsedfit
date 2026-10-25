@@ -18,7 +18,7 @@ from __future__ import annotations
 # LICENSES/THIRD_PARTY_NOTICES.md.
 
 from dataclasses import replace
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -57,6 +57,20 @@ BURST_RISE_GYR = 0.002
 GRAHSP_BIATTENUATION_BREAK_A = 11000.0
 GRAHSP_EBV_MIN = 0.01
 GRAHSP_EBV_MAX = 10.0
+# Noll et al. (2009) modified Calzetti curve, optional galaxy attenuation
+# (GalaxyConfig.attenuation_curve = "noll2009"). The 2175 A bump strength is tied
+# to the slope delta by Kriek & Conroy (2013): E_b = 0.85 - 1.9 delta.
+CALZETTI_RV = 4.05
+NOLL_BUMP_WAVE_A = 2175.0
+NOLL_BUMP_FWHM_A = 350.0
+NOLL_V_WAVE_A = 5500.0
+NOLL_B_WAVE_A = 4400.0
+KRIEK_CONROY_BUMP_INTERCEPT = 0.85
+KRIEK_CONROY_BUMP_SLOPE = -1.9
+NOLL_DELTA_PRIOR_LOC = -0.2
+NOLL_DELTA_PRIOR_SCALE = 0.3
+NOLL_DELTA_MIN = -0.8
+NOLL_DELTA_MAX = 0.4
 GRAHSP_PL_BEND_LOC_A = 1000.0
 GRAHSP_PL_BEND_WIDTH = 10.0
 GRAHSP_PL_CUTOFF_A = 100000.0
@@ -1184,19 +1198,111 @@ def _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break):
     return norm * (wave_rest / lam_break) ** jnp.where(wave_rest < lam_break, opt_index, nir_index)
 
 
-def _absorbed_line_luminosity(line_wave, line_lumin, ebv, opt_index, nir_index, norm, lam_break):
-    """Return attenuation-absorbed energy from integrated narrow-line luminosities."""
-    curve = _attenuation_curve(line_wave, opt_index, nir_index, norm, lam_break)
+def _calzetti_k(wave_rest):
+    """Return the Calzetti et al. (2000) starburst curve k(lambda) = A(lambda) / E(B-V).
+
+    The published fit spans 0.12-2.2 micron. Shortward it is extended linearly in
+    wavelength with the 0.12 micron slope, and longward as a power law with the
+    2.2 micron logarithmic slope, so the curve is continuous and positive.
+    """
+    lam = jnp.clip(jnp.asarray(wave_rest, dtype=jnp.float64) / 1.0e4, 1.0e-3, None)
+
+    def uv(x):
+        return 2.659 * (-2.156 + 1.509 / x - 0.198 / x**2 + 0.011 / x**3) + CALZETTI_RV
+
+    def ir(x):
+        return 2.659 * (-1.857 + 1.040 / x) + CALZETTI_RV
+
+    uv_slope_012 = 2.659 * (-1.509 / 0.12**2 + 0.396 / 0.12**3 - 0.033 / 0.12**4)
+    ir_logslope_22 = -2.659 * 1.040 / 2.2 / ir(2.2)
+    k_short = uv(0.12) + uv_slope_012 * (lam - 0.12)
+    k_uv = uv(jnp.clip(lam, 0.12, 0.63))
+    k_ir = ir(jnp.clip(lam, 0.63, 2.2))
+    k_long = ir(2.2) * (jnp.maximum(lam, 2.2) / 2.2) ** ir_logslope_22
+    k = jnp.where(lam < 0.12, k_short, jnp.where(lam < 0.63, k_uv, jnp.where(lam <= 2.2, k_ir, k_long)))
+    return jnp.clip(k, 0.0, None)
+
+
+def _noll2009_bump_strength(delta):
+    """Return the 2175 A bump amplitude tied to the slope (Kriek & Conroy 2013)."""
+    return jnp.clip(KRIEK_CONROY_BUMP_INTERCEPT + KRIEK_CONROY_BUMP_SLOPE * jnp.asarray(delta, dtype=jnp.float64), 0.0, None)
+
+
+def _noll2009_attenuation_curve(wave_rest, delta):
+    """Return the Noll et al. (2009) modified Calzetti curve per unit E(B-V).
+
+    ``[k_Calzetti(lambda) + D(lambda; E_b)] (lambda / 5500 A)^delta`` with a Drude 2175 A
+    bump of amplitude ``E_b = 0.85 - 1.9 delta`` (Kriek & Conroy 2013), renormalized so
+    that A_B - A_V = 1: the sampled screen amplitude stays a B-V colour excess for any
+    slope. ``delta = 0`` is Calzetti plus a Milky-Way-strength (E_b = 0.85) bump.
+    """
+    delta = jnp.asarray(delta, dtype=jnp.float64)
+    bump_strength = _noll2009_bump_strength(delta)
+
+    def raw(wave):
+        wave = jnp.asarray(wave, dtype=jnp.float64)
+        width_term = (wave * NOLL_BUMP_FWHM_A) ** 2
+        drude = bump_strength * width_term / ((wave**2 - NOLL_BUMP_WAVE_A**2) ** 2 + width_term)
+        return (_calzetti_k(wave) + drude) * (wave / NOLL_V_WAVE_A) ** delta
+
+    colour_excess = raw(NOLL_B_WAVE_A) - raw(NOLL_V_WAVE_A)
+    return raw(wave_rest) / colour_excess
+
+
+class DustScreen(NamedTuple):
+    """Foreground screens seen by one component when the galaxy curve is not GRAHSP's.
+
+    ``ebv_host`` passes through the galaxy curve (Noll et al. 2009 with slope
+    ``noll_delta``); ``ebv_nuclear`` is the AGN's own screen and keeps the GRAHSP
+    curve. Line projectors also accept a bare E(B-V), which is the default
+    single-curve case.
+    """
+
+    ebv_host: Any
+    ebv_nuclear: Any
+    noll_delta: Any
+
+
+def _screen_magnitudes(screen, wave_rest, grahsp_curve=None):
+    """Return the attenuation A(lambda) in magnitudes for a screen or a bare E(B-V).
+
+    ``grahsp_curve`` is the GRAHSP curve already evaluated at ``wave_rest`` (cached
+    paths precompute it); it is evaluated here when not supplied.
+    """
+    if grahsp_curve is None:
+        grahsp_curve = _attenuation_curve(wave_rest, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
+    if not isinstance(screen, DustScreen):
+        return jnp.asarray(screen, dtype=jnp.float64) * grahsp_curve
+    host_curve = _noll2009_attenuation_curve(wave_rest, screen.noll_delta)
+    return (
+        jnp.asarray(screen.ebv_host, dtype=jnp.float64) * host_curve
+        + jnp.asarray(screen.ebv_nuclear, dtype=jnp.float64) * grahsp_curve
+    )
+
+
+def _absorbed_line_luminosity(line_wave, line_lumin, ebv, opt_index, nir_index, norm, lam_break, noll_delta=None):
+    """Return attenuation-absorbed energy from integrated narrow-line luminosities.
+
+    With ``noll_delta`` the host screen uses the Noll et al. (2009) curve instead.
+    """
+    if noll_delta is None:
+        curve = _attenuation_curve(line_wave, opt_index, nir_index, norm, lam_break)
+    else:
+        curve = _noll2009_attenuation_curve(line_wave, noll_delta)
     transmitted = 10 ** (jnp.asarray(ebv, dtype=jnp.float64) * curve / -2.5)
     return jnp.sum(jnp.asarray(line_lumin, dtype=jnp.float64) * (1.0 - transmitted))
 
 
-def _apply_biattenuation(wave_rest, gal_spec, agn_spec, ebv_gal, ebv_agn, opt_index, nir_index, norm, lam_break):
+def _apply_biattenuation(
+    wave_rest, gal_spec, agn_spec, ebv_gal, ebv_agn, opt_index, nir_index, norm, lam_break, noll_delta=None
+):
     """Apply differential attenuation to host and AGN components.
 
     The returned ``dust_luminosity`` is the host-galaxy luminosity absorbed by
     the galaxy attenuation curve. AGN light is attenuated separately, but its
     absorbed luminosity is not added to the host dust energy-balance budget.
+    With ``noll_delta`` the host screen (seen by host and AGN light) uses the
+    Noll et al. (2009) curve, and the AGN's own screen keeps the broken power law.
 
     Parameters
     ----------
@@ -1220,8 +1326,13 @@ def _apply_biattenuation(wave_rest, gal_spec, agn_spec, ebv_gal, ebv_agn, opt_in
         lam_break value.
     """
     curve = _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break)
-    gal_att = gal_spec * 10 ** (ebv_gal * curve / -2.5)
-    agn_att = agn_spec * 10 ** ((ebv_gal + ebv_agn) * curve / -2.5)
+    if noll_delta is None:
+        gal_att = gal_spec * 10 ** (ebv_gal * curve / -2.5)
+        agn_att = agn_spec * 10 ** ((ebv_gal + ebv_agn) * curve / -2.5)
+    else:
+        host_mag = ebv_gal * _noll2009_attenuation_curve(wave_rest, noll_delta)
+        gal_att = gal_spec * 10 ** (host_mag / -2.5)
+        agn_att = agn_spec * 10 ** ((host_mag + ebv_agn * curve) / -2.5)
     host_absorbed = jnp.clip(gal_spec - gal_att, 0.0, None)
     dust_luminosity = jnp.clip(jnp.trapezoid(host_absorbed, wave_rest), 0.0, None)
     return gal_att, agn_att, host_absorbed, dust_luminosity
@@ -1507,8 +1618,7 @@ def _project_local_line_filters(
     distance_scale = 4.0 * jnp.pi * jnp.maximum(luminosity_distance_m, 1.0e-12) ** 2 * jnp.maximum(1.0 + redshift, 1.0e-8)
     obs_line_wave = rest_line_wave * (1.0 + redshift)
     igm = jnp.interp(rest_line_wave, context.rest_wave_jax, igm, left=0.0, right=0.0)
-    attenuation_curve = _attenuation_curve(rest_line_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
-    attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
+    attenuation_factor = 10 ** (_screen_magnitudes(ebv_total, rest_line_wave) / -2.5)
     flux_lambda = rest_lumin * attenuation_factor * igm / distance_scale
     curves = context.packed_filter_curves_jax
 
@@ -1579,8 +1689,7 @@ def _project_integrated_local_line_filters(
     distance_scale = 4.0 * jnp.pi * jnp.maximum(luminosity_distance_m, 1.0e-12) ** 2 * jnp.maximum(1.0 + redshift, 1.0e-8)
     obs_line_wave = rest_line_wave * (1.0 + redshift)
     igm_local = jnp.interp(rest_line_wave, context.rest_wave_jax, igm, left=0.0, right=0.0)
-    attenuation_curve = _attenuation_curve(rest_line_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
-    attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
+    attenuation_factor = 10 ** (_screen_magnitudes(ebv_total, rest_line_wave) / -2.5)
     flux_lambda = rest_lumin * attenuation_factor * igm_local / distance_scale
     if spectral_state is not None and spectral_component_cfg is not None:
         from .spectroscopy import render_joint_feature_state
@@ -1690,8 +1799,7 @@ def _local_integrated_line_obs_sed(
     distance_scale = 4.0 * jnp.pi * jnp.maximum(luminosity_distance_m, 1.0e-12) ** 2 * jnp.maximum(1.0 + redshift, 1.0e-8)
     obs_line_wave = rest_line_wave * (1.0 + redshift)
     igm_local = jnp.interp(rest_line_wave, context.rest_wave_jax, igm, left=0.0, right=0.0)
-    attenuation_curve = _attenuation_curve(rest_line_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
-    attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
+    attenuation_factor = 10 ** (_screen_magnitudes(ebv_total, rest_line_wave) / -2.5)
     flux_lambda = rest_lumin * attenuation_factor * igm_local / distance_scale
     if spectral_state is not None and spectral_component_cfg is not None:
         from .spectroscopy import render_joint_feature_state
@@ -1751,6 +1859,16 @@ def _interp_fixed_local_line_terms(width_kms, cache):
     return profile_norm, attenuation_curve, projection_weight
 
 
+def _interp_fixed_local_line_rest_wave(width_kms, cache):
+    """Interpolate the cached local line rest wavelengths in log width (same weights as the terms)."""
+    log_width = jnp.log(jnp.maximum(jnp.asarray(width_kms, dtype=jnp.float64), 1.0e-12))
+    grid = cache.log_width_grid
+    idx_hi = jnp.clip(jnp.searchsorted(grid, log_width, side="right"), 1, grid.shape[0] - 1)
+    idx_lo = idx_hi - 1
+    w = jnp.clip((log_width - grid[idx_lo]) / jnp.maximum(grid[idx_hi] - grid[idx_lo], 1.0e-30), 0.0, 1.0)
+    return cache.rest_line_wave[idx_lo] * (1.0 - w) + cache.rest_line_wave[idx_hi] * w
+
+
 def _project_fixed_cached_local_line_filters(context: ModelContext, line_lumin, width_kms, ebv_total):
     """Project local AGN lines with fixed-z cached filter overlap terms.
 
@@ -1767,7 +1885,8 @@ def _project_fixed_cached_local_line_filters(context: ModelContext, line_lumin, 
     """
     cache = context.fixed_local_line_projection_cache_jax
     profile_norm, attenuation_curve, projection_weight = _interp_fixed_local_line_terms(width_kms, cache)
-    attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
+    rest_line_wave = _interp_fixed_local_line_rest_wave(width_kms, cache) if isinstance(ebv_total, DustScreen) else None
+    attenuation_factor = 10 ** (_screen_magnitudes(ebv_total, rest_line_wave, attenuation_curve) / -2.5)
     line_flux_density = jnp.asarray(line_lumin, dtype=jnp.float64)[:, None] * profile_norm * attenuation_factor
     return jnp.sum(projection_weight * line_flux_density[None, :, :], axis=(1, 2))
 
@@ -1788,7 +1907,8 @@ def _project_fixed_cached_local_nebular_line_filters(context: ModelContext, line
     """
     cache = context.fixed_local_nebular_line_projection_cache_jax
     profile_norm, attenuation_curve, projection_weight = _interp_fixed_local_line_terms(width_kms, cache)
-    attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
+    rest_line_wave = _interp_fixed_local_line_rest_wave(width_kms, cache) if isinstance(ebv_total, DustScreen) else None
+    attenuation_factor = 10 ** (_screen_magnitudes(ebv_total, rest_line_wave, attenuation_curve) / -2.5)
     line_flux_density = jnp.asarray(line_lumin, dtype=jnp.float64)[:, None] * profile_norm * attenuation_factor
     return jnp.sum(projection_weight * line_flux_density[None, :, :], axis=(1, 2))
 
@@ -3602,8 +3722,7 @@ def _spectral_family_extrapolation(
     component_obs_wave = component_wave * (1.0 + redshift)
     conversion = 1.0e-10 / 299792458.0 * 1.0e29
     integrated_flux = amps * jnp.sqrt(2.0 * jnp.pi) * sigs / jnp.maximum(conversion * component_obs_wave, 1.0e-30)
-    att_curve = _attenuation_curve(component_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
-    attenuation = 10 ** (ebv_total * att_curve / -2.5)
+    attenuation = 10 ** (_screen_magnitudes(ebv_total, component_wave) / -2.5)
     intrinsic_lumin = integrated_flux * 4.0 * jnp.pi * luminosity_distance_m**2 / jnp.maximum(attenuation, 1.0e-12)
     outside_mask = _photometric_agn_line_mask(context, cfg, line_wave, redshift)
     covered_mask = 1.0 - outside_mask
@@ -4174,6 +4293,20 @@ def evaluate_photometric_state(
         if fit_agn
         else jnp.asarray(0.0, dtype=jnp.float64)
     )
+    noll_delta = None
+    if fit_host and cfg.galaxy.attenuation_curve == "noll2009":
+        noll_delta = _sample_bounded_normal(
+            prior_config, "dust_delta", NOLL_DELTA_PRIOR_LOC, NOLL_DELTA_PRIOR_SCALE, NOLL_DELTA_MIN, NOLL_DELTA_MAX
+        )
+        numpyro.deterministic("dust_bump_strength", _noll2009_bump_strength(noll_delta))
+    # Screens handed to the line projectors: a bare E(B-V) on the default single
+    # curve, or the host (Noll) plus AGN (GRAHSP) screens.
+    if noll_delta is None:
+        host_screen = ebv_gal
+        agn_screen = ebv_gal + ebv_agn
+    else:
+        host_screen = DustScreen(ebv_gal, 0.0, noll_delta)
+        agn_screen = DustScreen(ebv_gal, ebv_agn, noll_delta)
     if cfg.galaxy.use_energy_balance and fit_host and cfg.galaxy.dust_model == "dale2014":
         dust_alpha_low = max(0.75, float(np.min(dust_alpha_grid)))
         dust_alpha_high = min(2.75, float(np.max(dust_alpha_grid)))
@@ -4265,6 +4398,7 @@ def evaluate_photometric_state(
         -3.0,
         1.2,
         GRAHSP_BIATTENUATION_BREAK_A,
+        noll_delta=noll_delta,
     )
     if skip_coarse_nebular_line_grid:
         # Narrow lines are generally unresolved by the broadband rest-wave
@@ -4278,11 +4412,12 @@ def evaluate_photometric_state(
             -3.0,
             1.2,
             GRAHSP_BIATTENUATION_BREAK_A,
+            noll_delta=noll_delta,
         )
     dust_luminosity = dust_luminosity + nebular["dust_luminosity"]
     attenuation_curve = _attenuation_curve(rest_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
-    gal_att_factor = 10 ** (ebv_gal * attenuation_curve / -2.5)
-    agn_att_factor = 10 ** ((ebv_gal + ebv_agn) * attenuation_curve / -2.5)
+    gal_att_factor = 10 ** (_screen_magnitudes(host_screen, rest_wave, attenuation_curve) / -2.5)
+    agn_att_factor = 10 ** (_screen_magnitudes(agn_screen, rest_wave, attenuation_curve) / -2.5)
     host_stellar_att_rest = (host_rest + nebular["absorption_rest"]) * gal_att_factor
     nebular_att_rest = nebular["emission_rest"] * gal_att_factor
     nebular_lines_att_rest = nebular["lines_rest"] * gal_att_factor
@@ -4356,13 +4491,13 @@ def evaluate_photometric_state(
                 context,
                 local_broad_line_lumin,
                 broad_line_width,
-                ebv_gal + ebv_agn,
+                agn_screen,
             )
             local_narrow_line_fluxes = _project_fixed_cached_local_line_filters(
                 context,
                 local_narrow_line_lumin,
                 narrow_line_width,
-                ebv_gal + ebv_agn,
+                agn_screen,
             )
         else:
             local_broad_line_fluxes = _project_local_line_filters(
@@ -4370,7 +4505,7 @@ def evaluate_photometric_state(
                 line_wave,
                 local_broad_line_lumin,
                 broad_line_width,
-                ebv_gal + ebv_agn,
+                agn_screen,
                 redshift,
                 luminosity_distance_m,
                 igm,
@@ -4380,7 +4515,7 @@ def evaluate_photometric_state(
                 line_wave,
                 local_narrow_line_lumin,
                 narrow_line_width,
-                ebv_gal + ebv_agn,
+                agn_screen,
                 redshift,
                 luminosity_distance_m,
                 igm,
@@ -4408,7 +4543,7 @@ def evaluate_photometric_state(
                 context,
                 nebular["line_lumin"],
                 nebular["lines_width"],
-                ebv_gal,
+                host_screen,
             )
         else:
             local_nebular_line_fluxes = _project_local_nebular_line_filters(
@@ -4416,7 +4551,7 @@ def evaluate_photometric_state(
                 context.nebular_templates_jax.line_wave_a,
                 nebular["line_lumin"],
                 nebular["lines_width"],
-                ebv_gal,
+                host_screen,
                 redshift,
                 luminosity_distance_m,
                 igm,
@@ -4577,8 +4712,8 @@ def evaluate_photometric_state(
                 1.2,
                 GRAHSP_BIATTENUATION_BREAK_A,
             )
-            spec_gal_att_factor = 10 ** (ebv_gal * spec_att_curve / -2.5)
-            spec_agn_att_factor = 10 ** ((ebv_gal + ebv_agn) * spec_att_curve / -2.5)
+            spec_gal_att_factor = 10 ** (_screen_magnitudes(host_screen, spec_rest_wave, spec_att_curve) / -2.5)
+            spec_agn_att_factor = 10 ** (_screen_magnitudes(agn_screen, spec_rest_wave, spec_att_curve) / -2.5)
             spec_nebular_absorption_rest = jnp.interp(
                 spec_rest_wave,
                 rest_wave,
@@ -4886,7 +5021,7 @@ def evaluate_photometric_state(
                         spectral_state,
                         redshift,
                         luminosity_distance_m,
-                        ebv_gal + ebv_agn,
+                        agn_screen,
                         igm,
                         line_wave,
                         line_blagn,
@@ -4903,7 +5038,7 @@ def evaluate_photometric_state(
                     line_wave,
                     spectral_extrapolated_broad_lumin,
                     spectral_extrapolated_broad_width,
-                    ebv_gal + ebv_agn,
+                    agn_screen,
                     redshift,
                     luminosity_distance_m,
                     igm,
@@ -4915,7 +5050,7 @@ def evaluate_photometric_state(
                     line_wave,
                     spectral_extrapolated_narrow_lumin,
                     spectral_extrapolated_narrow_width,
-                    ebv_gal + ebv_agn,
+                    agn_screen,
                     redshift,
                     luminosity_distance_m,
                     igm,
@@ -4985,7 +5120,7 @@ def evaluate_photometric_state(
             context.nebular_templates_jax.line_wave_a,
             nebular["line_lumin"],
             nebular["lines_width"],
-            ebv_gal,
+            host_screen,
             redshift,
             luminosity_distance_m,
             igm,
@@ -5062,7 +5197,7 @@ def evaluate_photometric_state(
             line_wave,
             spectral_extrapolated_broad_lumin,
             spectral_extrapolated_broad_width,
-            ebv_gal + ebv_agn,
+            agn_screen,
             redshift,
             luminosity_distance_m,
             igm,
@@ -5074,7 +5209,7 @@ def evaluate_photometric_state(
             line_wave,
             spectral_extrapolated_narrow_lumin,
             spectral_extrapolated_narrow_width,
-            ebv_gal + ebv_agn,
+            agn_screen,
             redshift,
             luminosity_distance_m,
             igm,
