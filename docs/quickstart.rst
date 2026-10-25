@@ -260,6 +260,21 @@ where the burst alone already exceeds it, the total sSFR is higher than sampled.
 Priors on ``log_sfh_age_gyr`` or ``log_sfh_tau_gyr`` cannot be combined with this
 mode, and it does not apply to Diffstar.
 
+The galaxy dust attenuation curve defaults to the GRAHSP broken power law. For
+rest-frame UV photometry you can switch the host screen to the Noll et al. (2009)
+modified Calzetti curve, which adds the 2175 A bump and a variable slope:
+
+.. code-block:: python
+
+   cfg.galaxy.attenuation_curve = "noll2009"      # default: "grahsp"
+
+The curve is ``[k_Calzetti + D(E_b)] (lambda / 5500 A)^delta``, renormalized so that
+``ebv_gal`` stays an E(B-V). The bump amplitude is tied to the slope by Kriek & Conroy
+(2013), ``E_b = 0.85 - 1.9 delta``, so the only new parameter is ``dust_delta`` (default
+prior: normal with mean -0.2 and width 0.3, truncated to [-0.8, 0.4]; override it with
+``cfg.prior_config.host.dust_delta``). AGN light sees the host screen through this curve
+and its own screen, ``ebv_agn``, through the unchanged GRAHSP curve.
+
 Use ``host_sfh_model="diffstar"`` when you want the Diffstar-based SFH
 parameterization:
 

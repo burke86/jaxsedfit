@@ -145,6 +145,7 @@ class FixedLocalLineProjectionCacheJax:
     profile_norm: jnp.ndarray
     attenuation_curve: jnp.ndarray
     projection_weight: jnp.ndarray
+    rest_line_wave: jnp.ndarray
 
 
 @dataclass
@@ -154,6 +155,7 @@ class FixedLocalNebularLineProjectionCacheJax:
     profile_norm: jnp.ndarray
     attenuation_curve: jnp.ndarray
     projection_weight: jnp.ndarray
+    rest_line_wave: jnp.ndarray
 
 
 @dataclass
@@ -1815,12 +1817,13 @@ def _build_fixed_local_line_projection_cache_jax(
     )
     cached = _FIXED_LOCAL_LINE_PROJECTION_CACHE.get(cache_key)
     if cached is not None:
-        cached_log_width, profile_norm, attenuation_curve, projection_weight = cached
+        cached_log_width, profile_norm, attenuation_curve, projection_weight, rest_line_wave_grid = cached
         return FixedLocalLineProjectionCacheJax(
             log_width_grid=jnp.asarray(cached_log_width, dtype=jnp.float64),
             profile_norm=jnp.asarray(profile_norm, dtype=jnp.float64),
             attenuation_curve=jnp.asarray(attenuation_curve, dtype=jnp.float64),
             projection_weight=jnp.asarray(projection_weight, dtype=jnp.float64),
+            rest_line_wave=jnp.asarray(rest_line_wave_grid, dtype=jnp.float64),
         )
 
     n_lines = line_wave.size
@@ -1828,6 +1831,7 @@ def _build_fixed_local_line_projection_cache_jax(
     n_filters = len(filters)
     profile_norm = np.empty((n_width, n_lines, n_local), dtype=float)
     attenuation_curve = np.empty_like(profile_norm)
+    rest_line_wave_grid = np.empty_like(profile_norm)
     projection_weight = np.empty((n_width, n_filters, n_lines, n_local), dtype=float)
     distance_scale = 4.0 * np.pi * max(float(luminosity_distance_m), 1.0e-12) ** 2 * max(1.0 + float(redshift), 1.0e-8)
     fixed_igm = np.asarray(fixed_igm, dtype=float)
@@ -1841,6 +1845,7 @@ def _build_fixed_local_line_projection_cache_jax(
         norm = 5100.0 / np.sqrt(np.pi * sigma * sigma)
         profile_norm[iw] = np.exp(-0.5 * z * z) * norm[:, None]
         attenuation_curve[iw] = _attenuation_curve_np(rest_line_wave, -1.2, -3.0, 1.2, 11000.0)
+        rest_line_wave_grid[iw] = rest_line_wave
         igm_local = np.interp(rest_line_wave, rest_wave, fixed_igm, left=0.0, right=0.0)
         obs_line_wave = rest_line_wave * (1.0 + float(redshift))
         trap_weights = _trapezoid_weights_axis1(obs_line_wave)
@@ -1852,12 +1857,13 @@ def _build_fixed_local_line_projection_cache_jax(
             conv = 1.0e-10 / 299792458.0 * 1.0e29 * float(filt.effective_wavelength) ** 2
             projection_weight[iw, ifilt] = conv * trap_weights * trans * igm_local / denom / distance_scale
 
-    _FIXED_LOCAL_LINE_PROJECTION_CACHE[cache_key] = (log_width_grid, profile_norm, attenuation_curve, projection_weight)
+    _FIXED_LOCAL_LINE_PROJECTION_CACHE[cache_key] = (log_width_grid, profile_norm, attenuation_curve, projection_weight, rest_line_wave_grid)
     return FixedLocalLineProjectionCacheJax(
         log_width_grid=jnp.asarray(log_width_grid, dtype=jnp.float64),
         profile_norm=jnp.asarray(profile_norm, dtype=jnp.float64),
         attenuation_curve=jnp.asarray(attenuation_curve, dtype=jnp.float64),
         projection_weight=jnp.asarray(projection_weight, dtype=jnp.float64),
+        rest_line_wave=jnp.asarray(rest_line_wave_grid, dtype=jnp.float64),
     )
 
 
@@ -1914,12 +1920,13 @@ def _build_fixed_local_nebular_line_projection_cache_jax(
     )
     cached = _FIXED_LOCAL_NEBULAR_LINE_PROJECTION_CACHE.get(cache_key)
     if cached is not None:
-        cached_log_width, profile_norm, attenuation_curve, projection_weight = cached
+        cached_log_width, profile_norm, attenuation_curve, projection_weight, rest_line_wave_grid = cached
         return FixedLocalNebularLineProjectionCacheJax(
             log_width_grid=jnp.asarray(cached_log_width, dtype=jnp.float64),
             profile_norm=jnp.asarray(profile_norm, dtype=jnp.float64),
             attenuation_curve=jnp.asarray(attenuation_curve, dtype=jnp.float64),
             projection_weight=jnp.asarray(projection_weight, dtype=jnp.float64),
+            rest_line_wave=jnp.asarray(rest_line_wave_grid, dtype=jnp.float64),
         )
 
     n_lines = line_wave.size
@@ -1927,6 +1934,7 @@ def _build_fixed_local_nebular_line_projection_cache_jax(
     n_filters = len(filters)
     profile_norm = np.empty((n_width, n_lines, n_local), dtype=float)
     attenuation_curve = np.empty_like(profile_norm)
+    rest_line_wave_grid = np.empty_like(profile_norm)
     projection_weight = np.empty((n_width, n_filters, n_lines, n_local), dtype=float)
     distance_scale = 4.0 * np.pi * max(float(luminosity_distance_m), 1.0e-12) ** 2 * max(1.0 + float(redshift), 1.0e-8)
     fixed_igm = np.asarray(fixed_igm, dtype=float)
@@ -1940,6 +1948,7 @@ def _build_fixed_local_nebular_line_projection_cache_jax(
         norm = 1.0 / np.maximum(sigma * np.sqrt(2.0 * np.pi), 1.0e-30)
         profile_norm[iw] = np.exp(-0.5 * z * z) * norm[:, None]
         attenuation_curve[iw] = _attenuation_curve_np(rest_line_wave, -1.2, -3.0, 1.2, 11000.0)
+        rest_line_wave_grid[iw] = rest_line_wave
         igm_local = np.interp(rest_line_wave, rest_wave, fixed_igm, left=0.0, right=0.0)
         obs_line_wave = rest_line_wave * (1.0 + float(redshift))
         trap_weights = _trapezoid_weights_axis1(obs_line_wave)
@@ -1951,12 +1960,13 @@ def _build_fixed_local_nebular_line_projection_cache_jax(
             conv = 1.0e-10 / 299792458.0 * 1.0e29 * float(filt.effective_wavelength) ** 2
             projection_weight[iw, ifilt] = conv * trap_weights * trans * igm_local / denom / distance_scale
 
-    _FIXED_LOCAL_NEBULAR_LINE_PROJECTION_CACHE[cache_key] = (log_width_grid, profile_norm, attenuation_curve, projection_weight)
+    _FIXED_LOCAL_NEBULAR_LINE_PROJECTION_CACHE[cache_key] = (log_width_grid, profile_norm, attenuation_curve, projection_weight, rest_line_wave_grid)
     return FixedLocalNebularLineProjectionCacheJax(
         log_width_grid=jnp.asarray(log_width_grid, dtype=jnp.float64),
         profile_norm=jnp.asarray(profile_norm, dtype=jnp.float64),
         attenuation_curve=jnp.asarray(attenuation_curve, dtype=jnp.float64),
         projection_weight=jnp.asarray(projection_weight, dtype=jnp.float64),
+        rest_line_wave=jnp.asarray(rest_line_wave_grid, dtype=jnp.float64),
     )
 
 

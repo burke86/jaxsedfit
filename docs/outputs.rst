@@ -87,6 +87,9 @@ Host galaxy and star formation
    * - ``log_sfh_ssfr``
      - log10(yr^-1)
      - Sampled sSFR (current SFR per formed stellar mass) with ``galaxy.sfh_prior="ssfr_uniform"``; ``tau`` is solved from it.
+   * - ``dust_delta``, ``dust_bump_strength``
+     - dimensionless
+     - Noll et al. (2009) attenuation slope and the 2175 A bump amplitude tied to it (Kriek & Conroy 2013), with ``galaxy.attenuation_curve="noll2009"``.
    * - ``log_sfh_burst_fraction``, ``sfh_burst_fraction_fit``
      - ln(fraction), fraction
      - Burst fraction of formed stellar mass in the delayed-burst model.
