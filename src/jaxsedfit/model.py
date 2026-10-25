@@ -1579,6 +1579,49 @@ def _local_flux_conserving_line_grid(line_wave, line_lumin, width_kms, *, n_loca
     return wave, lumin
 
 
+def _igm_transmission_at_redshift(context: ModelContext, redshift):
+    """Return the IGM transmission on the rest grid at a sampled redshift.
+
+    Interpolates the preload table linearly in redshift when it exists, else evaluates
+    the exact model.
+    """
+    table = context.igm_redshift_table_jax
+    if table is None:
+        return _igm_transmission(context.igm_cache_jax, redshift)
+    n_z = table.table.shape[0]
+    pos = jnp.clip((jnp.asarray(redshift, dtype=jnp.float64) - table.z0) / table.dz, 0.0, n_z - 1.0)
+    idx = jnp.clip(jnp.floor(pos).astype(jnp.int32), 0, n_z - 2)
+    frac = pos - idx
+    values = table.table[idx] * (1.0 - frac) + table.table[idx + 1] * frac
+    return jnp.ones_like(context.rest_wave_jax).at[table.columns].set(values)
+
+
+def _packed_filter_transmission(curves, obs_wave):
+    """Return every packed filter's transmission at ``obs_wave``, shape (n_filters,) + obs_wave.shape."""
+    obs_wave = jnp.asarray(obs_wave, dtype=jnp.float64)
+    if curves.uniform_transmission is None:
+        return jax.vmap(lambda w, t: jnp.interp(obs_wave, w, t, left=0.0, right=0.0))(curves.wave, curves.transmission)
+    n_grid = curves.uniform_transmission.shape[1]
+    pos = (obs_wave.reshape(-1)[None, :] - curves.uniform_wave0[:, None]) / curves.uniform_dwave[:, None]
+    idx = jnp.clip(jnp.floor(pos).astype(jnp.int32), 0, n_grid - 2)
+    frac = pos - idx
+    lo = jnp.take_along_axis(curves.uniform_transmission, idx, axis=1)
+    hi = jnp.take_along_axis(curves.uniform_transmission, idx + 1, axis=1)
+    inside = (pos >= 0.0) & (pos <= curves.uniform_last_index[:, None])
+    trans = jnp.where(inside, lo + (hi - lo) * frac, 0.0)
+    return trans.reshape((-1,) + obs_wave.shape)
+
+
+def _project_local_grid_filters(context: ModelContext, obs_line_wave, flux_lambda):
+    """Project local line grids (n_lines, n_local) of f_lambda through every packed filter, in mJy."""
+    curves = context.packed_filter_curves_jax
+    trans = _packed_filter_transmission(curves, obs_line_wave)
+    numer = jnp.sum(jnp.trapezoid(trans * flux_lambda[None], obs_line_wave[None], axis=-1), axis=-1)
+    f_lambda = numer / jnp.maximum(curves.denom, 1.0e-30)
+    eff_wave = context.filter_effective_wavelength_jax
+    return 1.0e-10 / 299792458.0 * 1.0e29 * eff_wave * eff_wave * f_lambda
+
+
 def _project_local_line_filters(
     context: ModelContext,
     line_wave,
@@ -1620,33 +1663,7 @@ def _project_local_line_filters(
     igm = jnp.interp(rest_line_wave, context.rest_wave_jax, igm, left=0.0, right=0.0)
     attenuation_factor = 10 ** (_screen_magnitudes(ebv_total, rest_line_wave) / -2.5)
     flux_lambda = rest_lumin * attenuation_factor * igm / distance_scale
-    curves = context.packed_filter_curves_jax
-
-    def _one_filter(filt_wave, filt_trans, denom, eff_wave):
-        """Project the local AGN line grid through one packed filter curve.
-
-        Parameters
-        ----------
-        filt_wave : object
-            filt_wave value.
-        filt_trans : object
-            filt_trans value.
-        denom : object
-            denom value.
-        eff_wave : object
-            eff_wave value.
-        """
-        trans = jnp.interp(obs_line_wave, filt_wave, filt_trans, left=0.0, right=0.0)
-        numer = jnp.sum(jnp.trapezoid(trans * flux_lambda, obs_line_wave, axis=1))
-        f_lambda = numer / jnp.maximum(denom, 1.0e-30)
-        return 1.0e-10 / 299792458.0 * 1.0e29 * eff_wave * eff_wave * f_lambda
-
-    return jax.vmap(_one_filter)(
-        curves.wave,
-        curves.transmission,
-        curves.denom,
-        context.filter_effective_wavelength_jax,
-    )
+    return _project_local_grid_filters(context, obs_line_wave, flux_lambda)
 
 
 def _project_integrated_local_line_filters(
@@ -1707,33 +1724,7 @@ def _project_integrated_local_line_filters(
             spectral_state,
             config=bal_only_cfg,
         )["bal_transmission"]
-    curves = context.packed_filter_curves_jax
-
-    def _one_filter(filt_wave, filt_trans, denom, eff_wave):
-        """Project the local line grid through one packed filter curve.
-
-        Parameters
-        ----------
-        filt_wave : object
-            filt_wave value.
-        filt_trans : object
-            filt_trans value.
-        denom : object
-            denom value.
-        eff_wave : object
-            eff_wave value.
-        """
-        trans = jnp.interp(obs_line_wave, filt_wave, filt_trans, left=0.0, right=0.0)
-        numer = jnp.sum(jnp.trapezoid(trans * flux_lambda, obs_line_wave, axis=1))
-        f_lambda = numer / jnp.maximum(denom, 1.0e-30)
-        return 1.0e-10 / 299792458.0 * 1.0e29 * eff_wave * eff_wave * f_lambda
-
-    return jax.vmap(_one_filter)(
-        curves.wave,
-        curves.transmission,
-        curves.denom,
-        context.filter_effective_wavelength_jax,
-    )
+    return _project_local_grid_filters(context, obs_line_wave, flux_lambda)
 
 
 def _project_local_nebular_line_filters(
@@ -2030,6 +2021,44 @@ def _host_metallicity_parameters(
     return gal_lgmet, gal_lgmet_scatter
 
 
+def _fixed_metallicity_host_basis(context: ModelContext, prior_config: dict[str, Any]):
+    """Return the host SSP basis pre-summed over metallicity when no metallicity is sampled.
+
+    With the configured (unsampled) metallicity and MDF scatter the metallicity weights are
+    constants, so contracting the (n_met, n_age, n_wave) basis on every evaluation is wasted
+    work. Returns the normalized-weight sum over metallicity, shape (n_age, n_wave), evaluated
+    once at trace time, or ``None`` when any metallicity parameter is sampled.
+    """
+    sampled = {"gal_lgmet", "gal_lgmet_scatter", "log_gal_lgmet_scatter"}
+    galaxy_cfg = context.fit_config.galaxy
+    tied = bool(getattr(galaxy_cfg, "fit_host", True) and getattr(galaxy_cfg, "tie_stellar_nebular_metallicity", False))
+    if tied:
+        sampled.add("nebular_zgas")
+    if any(key in prior_config for key in sampled):
+        return None
+    with jax.ensure_compile_time_eval():
+        shared_gal_lgmet = _resolve_tied_metallicity(context, prior_config)[1] if tied else None
+        gal_lgmet, gal_lgmet_scatter = _host_metallicity_parameters(context, prior_config, shared_gal_lgmet)
+        lgmet_weights = calc_lgmet_weights_from_lognormal_mdf(
+            gal_lgmet, gal_lgmet_scatter, context.host_basis_jax.ssp_lgmet
+        )
+        lgmet_weights = lgmet_weights / jnp.maximum(jnp.sum(lgmet_weights), 1.0e-30)
+        return jnp.tensordot(lgmet_weights, context.host_basis_jax.rest_llambda, axes=(0, 0))
+
+
+def _contract_host_basis(host_weights, age_weights, host_basis_rest, fixed_basis):
+    """Return sum_{met, age} w * basis, using the metallicity-collapsed basis when available.
+
+    ``host_weights`` is the normalized outer product of the metallicity and age weights, so
+    with constant metallicity weights it equals the normalized age weights against the
+    pre-summed basis.
+    """
+    if fixed_basis is None:
+        return jnp.tensordot(host_weights, host_basis_rest, axes=((0, 1), (0, 1)))
+    age_norm = age_weights / jnp.maximum(jnp.sum(age_weights), 1.0e-30)
+    return age_norm @ fixed_basis
+
+
 def _build_diffstar_host(
     context: ModelContext,
     prior_config: dict[str, Any],
@@ -2110,10 +2139,8 @@ def _build_diffstar_host(
     # its projection into SSP age bins uses the higher-accuracy quadrature.
     base_formed_mass = jnp.clip(base_history.smh[-1], 1e-30, 1.0e40)
     sfh_scale = target_formed_mass / base_formed_mass
-    host_rest = target_formed_mass * jnp.tensordot(
-        host_weights,
-        host_basis_rest,
-        axes=((0, 1), (0, 1)),
+    host_rest = target_formed_mass * _contract_host_basis(
+        host_weights, age_weights, host_basis_rest, _fixed_metallicity_host_basis(context, prior_config)
     )
     state = {
         "host_rest": host_rest,
@@ -2443,10 +2470,8 @@ def _build_delayed_host(
     target_surviving_mass = 10.0**log_stellar_mass
     target_formed_mass = target_surviving_mass / surviving_mass_fraction
     sfh_scale = target_formed_mass / base_formed_mass
-    host_rest = target_formed_mass * jnp.tensordot(
-        host_weights,
-        host_basis_rest,
-        axes=((0, 1), (0, 1)),
+    host_rest = target_formed_mass * _contract_host_basis(
+        host_weights, age_weights, host_basis_rest, _fixed_metallicity_host_basis(context, prior_config)
     )
     state = {
         "host_rest": host_rest,
@@ -3683,19 +3708,7 @@ def _project_spectral_line_state_filters(
             )
     conversion = 1.0e-10 / 299792458.0 * 1.0e29
     flambda = fnu / jnp.maximum(conversion * obs_line_wave**2, 1.0e-30)
-    curves = context.packed_filter_curves_jax
-
-    def _one_filter(filt_wave, filt_trans, denom, eff_wave):
-        trans = jax.vmap(lambda wave: jnp.interp(wave, filt_wave, filt_trans, left=0.0, right=0.0))(obs_line_wave)
-        integrated = jnp.sum(jnp.trapezoid(flambda * trans, obs_line_wave, axis=1))
-        return conversion * eff_wave**2 * integrated / jnp.maximum(denom, 1.0e-30)
-
-    return jax.vmap(_one_filter)(
-        curves.wave,
-        curves.transmission,
-        curves.denom,
-        context.filter_effective_wavelength_jax,
-    )
+    return _project_local_grid_filters(context, obs_line_wave, flambda)
 
 
 def _spectral_family_extrapolation(
@@ -3893,7 +3906,7 @@ def evaluate_photometric_state(
             cfg.galaxy.cosmology_h0,
             cfg.galaxy.cosmology_om0,
         )
-        igm = _igm_transmission(context.igm_cache_jax, redshift)
+        igm = _igm_transmission_at_redshift(context, redshift)
     else:
         redshift = context.fixed_redshift_jax
         luminosity_distance_m = context.fixed_luminosity_distance_m_jax

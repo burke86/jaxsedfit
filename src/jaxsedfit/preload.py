@@ -68,11 +68,20 @@ class PackedFiltersJax:
 
 @dataclass
 class PackedFilterCurvesJax:
-    """JAX-native raw filter curves for local component quadrature."""
+    """JAX-native raw filter curves for local component quadrature.
+
+    The ``uniform_*`` arrays resample each curve onto its own uniform wavelength grid
+    (per-filter start ``uniform_wave0`` and step ``uniform_dwave``), so a lookup is index arithmetic instead of a binary
+    search over the native samples. ``None`` falls back to interpolating the native curves.
+    """
     wave: jnp.ndarray
     transmission: jnp.ndarray
     denom: jnp.ndarray
     valid_mask: jnp.ndarray
+    uniform_wave0: jnp.ndarray | None = None
+    uniform_dwave: jnp.ndarray | None = None
+    uniform_last_index: jnp.ndarray | None = None
+    uniform_transmission: jnp.ndarray | None = None
 
 
 @dataclass
@@ -240,6 +249,15 @@ def _empty_host_basis_jax(rest_wave: np.ndarray, gal_t_table: np.ndarray) -> Hos
 
 
 @dataclass
+class IGMRedshiftTableJax:
+    """IGM transmission tabulated on a uniform redshift grid, for rest wavelengths it affects."""
+    z0: jnp.ndarray
+    dz: jnp.ndarray
+    columns: np.ndarray
+    table: jnp.ndarray
+
+
+@dataclass
 class ModelContext:
     """Static arrays and metadata required by one jaxsedfit model evaluation."""
     fit_config: FitConfig
@@ -298,6 +316,7 @@ class ModelContext:
     spec_resolving_power: np.ndarray
     spectral_prior_config: Mapping[str, Any] | None
     mw_ebv: float
+    igm_redshift_table_jax: IGMRedshiftTableJax | None = None
 
 
 _SFD_QUERY_CACHE: dict[str, Any] = {}
@@ -959,12 +978,54 @@ def _pack_filter_curves_jax(filters: Sequence[LoadedFilter]) -> PackedFilterCurv
             step = max(float(filt_wave[-1] - filt_wave[-2]) if n > 1 else 1.0, 1.0e-6)
             pad = filt_wave[-1] + step * np.arange(1, max_points - n + 1, dtype=float)
             wave[i, n:] = pad
+    wave0, dwave, last_index, uniform_transmission = _uniform_filter_grids(filters)
     return PackedFilterCurvesJax(
         wave=jnp.asarray(wave, dtype=jnp.float64),
         transmission=jnp.asarray(transmission, dtype=jnp.float64),
         denom=jnp.asarray(denom, dtype=jnp.float64),
         valid_mask=jnp.asarray(valid_mask, dtype=bool),
+        uniform_wave0=jnp.asarray(wave0, dtype=jnp.float64),
+        uniform_dwave=jnp.asarray(dwave, dtype=jnp.float64),
+        uniform_last_index=jnp.asarray(last_index, dtype=jnp.float64),
+        uniform_transmission=jnp.asarray(uniform_transmission, dtype=jnp.float64),
     )
+
+
+UNIFORM_FILTER_GRID_MAX_POINTS = 20000
+
+
+def _uniform_filter_grids(filters: Sequence[LoadedFilter]):
+    """Resample native filter curves onto per-filter uniform wavelength grids.
+
+    A curve that is already uniformly sampled (most published curves) keeps its own samples,
+    so the lookup reproduces native linear interpolation exactly. Otherwise the step is an
+    eighth of the median native spacing (capped at ``UNIFORM_FILTER_GRID_MAX_POINTS``
+    samples), which follows the piecewise-linear curve closely. Each grid ends exactly on
+    the curve's last sample.
+    """
+    starts, steps, lengths, curves = [], [], [], []
+    for filt in filters:
+        wave = np.asarray(filt.wave, dtype=float)
+        trans = np.clip(np.asarray(filt.native_transmission, dtype=float), 0.0, None)
+        span = max(float(wave[-1] - wave[0]), 1.0e-12)
+        diffs = np.diff(wave)
+        if diffs.size and np.allclose(diffs, diffs[0], rtol=1.0e-9, atol=0.0):
+            n = wave.size
+        else:
+            target = float(np.median(diffs)) / 8.0 if diffs.size else span
+            n = int(np.ceil(span / max(target, span / (UNIFORM_FILTER_GRID_MAX_POINTS - 1)))) + 1
+        n = max(n, 2)
+        step = span / (n - 1)
+        grid = wave[0] + step * np.arange(n, dtype=float)
+        grid[-1] = wave[-1]
+        starts.append(float(wave[0]))
+        steps.append(step)
+        lengths.append(n)
+        curves.append(np.interp(grid, wave, trans, left=0.0, right=0.0))
+    table = np.zeros((len(filters), max(lengths)), dtype=float)
+    for i, curve in enumerate(curves):
+        table[i, : curve.size] = curve
+    return np.array(starts), np.array(steps), np.array(lengths, dtype=float) - 1.0, table
 
 
 def _trapezoid_weights(x: np.ndarray) -> np.ndarray:
@@ -1655,6 +1716,27 @@ def _redshift_projection_grid(cfg: FitConfig) -> np.ndarray:
     return np.linspace(low, high, n_grid, dtype=float)
 
 
+def _build_igm_redshift_table_jax(igm_cache: IGMCacheJax, cfg: FitConfig) -> IGMRedshiftTableJax | None:
+    """Tabulate the exact IGM transmission over the photo-z redshift range.
+
+    Only rest wavelengths where the transmission differs from 1 anywhere on the grid
+    (blueward of Ly-alpha) are stored; the rest are exactly 1.
+    """
+    n_grid = int(cfg.likelihood.igm_redshift_table_n_grid)
+    if not cfg.observation.fits_redshift or n_grid < 2:
+        return None
+    z_proj = _redshift_projection_grid(cfg)
+    z_grid = np.linspace(float(z_proj[0]), float(z_proj[-1]), n_grid)
+    table = np.asarray(jax.vmap(lambda z: _build_fixed_igm_jax(igm_cache, z))(jnp.asarray(z_grid)), dtype=float)
+    columns = np.flatnonzero(np.any(table != 1.0, axis=0))
+    return IGMRedshiftTableJax(
+        z0=jnp.asarray(z_grid[0], dtype=jnp.float64),
+        dz=jnp.asarray(z_grid[1] - z_grid[0], dtype=jnp.float64),
+        columns=columns,
+        table=jnp.asarray(table[:, columns], dtype=jnp.float64),
+    )
+
+
 def _build_redshift_projection_cache_jax(
     rest_wave: np.ndarray,
     packed_filters: PackedFilters,
@@ -2196,9 +2278,11 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
             cfg,
             cosmology,
         )
+        igm_redshift_table_jax = _build_igm_redshift_table_jax(igm_cache_jax, cfg)
     else:
         fixed_redshift_jax = jnp.asarray(float(cfg.observation.redshift), dtype=jnp.float64)
         fixed_luminosity_distance_m_jax = jnp.asarray(luminosity_distance_m, dtype=jnp.float64)
+        igm_redshift_table_jax = None
         fixed_igm_jax = _build_fixed_igm_jax(igm_cache_jax, float(cfg.observation.redshift))
         filter_projection, scalar_projection = _build_fixed_filter_projection_matrices(
             rest_wave,
@@ -2301,4 +2385,5 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         spec_resolving_power=spec_resolving_power,
         spectral_prior_config=spectral_prior_config,
         mw_ebv=mw_ebv,
+        igm_redshift_table_jax=igm_redshift_table_jax,
     )
