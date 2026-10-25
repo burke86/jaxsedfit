@@ -18,10 +18,11 @@ def _normalize_template_flux(flux: np.ndarray, target_amp: float = 1.0) -> np.nd
 
     Parameters
     ----------
-    flux : object
-        flux value.
-    target_amp : object
-        target_amp value.
+    flux : array_like
+        Template flux values; non-finite entries are ignored when computing the
+        99th-percentile absolute amplitude.
+    target_amp : float, optional
+        Desired robust (99th-percentile absolute) amplitude after rescaling.
     """
     f = np.asarray(flux, dtype=float)
     robust = np.nanpercentile(np.abs(f), 99)
@@ -35,8 +36,9 @@ def _sanitize_component_name(name: str) -> str:
 
     Parameters
     ----------
-    name : object
-        name value.
+    name : str
+        User-supplied component name; converted to lowercase with non-alphanumeric runs
+        replaced by underscores.
     """
     text = re.sub(r"[^0-9a-zA-Z_]+", "_", str(name).strip())
     text = re.sub(r"_+", "_", text).strip("_").lower()
@@ -53,8 +55,8 @@ def _callable_to_ref(func: Callable[..., Any]) -> str:
 
     Parameters
     ----------
-    func : object
-        func value.
+    func : Callable[..., Any]
+        Importable module-level function (not a lambda or closure).
     """
     module = getattr(func, "__module__", None)
     qualname = getattr(func, "__qualname__", None)
@@ -72,8 +74,8 @@ def _callable_from_ref(ref: str) -> Callable[..., Any]:
 
     Parameters
     ----------
-    ref : object
-        ref value.
+    ref : str
+        Reference string of the form ``"module:qualname"``.
     """
     module_name, qualname = str(ref).split(":", 1)
     obj: Any = importlib.import_module(module_name)
@@ -96,10 +98,10 @@ def custom_component_param_site(comp: Any, param_name: str) -> str:
 
     Parameters
     ----------
-    comp : object
-        comp value.
-    param_name : object
-        param_name value.
+    comp : CustomComponentSpec or CustomLineComponentSpec
+        Component spec whose ``metadata`` may define ``shared_parameter_sites``.
+    param_name : str
+        Local parameter name as used in ``comp.parameter_priors``.
     """
     shared = getattr(comp, "metadata", {}).get("shared_parameter_sites", {})
     if isinstance(shared, Mapping) and str(param_name) in shared:
@@ -130,8 +132,8 @@ def _normalize_parameter_prior(value: Any) -> dist.Distribution:
 
     Parameters
     ----------
-    value : object
-        value value.
+    value : numpyro.distributions.Distribution or Mapping[str, Any]
+        NumPyro distribution, or a serialized prior mapping with a ``"dist"`` key.
     """
     return _prior_to_mapping(value)
 
@@ -198,8 +200,8 @@ class CustomComponentSpec:
 
         Parameters
         ----------
-        param_name : object
-            param_name value.
+        param_name : str
+            Local parameter name as used in ``parameter_priors``.
         """
         return f"{self.prefix}_{param_name}"
 
@@ -223,8 +225,8 @@ class CustomComponentSpec:
 
         Parameters
         ----------
-        state : object
-            state value.
+        state : Mapping[str, Any]
+            Serialized state produced by :meth:`to_state`.
         """
         return cls(
             name=str(state["name"]),
@@ -291,8 +293,8 @@ class CustomLineComponentSpec:
 
         Parameters
         ----------
-        param_name : object
-            param_name value.
+        param_name : str
+            Local parameter name as used in ``parameter_priors``.
         """
         return f"{self.prefix}_{param_name}"
 
@@ -316,8 +318,8 @@ class CustomLineComponentSpec:
 
         Parameters
         ----------
-        state : object
-            state value.
+        state : Mapping[str, Any]
+            Serialized state produced by :meth:`to_state`.
         """
         return cls(
             name=str(state["name"]),
@@ -450,14 +452,17 @@ def make_custom_component(
 
     Parameters
     ----------
-    name : object
-        name value.
-    parameter_priors : object
-        parameter_priors value.
-    evaluate : object
-        evaluate value.
-    metadata : object
-        metadata value.
+    name : str
+        Component name; sanitized to a lowercase identifier and used as the output key.
+    parameter_priors : Mapping[str, Any]
+        Local parameter names mapped to NumPyro distributions (or serialized prior
+        mappings).
+    evaluate : Callable[[jax.Array, Mapping[str, Any], Mapping[str, Any]], jax.Array]
+        Importable top-level function ``evaluate(wave, params, metadata)`` returning the
+        component f_nu (mJy) on ``wave`` (Angstrom).
+    metadata : Mapping[str, Any] or None, optional
+        Static data passed to ``evaluate`` (e.g. template arrays,
+        ``shared_parameter_sites``).
     """
     return CustomComponentSpec(
         name=name,
@@ -484,16 +489,18 @@ def make_custom_line_component(
 
     Parameters
     ----------
-    name : object
-        name value.
-    parameter_priors : object
-        parameter_priors value.
-    evaluate : object
-        evaluate value.
-    line_kind : object
-        line_kind value.
-    metadata : object
-        metadata value.
+    name : str
+        Component name; sanitized to a lowercase identifier and used as the output key.
+    parameter_priors : Mapping[str, Any]
+        Local parameter names mapped to NumPyro distributions (or serialized prior
+        mappings).
+    evaluate : Callable[[jax.Array, Mapping[str, Any], Mapping[str, Any]], jax.Array]
+        Importable top-level function ``evaluate(wave, params, metadata)`` returning the
+        line f_nu (mJy) on ``wave`` (Angstrom).
+    line_kind : str, optional
+        ``"broad"`` or ``"narrow"``; selects which line total the component is added to.
+    metadata : Mapping[str, Any] or None, optional
+        Static data passed to ``evaluate``.
     """
     return CustomLineComponentSpec(
         name=name,
@@ -511,12 +518,14 @@ def template_component_evaluator(wave, params, metadata):
 
     Parameters
     ----------
-    wave : object
-        wave value.
-    params : object
-        params value.
-    metadata : object
-        metadata value.
+    wave : jax.Array
+        Wavelength grid in Angstrom (rest frame for default ``frame="rest"``).
+    params : Mapping[str, jax.Array]
+        Sampled parameters: ``norm`` (required), optional ``fwhm`` (km/s) and ``shift``
+        (fractional wavelength shift).
+    metadata : Mapping[str, Any]
+        Template data: ``wave``, ``flux`` and optional ``flux_model``,
+        ``base_fwhm_kms``, ``default_fwhm_kms``.
     """
     from .spectral_model import _fe_template_component
 
@@ -552,24 +561,27 @@ def make_template_component(
 
     Parameters
     ----------
-    name : object
-        name value.
-    wave : object
-        wave value.
-    flux : object
-        flux value.
-    fit_fwhm : object
-        fit_fwhm value.
-    fit_shift : object
-        fit_shift value.
-    base_fwhm_kms : object
-        base_fwhm_kms value.
-    default_fwhm_kms : object
-        default_fwhm_kms value.
-    normalize_template : object
-        normalize_template value.
-    target_amp : object
-        target_amp value.
+    name : str
+        Component name; sanitized to a lowercase identifier.
+    wave : Sequence[float]
+        Strictly increasing template wavelength grid in Angstrom.
+    flux : Sequence[float]
+        Template flux on ``wave``; same length, finite.
+    fit_fwhm : bool, optional
+        If True, sample a broadening FWHM ``fwhm`` (km/s, LogNormal around
+        ``default_fwhm_kms``).
+    fit_shift : bool, optional
+        If True, sample a fractional wavelength shift ``shift`` (Normal(0, 1e-3)).
+    base_fwhm_kms : float, optional
+        Intrinsic FWHM (km/s) of the input template; requested widths below it are
+        unresolved.
+    default_fwhm_kms : float, optional
+        FWHM (km/s) used when ``fwhm`` is not fitted, and the prior center when it is.
+    normalize_template : bool, optional
+        If True, rescale the template so its robust peak is ``target_amp`` before
+        fitting.
+    target_amp : float, optional
+        Robust peak amplitude used when ``normalize_template`` is True.
     """
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -611,8 +623,8 @@ def normalize_custom_components(custom_components: Iterable[CustomComponentSpec]
 
     Parameters
     ----------
-    custom_components : object
-        custom_components value.
+    custom_components : Iterable[CustomComponentSpec] or None
+        Continuum component specs; names must be unique. None yields an empty tuple.
     """
     if custom_components is None:
         return ()
@@ -635,8 +647,8 @@ def normalize_custom_line_components(
 
     Parameters
     ----------
-    custom_line_components : object
-        custom_line_components value.
+    custom_line_components : Iterable[CustomLineComponentSpec] or None
+        Line component specs; names must be unique. None yields an empty tuple.
     """
     if custom_line_components is None:
         return ()
@@ -661,12 +673,13 @@ def inject_default_custom_component_priors(
 
     Parameters
     ----------
-    prior_config : object
-        prior_config value.
-    flux : object
-        flux value.
-    custom_components : object
-        custom_components value.
+    prior_config : dict[str, Any]
+        Prior configuration mapping keyed by sample-site name; not modified in place.
+    flux : numpy.ndarray
+        Observed flux; its median absolute finite value sets the scale of placeholder
+        priors.
+    custom_components : Iterable[CustomComponentSpec] or None
+        Continuum components whose parameter sites receive default priors.
     """
     comps = normalize_custom_components(custom_components)
     if len(comps) == 0:
@@ -703,12 +716,13 @@ def inject_default_custom_line_component_priors(
 
     Parameters
     ----------
-    prior_config : object
-        prior_config value.
-    flux : object
-        flux value.
-    custom_line_components : object
-        custom_line_components value.
+    prior_config : dict[str, Any]
+        Prior configuration mapping keyed by sample-site name; not modified in place.
+    flux : numpy.ndarray
+        Observed flux; its median absolute finite value sets the scale of placeholder
+        priors.
+    custom_line_components : Iterable[CustomLineComponentSpec] or None
+        Line components whose parameter sites receive default priors.
     """
     comps = normalize_custom_line_components(custom_line_components)
     if len(comps) == 0:
@@ -739,8 +753,8 @@ def custom_component_site_names(custom_components: Iterable[CustomComponentSpec]
 
     Parameters
     ----------
-    custom_components : object
-        custom_components value.
+    custom_components : Iterable[CustomComponentSpec] or None
+        Continuum component specs.
     """
     return [comp.deterministic_site_name for comp in normalize_custom_components(custom_components)]
 
@@ -752,7 +766,7 @@ def custom_line_component_site_names(
 
     Parameters
     ----------
-    custom_line_components : object
-        custom_line_components value.
+    custom_line_components : Iterable[CustomLineComponentSpec] or None
+        Line component specs.
     """
     return [comp.deterministic_site_name for comp in normalize_custom_line_components(custom_line_components)]

@@ -31,18 +31,18 @@ def build_host_basis_jax(
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
-    dsps_ssp_fn : object
-        dsps_ssp_fn value.
+    rest_wave : numpy.ndarray
+        Rest-frame wavelength grid in Angstrom, 1D with at least 2 samples.
+    dsps_ssp_fn : str
+        Path to the DSPS SSP template HDF5 file.
     ssp_imf : str
         IMF provenance of the SSP library and surviving-mass calibration.
-    t_obs_gyr : object
-        t_obs_gyr value.
-    sfh_n_steps : object
-        sfh_n_steps value.
-    sfh_t_min_gyr : object
-        sfh_t_min_gyr value.
+    t_obs_gyr : float
+        Age of the universe at the source redshift in Gyr; upper end of the SFH time grid.
+    sfh_n_steps : int
+        Number of log-spaced cosmic-time steps in the SFH table ``gal_t_table``.
+    sfh_t_min_gyr : float
+        Earliest SFH table time in Gyr (floored at 1e-3).
     """
     rest_wave = np.asarray(rest_wave, dtype=float)
     if rest_wave.ndim != 1 or rest_wave.size < 2:
@@ -82,20 +82,20 @@ def build_host_state(
 
     Parameters
     ----------
-    host_basis_jax : object
-        host_basis_jax value.
-    prior_config : object
-        prior_config value.
-    host_sfh_model : object
-        host_sfh_model value.
-    t_obs_gyr : object
-        t_obs_gyr value.
-    redshift : object
-        redshift value.
-    sfh_t_min_gyr : object
-        sfh_t_min_gyr value.
-    tau_host_prior_scale : object
-        tau_host_prior_scale value.
+    host_basis_jax : HostBasisJax
+        Host SSP basis, e.g. from :func:`build_host_basis_jax`.
+    prior_config : dict[str, Any]
+        Flat model prior mapping (as from ``PriorConfig.to_mapping()``) used to sample host parameters.
+    host_sfh_model : str
+        Host SFH model name: ``'delayed'``, ``'delayed_burst'`` or ``'diffstar'``.
+    t_obs_gyr : float
+        Age of the universe at the source redshift in Gyr.
+    redshift : float
+        Source redshift.
+    sfh_t_min_gyr : float
+        Earliest SFH time in Gyr.
+    tau_host_prior_scale : float
+        Scale of the default delayed-tau e-folding time prior.
     ssp_metallicity_coordinate : str
         Coordinate used by ``host_basis_jax.ssp_lgmet``.
     ssp_solar_metallicity : float
@@ -104,8 +104,8 @@ def build_host_state(
         Fixed absolute stellar metallicity used when no metallicity prior is supplied.
     stellar_metallicity_scatter : float
         Fixed stellar metallicity dispersion in dex when no scatter prior is supplied.
-    full_output : object
-        full_output value.
+    full_output : bool
+        If True, also return SFH/SMH histories and other diagnostics; otherwise only the core state.
     """
     galaxy = SimpleNamespace(
         host_sfh_model=str(host_sfh_model),
@@ -130,10 +130,10 @@ def host_rest_on_basis(host_state: dict[str, Any], host_basis_jax: HostBasisJax)
 
     Parameters
     ----------
-    host_state : object
-        host_state value.
-    host_basis_jax : object
-        host_basis_jax value.
+    host_state : dict[str, Any]
+        Host state from :func:`build_host_state` (needs ``formed_mass`` and ``host_ssp_weights``).
+    host_basis_jax : HostBasisJax
+        Host basis with the same SSP metallicity/age grid as ``host_state``; its wavelength grid sets the output.
     """
     return _host_rest_on_basis(host_state, host_basis_jax)
 

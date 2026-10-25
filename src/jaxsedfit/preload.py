@@ -204,8 +204,8 @@ def _empty_host_basis(rest_wave: np.ndarray) -> HostBasis:
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
+    rest_wave : numpy.ndarray
+        Rest-frame model wavelength grid in Angstrom, shape (n_wave,).
     """
 
     return HostBasis(
@@ -221,10 +221,10 @@ def _empty_host_basis_jax(rest_wave: np.ndarray, gal_t_table: np.ndarray) -> Hos
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
-    gal_t_table : object
-        gal_t_table value.
+    rest_wave : numpy.ndarray
+        Rest-frame model wavelength grid in Angstrom, shape (n_wave,).
+    gal_t_table : numpy.ndarray
+        Cosmic-time grid for SFH evaluation in Gyr, shape (n_t,).
     """
 
     host_basis = _empty_host_basis(rest_wave)
@@ -338,8 +338,8 @@ def _package_resource_path(relpath: str) -> Path:
 
     Parameters
     ----------
-    relpath : object
-        relpath value.
+    relpath : str
+        Resource path relative to the ``jaxsedfit`` package root.
     """
     return Path(str(resources.files("jaxsedfit").joinpath(relpath)))
 
@@ -349,8 +349,8 @@ def _load_ssp_templates(dsps_ssp_fn: str):
 
     Parameters
     ----------
-    dsps_ssp_fn : object
-        dsps_ssp_fn value.
+    dsps_ssp_fn : str
+        Path to the DSPS SSP template HDF5 file.
     """
     from dsps import load_ssp_templates
 
@@ -371,8 +371,8 @@ def _as_angstrom_values(values) -> np.ndarray:
 
     Parameters
     ----------
-    values : object
-        values value.
+    values : array_like or astropy.units.Quantity
+        Wavelengths; plain numbers are assumed to already be Angstrom.
     """
     if hasattr(values, "to_value"):
         return np.asarray(values.to_value(u.AA), dtype=float)
@@ -384,8 +384,8 @@ def _scalar_angstrom_value(value) -> float:
 
     Parameters
     ----------
-    value : object
-        value value.
+    value : float or astropy.units.Quantity
+        Wavelength; a plain number is assumed to already be Angstrom.
     """
     if hasattr(value, "to_value"):
         return float(value.to_value(u.AA))
@@ -419,14 +419,14 @@ def _mw_band_attenuation_factor(wave_obs, filt_trans, ebv, r_v=3.1):
 
     Parameters
     ----------
-    wave_obs : object
-        wave_obs value.
-    filt_trans : object
-        filt_trans value.
-    ebv : object
-        ebv value.
-    r_v : object
-        r_v value.
+    wave_obs : numpy.ndarray
+        Observed-frame wavelengths of the band samples in Angstrom.
+    filt_trans : numpy.ndarray
+        Filter transmission at ``wave_obs`` (negative values clipped).
+    ebv : float
+        Milky Way E(B-V) in magnitudes (e.g. from SFD).
+    r_v : float
+        Total-to-selective extinction ratio for the Fitzpatrick (1999) law.
     """
     wave_obs = np.asarray(wave_obs, dtype=float)
     filt_trans = np.clip(np.asarray(filt_trans, dtype=float), 0.0, None)
@@ -447,12 +447,12 @@ def _mw_pixel_attenuation_factor(wave_obs, ebv, r_v=3.1):
 
     Parameters
     ----------
-    wave_obs : object
-        wave_obs value.
-    ebv : object
-        ebv value.
-    r_v : object
-        r_v value.
+    wave_obs : numpy.ndarray
+        Observed-frame wavelengths in Angstrom (e.g. spectral pixels).
+    ebv : float
+        Milky Way E(B-V) in magnitudes.
+    r_v : float
+        Total-to-selective extinction ratio for the Fitzpatrick (1999) law.
     """
     wave_obs = np.asarray(wave_obs, dtype=float)
     factors = np.ones_like(wave_obs, dtype=float)
@@ -471,8 +471,8 @@ def load_cached_ssp_data(dsps_ssp_fn: str) -> SSPData:
 
     Parameters
     ----------
-    dsps_ssp_fn : object
-        dsps_ssp_fn value.
+    dsps_ssp_fn : str
+        Path to the DSPS SSP template HDF5 file; the resolved path is the cache key.
     """
     cache_key = str(Path(dsps_ssp_fn).expanduser().resolve())
     cached = _SSP_DATA_CACHE.get(cache_key)
@@ -494,8 +494,8 @@ def _filter_response_cache_key(cfg: FitConfig) -> tuple[Any, ...]:
 
     Parameters
     ----------
-    cfg : object
-        cfg value.
+    cfg : FitConfig
+        Validated fit configuration.
     """
     return (
         tuple(str(name) for name in cfg.photometry.filter_names) if cfg.photometry is not None else (),
@@ -516,8 +516,8 @@ def _load_filter_responses(cfg: FitConfig):
 
     Parameters
     ----------
-    cfg : object
-        cfg value.
+    cfg : FitConfig
+        Fit configuration providing photometry filter names and inline filter curves.
     """
     cache_key = _filter_response_cache_key(cfg)
     cached = _FILTER_RESPONSE_CACHE.get(cache_key)
@@ -546,12 +546,12 @@ def _build_spectral_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_m
 
     Parameters
     ----------
-    cfg : object
-        cfg value.
-    spec_fluxes : object
-        spec_fluxes value.
-    spec_mask : object
-        spec_mask value.
+    cfg : FitConfig
+        Fit configuration; uses ``cfg.agn`` smart-prior options and ``cfg.observation.redshift``.
+    spec_fluxes : numpy.ndarray
+        Concatenated observed spectral fluxes in mJy, shape (n_pix,).
+    spec_mask : numpy.ndarray
+        Boolean mask of usable spectral pixels, shape (n_pix,).
     """
     spec_cfg = cfg.agn
     spectral_cfg = spec_cfg
@@ -592,8 +592,8 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
 
     Parameters
     ----------
-    cfg : object
-        cfg value.
+    cfg : FitConfig
+        Fit configuration selecting AGN templates and the host-dust model.
     """
     need_agn_templates = bool(cfg.agn.fit_agn or cfg.spectroscopy_list)
     need_dust_templates = bool(cfg.galaxy.fit_host and cfg.galaxy.use_energy_balance)
@@ -774,10 +774,10 @@ def _prepare_loaded_filter(obs_wave: np.ndarray, response: FilterCurve) -> Loade
 
     Parameters
     ----------
-    obs_wave : object
-        obs_wave value.
-    response : object
-        response value.
+    obs_wave : numpy.ndarray
+        Observed-frame model wavelength grid in Angstrom, ascending, shape (n_wave,).
+    response : FilterCurve
+        Filter curve with wavelengths in Angstrom (or a Quantity).
     """
     filt_wave = _as_angstrom_values(response.wave)
     trans = np.clip(np.asarray(response.transmission, dtype=float), 0.0, None)
@@ -825,10 +825,10 @@ def _lnu_lsun_per_hz_to_llambda_w_per_a_np(wave_a: np.ndarray, lnu_lsun_per_hz: 
 
     Parameters
     ----------
-    wave_a : object
-        wave_a value.
-    lnu_lsun_per_hz : object
-        lnu_lsun_per_hz value.
+    wave_a : numpy.ndarray
+        Wavelengths in Angstrom, broadcastable against ``lnu_lsun_per_hz``.
+    lnu_lsun_per_hz : numpy.ndarray
+        Specific luminosity L_nu in Lsun/Hz (per Msun for DSPS SSPs).
     """
     wave_m = np.maximum(np.asarray(wave_a, dtype=float), 1e-12) * 1.0e-10
     lnu_w_per_hz = np.asarray(lnu_lsun_per_hz, dtype=float) * 3.828e26
@@ -840,10 +840,10 @@ def _ssp_lyman_basis_np(ssp_wave: np.ndarray, ssp_llambda_w_per_a: np.ndarray) -
 
     Parameters
     ----------
-    ssp_wave : object
-        ssp_wave value.
-    ssp_llambda_w_per_a : object
-        ssp_llambda_w_per_a value.
+    ssp_wave : numpy.ndarray
+        SSP rest-frame wavelength grid in Angstrom, shape (n_ssp_wave,).
+    ssp_llambda_w_per_a : numpy.ndarray
+        SSP L_lambda in W/Angstrom per Msun, shape (n_met, n_age, n_ssp_wave).
     """
     wave = np.asarray(ssp_wave, dtype=float)
     mask = wave < 912.0
@@ -865,8 +865,8 @@ def _pack_loaded_filters(filters: Sequence[LoadedFilter]) -> PackedFilters:
 
     Parameters
     ----------
-    filters : object
-        filters value.
+    filters : Sequence[LoadedFilter]
+        Prepared filters to pad into (n_filters, max_points) arrays.
     """
     if not filters:
         return PackedFilters(
@@ -913,8 +913,8 @@ def _pack_loaded_filters_jax(packed_filters: PackedFilters) -> PackedFiltersJax:
 
     Parameters
     ----------
-    packed_filters : object
-        packed_filters value.
+    packed_filters : PackedFilters
+        NumPy packed filter arrays to convert.
     """
     return PackedFiltersJax(
         interp_indices=jnp.asarray(packed_filters.interp_indices, dtype=jnp.int32),
@@ -931,8 +931,8 @@ def _pack_filter_curves_jax(filters: Sequence[LoadedFilter]) -> PackedFilterCurv
 
     Parameters
     ----------
-    filters : object
-        filters value.
+    filters : Sequence[LoadedFilter]
+        Prepared filters whose native curves are packed.
     """
     if not filters:
         return PackedFilterCurvesJax(
@@ -973,8 +973,8 @@ def _trapezoid_weights(x: np.ndarray) -> np.ndarray:
 
     Parameters
     ----------
-    x : object
-        x value.
+    x : numpy.ndarray
+        1D sample coordinates, shape (n,).
     """
     x = np.asarray(x, dtype=float)
     weights = np.zeros_like(x, dtype=float)
@@ -997,16 +997,16 @@ def _build_fixed_filter_projection_matrices(
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
-    packed_filters : object
-        packed_filters value.
-    fixed_igm : object
-        fixed_igm value.
-    luminosity_distance_m : object
-        luminosity_distance_m value.
-    redshift : object
-        redshift value.
+    rest_wave : numpy.ndarray
+        Rest-frame model wavelength grid in Angstrom, shape (n_wave,).
+    packed_filters : PackedFilters
+        Padded filter metadata sampled on the observed-frame model grid.
+    fixed_igm : numpy.ndarray
+        IGM transmission at ``redshift`` on the rest-frame model grid, shape (n_wave,).
+    luminosity_distance_m : float
+        Luminosity distance in metres.
+    redshift : float
+        Fixed source redshift.
     """
     n_filters = packed_filters.interp_indices.shape[0]
     n_rest = len(rest_wave)
@@ -1044,16 +1044,16 @@ def _build_filter_projection_matrices_for_redshift(
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
-    packed_filters : object
-        packed_filters value.
-    igm : object
-        igm value.
-    luminosity_distance_m : object
-        luminosity_distance_m value.
-    redshift : object
-        redshift value.
+    rest_wave : numpy.ndarray
+        Rest-frame model wavelength grid in Angstrom, shape (n_wave,).
+    packed_filters : PackedFilters
+        Packed filter metadata; ``work_wave`` gives observed-frame Angstrom samples.
+    igm : numpy.ndarray
+        IGM transmission at ``redshift`` on ``rest_wave``, shape (n_wave,).
+    luminosity_distance_m : float
+        Luminosity distance at ``redshift`` in metres.
+    redshift : float
+        Redshift at which to build the projection.
     """
     n_filters = packed_filters.interp_indices.shape[0]
     n_rest = len(rest_wave)
@@ -1099,8 +1099,8 @@ def _build_igm_cache_jax(rest_wave: np.ndarray) -> IGMCacheJax:
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
+    rest_wave : numpy.ndarray
+        Rest-frame model wavelength grid in Angstrom, shape (n_wave,).
     """
     wavelength = jnp.asarray(rest_wave, dtype=jnp.float64)
     n_transitions_low = 10
@@ -1150,10 +1150,10 @@ def _build_fixed_igm_jax(igm_cache: IGMCacheJax, redshift: float) -> jnp.ndarray
 
     Parameters
     ----------
-    igm_cache : object
-        igm_cache value.
-    redshift : object
-        redshift value.
+    igm_cache : IGMCacheJax
+        Wavelength-only IGM terms from :func:`_build_igm_cache_jax`.
+    redshift : float or jax.Array
+        Source redshift.
     """
     n_transitions_low = 10
     gamma = 0.2788
@@ -1244,10 +1244,10 @@ def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData, ssp_imf: str = "
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
-    ssp_data : object
-        ssp_data value.
+    rest_wave : numpy.ndarray
+        Rest-frame wavelength grid in Angstrom, shape (n_wave,).
+    ssp_data : SSPData
+        DSPS SSP grids (L_nu in Lsun/Hz per Msun).
     """
     cache_key = (
         str(ssp_data.ssp_flux.__array_interface__["data"][0]),
@@ -1291,12 +1291,12 @@ def _build_host_basis_jax(ssp_data: SSPData, host_basis: HostBasis, gal_t_table:
 
     Parameters
     ----------
-    ssp_data : object
-        ssp_data value.
-    host_basis : object
-        host_basis value.
-    gal_t_table : object
-        gal_t_table value.
+    ssp_data : SSPData
+        DSPS SSP grids supplying metallicity and age axes.
+    host_basis : HostBasis
+        NumPy host basis from :func:`_build_host_basis`.
+    gal_t_table : numpy.ndarray
+        Cosmic-time grid for SFH evaluation in Gyr, shape (n_t,).
     """
     return HostBasisJax(
         ssp_lgmet=jnp.asarray(ssp_data.ssp_lgmet, dtype=jnp.float64),
@@ -1316,10 +1316,10 @@ def _build_rest_template_cache(
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
-    templates : object
-        templates value.
+    rest_wave : numpy.ndarray
+        Rest-frame model wavelength grid in Angstrom, shape (n_wave,).
+    templates : LoadedTemplates
+        Fe II and host-dust templates on their native wavelength grids.
     """
     cache_key = (
         _array_content_key(templates.feii_wave),
@@ -1363,8 +1363,8 @@ def _load_nebular_templates_jax(enabled: bool) -> NebularTemplatesJax:
 
     Parameters
     ----------
-    enabled : object
-        enabled value.
+    enabled : bool
+        If False, return a 1-element zero placeholder instead of loading the grids.
     """
     if not enabled:
         z = jnp.asarray([0.02], dtype=jnp.float64)
@@ -1397,12 +1397,12 @@ def _interp_grid_axis_np(grid: np.ndarray, value: float, *, log_scale: bool = Fa
 
     Parameters
     ----------
-    grid : object
-        grid value.
-    value : object
-        value value.
-    log_scale : object
-        log_scale value.
+    grid : numpy.ndarray
+        Ascending 1D template axis values.
+    value : float
+        Coordinate to bracket; clipped to the grid range.
+    log_scale : bool
+        Interpolate in log10 of the grid and value.
     """
     grid = np.asarray(grid, dtype=float)
     x_grid = np.log10(np.clip(grid, 1.0e-300, None)) if log_scale else grid
@@ -1428,20 +1428,20 @@ def _trilinear_nebular_grid_np(
 
     Parameters
     ----------
-    values : object
-        values value.
-    z_grid : object
-        z_grid value.
-    logu_grid : object
-        logu_grid value.
-    ne_grid : object
-        ne_grid value.
-    zgas : object
-        zgas value.
-    logu : object
-        logu value.
-    ne : object
-        ne value.
+    values : numpy.ndarray
+        Template grid of shape (n_z, n_logu, n_ne, ...).
+    z_grid : numpy.ndarray
+        Gas metallicity (absolute Z) axis, shape (n_z,).
+    logu_grid : numpy.ndarray
+        log10 ionization parameter axis, shape (n_logu,).
+    ne_grid : numpy.ndarray
+        Electron density axis in cm^-3, shape (n_ne,).
+    zgas : float
+        Gas metallicity (absolute Z); interpolated in log10.
+    logu : float
+        log10 ionization parameter.
+    ne : float
+        Electron density in cm^-3; interpolated in log10.
     """
     z0, z1, wz = _interp_grid_axis_np(z_grid, zgas, log_scale=True)
     u0, u1, wu = _interp_grid_axis_np(logu_grid, logu, log_scale=False)
@@ -1475,14 +1475,14 @@ def _flux_conserving_line_gaussians_np(
 
     Parameters
     ----------
-    wave : object
-        wave value.
-    line_wave : object
-        line_wave value.
-    line_lumin : object
-        line_lumin value.
-    width_kms : object
-        width_kms value.
+    wave : numpy.ndarray
+        Rest-frame evaluation wavelengths in Angstrom, shape (n_wave,).
+    line_wave : numpy.ndarray
+        Rest-frame line centres in Angstrom, shape (n_lines,).
+    line_lumin : numpy.ndarray
+        Integrated line luminosities, shape (n_lines,).
+    width_kms : float
+        Gaussian line FWHM in km/s.
     """
     wave = np.asarray(wave, dtype=float)
     line_wave = np.asarray(line_wave, dtype=float)
@@ -1503,12 +1503,12 @@ def _build_fixed_nebular_line_profile(
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
-    cfg : object
-        cfg value.
-    templates : object
-        templates value.
+    rest_wave : numpy.ndarray
+        Rest-frame model wavelength grid in Angstrom, shape (n_wave,).
+    cfg : FitConfig
+        Fit configuration supplying nebular settings and priors.
+    templates : NebularTemplatesJax
+        Native-grid CIGALE nebular line and continuum templates.
     """
     neb = cfg.nebular
     if not (cfg.galaxy.fit_host and neb.enabled and neb.emission):
@@ -1573,12 +1573,12 @@ def _build_nebular_rest_templates_jax(
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
-    cfg : object
-        cfg value.
-    templates : object
-        templates value.
+    rest_wave : numpy.ndarray
+        Rest-frame model wavelength grid in Angstrom, shape (n_wave,).
+    cfg : FitConfig
+        Fit configuration supplying nebular settings and priors.
+    templates : NebularTemplatesJax
+        Native-grid CIGALE nebular line and continuum templates.
     """
     if not (cfg.galaxy.fit_host and cfg.nebular.enabled):
         zeros = np.zeros((1, 1, 1, rest_wave.size), dtype=float)
@@ -1638,8 +1638,8 @@ def _redshift_projection_grid(cfg: FitConfig) -> np.ndarray:
 
     Parameters
     ----------
-    cfg : object
-        cfg value.
+    cfg : FitConfig
+        Fit configuration supplying the redshift prior/estimate and grid settings.
     """
     n_grid = max(int(cfg.likelihood.redshift_projection_n_grid), 2)
     redshift_pdf = cfg.prior_config.to_mapping().get("redshift_pdf")
@@ -1666,16 +1666,16 @@ def _build_redshift_projection_cache_jax(
 
     Parameters
     ----------
-    rest_wave : object
-        rest_wave value.
-    packed_filters : object
-        packed_filters value.
-    igm_cache : object
-        igm_cache value.
-    cfg : object
-        cfg value.
-    cosmology : object
-        cosmology value.
+    rest_wave : numpy.ndarray
+        Rest-frame model wavelength grid in Angstrom, shape (n_wave,).
+    packed_filters : PackedFilters
+        Packed filter metadata; ``work_wave`` gives observed-frame Angstrom samples.
+    igm_cache : IGMCacheJax
+        Wavelength-only IGM terms on ``rest_wave``.
+    cfg : FitConfig
+        Fit configuration; the cache is built only for fitted redshift with the cache enabled.
+    cosmology : astropy.cosmology.FlatLambdaCDM
+        Cosmology used for luminosity distances on the grid.
     """
     if not (cfg.observation.fits_redshift and cfg.likelihood.use_redshift_projection_cache):
         return None
@@ -1730,16 +1730,16 @@ def _attenuation_curve_np(wave_rest: np.ndarray, opt_index: float, nir_index: fl
 
     Parameters
     ----------
-    wave_rest : object
-        wave_rest value.
-    opt_index : object
-        opt_index value.
-    nir_index : object
-        nir_index value.
-    norm : object
-        norm value.
-    lam_break : object
-        lam_break value.
+    wave_rest : numpy.ndarray
+        Rest-frame wavelengths in Angstrom.
+    opt_index : float
+        Power-law index blueward of ``lam_break``.
+    nir_index : float
+        Power-law index redward of ``lam_break``.
+    norm : float
+        Curve value at ``lam_break``.
+    lam_break : float
+        Break wavelength in Angstrom (rest frame).
     """
     wave_rest = np.asarray(wave_rest, dtype=float)
     index = np.where(wave_rest < float(lam_break), float(opt_index), float(nir_index))
@@ -1751,8 +1751,8 @@ def _trapezoid_weights_axis1(x: np.ndarray) -> np.ndarray:
 
     Parameters
     ----------
-    x : object
-        x value.
+    x : numpy.ndarray
+        2D coordinates, shape (n_rows, n); weights are computed along axis 1.
     """
     x = np.asarray(x, dtype=float)
     weights = np.zeros_like(x, dtype=float)
@@ -1778,18 +1778,18 @@ def _build_fixed_local_line_projection_cache_jax(
 
     Parameters
     ----------
-    cfg : object
-        cfg value.
-    templates : object
-        templates value.
-    filters : object
-        filters value.
-    redshift : object
-        redshift value.
-    luminosity_distance_m : object
-        luminosity_distance_m value.
-    fixed_igm : object
-        fixed_igm value.
+    cfg : FitConfig
+        Fit configuration with local-line cache settings and the rest-wave grid definition.
+    templates : LoadedTemplates
+        Loaded templates supplying AGN line rest wavelengths in Angstrom.
+    filters : Sequence[LoadedFilter]
+        Prepared filters, one per photometric band.
+    redshift : float
+        Fixed source redshift.
+    luminosity_distance_m : float
+        Luminosity distance in metres.
+    fixed_igm : numpy.ndarray
+        IGM transmission at ``redshift`` on the rest-frame model grid, shape (n_wave,).
     """
     if not (
         cfg.likelihood.use_local_line_photometry
@@ -1879,18 +1879,18 @@ def _build_fixed_local_nebular_line_projection_cache_jax(
 
     Parameters
     ----------
-    cfg : object
-        cfg value.
-    nebular_templates : object
-        nebular_templates value.
-    filters : object
-        filters value.
-    redshift : object
-        redshift value.
-    luminosity_distance_m : object
-        luminosity_distance_m value.
-    fixed_igm : object
-        fixed_igm value.
+    cfg : FitConfig
+        Fit configuration with local-line cache and nebular settings.
+    nebular_templates : NebularTemplatesJax
+        Nebular templates supplying line rest wavelengths in Angstrom.
+    filters : Sequence[LoadedFilter]
+        Prepared filters, one per photometric band.
+    redshift : float
+        Fixed source redshift.
+    luminosity_distance_m : float
+        Luminosity distance in metres.
+    fixed_igm : numpy.ndarray
+        IGM transmission at ``redshift`` on the rest-frame model grid, shape (n_wave,).
     """
     if not (
         cfg.likelihood.use_local_line_photometry
@@ -1975,8 +1975,8 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
 
     Parameters
     ----------
-    cfg : object
-        cfg value.
+    cfg : FitConfig
+        Fit configuration; validated before the context is built.
     """
     cfg.validate()
     photometry = cfg.photometry or PhotometryData(filter_names=(), fluxes=(), errors=())

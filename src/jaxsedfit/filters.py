@@ -42,8 +42,8 @@ def _package_resource_path(relpath: str) -> Path:
 
     Parameters
     ----------
-    relpath : object
-        relpath value.
+    relpath : str
+        Resource path relative to the ``jaxsedfit`` package root.
     """
     return Path(str(resources.files("jaxsedfit").joinpath(relpath)))
 
@@ -63,8 +63,8 @@ def resolve_filter_name(filter_name: str) -> str:
 
     Parameters
     ----------
-    filter_name : object
-        filter_name value.
+    filter_name : str
+        Filter name or public alias (e.g. ``'g_sdss'``).
     """
     return FILTER_NAME_ALIASES.get(str(filter_name), str(filter_name))
 
@@ -74,10 +74,10 @@ def filter_effective_wavelength(wave: Sequence[float], transmission: Sequence[fl
 
     Parameters
     ----------
-    wave : object
-        wave value.
-    transmission : object
-        transmission value.
+    wave : Sequence[float]
+        Filter wavelength samples in Angstrom.
+    transmission : Sequence[float]
+        Energy-counting transmission at ``wave``.
     """
     wave_arr = np.asarray(wave, dtype=float)
     trans_arr = np.asarray(transmission, dtype=float)
@@ -93,10 +93,10 @@ def normalize_filter_curve(curve: FilterCurve, name: str | None = None) -> Filte
 
     Parameters
     ----------
-    curve : object
-        curve value.
-    name : object
-        name value.
+    curve : FilterCurve
+        Input filter curve.
+    name : str or None
+        Name for the returned curve; defaults to ``curve.name``.
     """
     wave = np.asarray(curve.wave, dtype=float)
     trans = np.clip(np.asarray(curve.transmission, dtype=float), 0.0, None)
@@ -132,8 +132,8 @@ def load_filter_curve(filter_name: str) -> FilterCurve:
 
     Parameters
     ----------
-    filter_name : object
-        filter_name value.
+    filter_name : str
+        Canonical vendored filter name or public alias.
     """
     resolved_name = resolve_filter_name(filter_name)
     relpath = vendored_filter_registry().get(resolved_name)
@@ -157,8 +157,8 @@ def load_filter_curves(filter_names: Sequence[str]) -> list[FilterCurve]:
 
     Parameters
     ----------
-    filter_names : object
-        filter_names value.
+    filter_names : Sequence[str]
+        Filter names or aliases to load.
     """
     return [load_filter_curve(name) for name in filter_names]
 
@@ -168,8 +168,8 @@ def _load_filter_type(path: Path) -> str:
 
     Parameters
     ----------
-    path : object
-        path value.
+    path : pathlib.Path
+        Path to a vendored ``.dat`` filter file.
     """
     with open(path) as f:
         for line in f:

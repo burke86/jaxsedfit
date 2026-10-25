@@ -127,12 +127,12 @@ def _lnlam_peak_ratio_for_flux_ratio(
 
     Parameters
     ----------
-    flux_ratio : object
-        flux_ratio value.
-    numerator_lam : object
-        numerator_lam value.
-    denominator_lam : object
-        denominator_lam value.
+    flux_ratio : float
+        Desired integrated-flux ratio (numerator / denominator line).
+    numerator_lam : float
+        Rest wavelength (Angstrom) of the numerator line.
+    denominator_lam : float
+        Rest wavelength (Angstrom) of the denominator line.
     """
     return flux_ratio * denominator_lam / numerator_lam
 
@@ -381,12 +381,13 @@ def _apply_robust_line_scale_priors(
 
     Parameters
     ----------
-    line_rows : object
-        line_rows value.
-    fscale : object
-        fscale value.
-    fmax : object
-        fmax value.
+    line_rows : list[dict[str, Any]]
+        Line-table rows with ``linename``, ``minsca``, ``maxsca``, ``inisca``; updated
+        in place.
+    fscale : float
+        Typical flux level (median absolute finite flux).
+    fmax : float
+        High flux level (99.5th-percentile absolute flux) bounding peak amplitudes.
     """
     if len(line_rows) == 0:
         return line_rows
@@ -440,12 +441,12 @@ def _append_unique_by_wavelength(
 
     Parameters
     ----------
-    base_rows : object
-        base_rows value.
-    extra_rows : object
-        extra_rows value.
-    atol_angstrom : object
-        atol_angstrom value.
+    base_rows : list[dict[str, Any]]
+        Existing line-table rows; these take precedence.
+    extra_rows : list[dict[str, Any]]
+        Candidate rows to append, matched on their ``lambda`` key.
+    atol_angstrom : float, optional
+        Rest-wavelength tolerance (Angstrom) for treating rows as duplicates.
     """
     out = list(base_rows)
     for row in extra_rows:
@@ -527,24 +528,24 @@ def build_default_bal_components(
 
     Parameters
     ----------
-    flux : object
-        flux value.
-    tau_scale : object
-        tau_scale value.
-    covering_loc : object
-        covering_loc value.
-    covering_scale : object
-        covering_scale value.
-    covering_high : object
-        covering_high value.
-    fwhm_kms_loc : object
-        fwhm_kms_loc value.
-    fwhm_kms_scale : object
-        fwhm_kms_scale value.
-    fwhm_kms_low : object
-        fwhm_kms_low value.
-    fwhm_kms_high : object
-        fwhm_kms_high value.
+    flux : numpy.ndarray
+        Observed flux; currently unused by the default BAL priors.
+    tau_scale : float, optional
+        HalfNormal scale of the shared peak optical-depth prior ``tau_peak``.
+    covering_loc : float, optional
+        Center of the TruncatedNormal covering-fraction prior.
+    covering_scale : float, optional
+        Width of the covering-fraction prior.
+    covering_high : float, optional
+        Upper truncation of the covering-fraction prior (lower is 0).
+    fwhm_kms_loc : float, optional
+        Center (km/s) of the absorption-trough FWHM prior.
+    fwhm_kms_scale : float, optional
+        Width (km/s) of the FWHM prior.
+    fwhm_kms_low : float, optional
+        Lower truncation (km/s) of the FWHM prior.
+    fwhm_kms_high : float, optional
+        Upper truncation (km/s) of the FWHM prior.
     """
     def _bal_component(
         name: str,
@@ -559,20 +560,20 @@ def build_default_bal_components(
 
         Parameters
         ----------
-        name : object
-            name value.
-        tau_scale : object
-            tau_scale value.
-        line_lambda : object
-            line_lambda value.
-        v_out_loc : object
-            v_out_loc value.
-        v_out_scale : object
-            v_out_scale value.
-        v_out_low : object
-            v_out_low value.
-        v_out_high : object
-            v_out_high value.
+        name : str
+            Component name (e.g. ``"bal_civ"``).
+        tau_scale : float
+            HalfNormal scale of the peak optical-depth prior.
+        line_lambda : float
+            Rest wavelength (Angstrom) of the absorbing transition.
+        v_out_loc : float
+            Center (km/s) of the outflow-velocity prior; positive is blueshifted.
+        v_out_scale : float
+            Width (km/s) of the outflow-velocity prior.
+        v_out_low : float
+            Lower truncation (km/s) of the outflow-velocity prior.
+        v_out_high : float
+            Upper truncation (km/s) of the outflow-velocity prior.
         """
         return make_custom_component(
             name=name,

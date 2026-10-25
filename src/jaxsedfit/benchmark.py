@@ -102,8 +102,8 @@ def _package_resource_path(relpath: str) -> Path:
 
     Parameters
     ----------
-    relpath : object
-        relpath value.
+    relpath : str
+        Resource path relative to the ``jaxsedfit`` package.
     """
     return Path(str(resources.files("jaxsedfit").joinpath(relpath)))
 
@@ -113,8 +113,8 @@ def chimera_data_dir(root: str | Path | None = None) -> Path:
 
     Parameters
     ----------
-    root : object
-        root value.
+    root : str or pathlib.Path, optional
+        Project root containing ``data/``; defaults to the package root.
     """
     base = Path(root) if root is not None else _package_root()
     return base / "data" / "chimeras-2023-10-11"
@@ -125,8 +125,8 @@ def subset_ids_path(root: str | Path | None = None) -> Path:
 
     Parameters
     ----------
-    root : object
-        root value.
+    root : str or pathlib.Path, optional
+        Project root containing ``data/``; defaults to the package root.
     """
     return chimera_data_dir(root) / "benchmark_subset_ids.txt"
 
@@ -136,10 +136,10 @@ def _load_filter_curve_from_text(path: Path, name: str) -> FilterCurve:
 
     Parameters
     ----------
-    path : object
-        path value.
-    name : object
-        name value.
+    path : pathlib.Path
+        Plain-text file with wavelength and transmission columns.
+    name : str
+        Filter name assigned to the curve.
     """
     data = np.loadtxt(path, comments="#")
     if data.ndim != 2 or data.shape[1] < 2:
@@ -234,10 +234,10 @@ def _fits_rows_by_id(path: Path, columns: Iterable[str]) -> dict[str, dict[str, 
 
     Parameters
     ----------
-    path : object
-        path value.
-    columns : object
-        columns value.
+    path : pathlib.Path
+        FITS table whose first extension has an ``id`` column.
+    columns : iterable of str
+        Column names to extract for each row.
     """
     with fits.open(path, memmap=True) as hdul:
         data = hdul[1].data
@@ -259,8 +259,8 @@ def load_chimera_benchmark_dataset(root: str | Path | None = None) -> ChimeraBen
 
     Parameters
     ----------
-    root : object
-        root value.
+    root : str or pathlib.Path, optional
+        Project root containing ``data/``; defaults to the package root.
     """
     data_dir = chimera_data_dir(root)
     phot_path = data_dir / "chimeras-grahsp.fits"
@@ -300,10 +300,11 @@ def select_chimera_subset(dataset: ChimeraBenchmarkDataset, root: str | Path | N
 
     Parameters
     ----------
-    dataset : object
-        dataset value.
-    root : object
-        root value.
+    dataset : ChimeraBenchmarkDataset
+        Joined Chimera rows from ``load_chimera_benchmark_dataset``.
+    root : str or pathlib.Path, optional
+        Project root holding the subset-id fixture; defaults to the
+        package root.
     """
     fixture = subset_ids_path(root)
     print(f"[benchmark] Loading deterministic subset from {fixture}")
@@ -322,12 +323,14 @@ def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h
 
     Parameters
     ----------
-    row : object
-        row value.
-    dsps_ssp_fn : object
-        dsps_ssp_fn value.
-    base_config : object
-        base_config value.
+    row : dict[str, Any]
+        Joined Chimera row with ``id``, ``redshift`` and per-filter flux and
+        ``<filter>_err`` columns.
+    dsps_ssp_fn : str
+        Path to the DSPS SSP HDF5 file; must exist.
+    base_config : FitConfig, optional
+        Template configuration whose model settings are reused; inference
+        settings are replaced by the benchmark defaults.
     """
     if base_config is None:
         cfg = FitConfig(
@@ -391,8 +394,8 @@ def _estimate_chimera_stellar_mass_prior(row: dict[str, Any]):
 
     Parameters
     ----------
-    row : object
-        row value.
+    row : dict[str, Any]
+        Chimera benchmark row (currently unused; the prior is fixed).
     """
     return dist.StudentT(df=5.0, loc=10.0, scale=2.0)
 
@@ -403,12 +406,12 @@ def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> flo
 
     Parameters
     ----------
-    values : object
-        values value.
-    weights : object
-        weights value.
-    q : object
-        q value.
+    values : numpy.ndarray
+        Finite sample values.
+    weights : numpy.ndarray
+        Non-negative weights aligned with ``values``.
+    q : float
+        Quantile in [0, 1].
     """
     order = np.argsort(values)
     values = values[order]
@@ -422,12 +425,12 @@ def compute_weighted_metrics(log_mass_fit: np.ndarray, log_mass_truth: np.ndarra
 
     Parameters
     ----------
-    log_mass_fit : object
-        log_mass_fit value.
-    log_mass_truth : object
-        log_mass_truth value.
-    weights : object
-        weights value.
+    log_mass_fit : numpy.ndarray
+        Recovered log10 stellar masses.
+    log_mass_truth : numpy.ndarray
+        Chimera truth log10 stellar masses.
+    weights : numpy.ndarray
+        Per-object weights (``resample_weight``); normalized internally.
     """
     resid = log_mass_fit - log_mass_truth
     w = np.asarray(weights, dtype=float)
@@ -456,10 +459,10 @@ def _group_metrics(rows: list[dict[str, Any]], group_key: str) -> dict[str, dict
 
     Parameters
     ----------
-    rows : object
-        rows value.
-    group_key : object
-        group_key value.
+    rows : list[dict[str, Any]]
+        Benchmark result rows with fit, truth and ``resample_weight``.
+    group_key : str
+        Row key to group by (e.g. ``redshift_bin``).
     """
     out: dict[str, dict[str, float]] = {}
     groups = sorted(set(row[group_key] for row in rows))
@@ -480,10 +483,10 @@ def _redshift_bin_label(z: float, edges: np.ndarray) -> str:
 
     Parameters
     ----------
-    z : object
-        z value.
-    edges : object
-        edges value.
+    z : float
+        Redshift to classify.
+    edges : numpy.ndarray
+        Monotonic redshift-bin edges.
     """
     idx = min(len(edges) - 2, max(0, int(np.searchsorted(edges, z, side="right") - 1)))
     return f"{edges[idx]:.3f}-{edges[idx+1]:.3f}"
@@ -494,8 +497,8 @@ def _stable_row_seed(row_id: str) -> int:
 
     Parameters
     ----------
-    row_id : object
-        row_id value.
+    row_id : str
+        Benchmark object identifier.
     """
     return int((DEFAULT_RANDOM_SEED + zlib.crc32(str(row_id).encode("utf-8"))) % (2**31 - 1))
 
@@ -505,8 +508,8 @@ def _reduced_chi2_for_fit(fitter: Any) -> float:
 
     Parameters
     ----------
-    fitter : object
-        fitter value.
+    fitter : JAXSEDFit
+        Fitted fitter with posterior samples and a model context.
     """
     pred = fitter.predict()
     pred_fluxes = np.median(np.asarray(pred["pred_fluxes"], dtype=float), axis=0)
@@ -636,10 +639,10 @@ def _failed_benchmark_row(task: _BenchmarkWorkerTask, exc: Exception) -> dict[st
 
     Parameters
     ----------
-    task : object
-        task value.
-    exc : object
-        exc value.
+    task : _BenchmarkWorkerTask
+        Worker task whose fit failed.
+    exc : Exception
+        Exception raised by the fit, recorded in ``fit_error``.
     """
     enriched = dict(task.row)
     enriched["log_stellar_mass_fit"] = float("nan")
@@ -670,10 +673,10 @@ def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tupl
 
     Parameters
     ----------
-    task : object
-        task value.
-    fitter_cls : object
-        fitter_cls value.
+    task : _BenchmarkWorkerTask
+        Row, inference settings and redshift-bin edges for one fit.
+    fitter_cls : type, optional
+        Fitter class to instantiate; defaults to ``JAXSEDFit``.
     """
     if fitter_cls is None:
         from .core import JAXSEDFit
@@ -727,10 +730,10 @@ def _write_artifact_table(path: Path, rows: list[dict[str, Any]]) -> None:
 
     Parameters
     ----------
-    path : object
-        path value.
-    rows : object
-        rows value.
+    path : pathlib.Path
+        Output CSV path.
+    rows : list[dict[str, Any]]
+        Per-object benchmark result rows.
     """
     fieldnames = [
         "id",
@@ -764,10 +767,10 @@ def _write_plots(output_dir: Path, rows: list[dict[str, Any]]) -> None:
 
     Parameters
     ----------
-    output_dir : object
-        output_dir value.
-    rows : object
-        rows value.
+    output_dir : pathlib.Path
+        Directory where the PNG plots are written.
+    rows : list[dict[str, Any]]
+        Per-object benchmark result rows.
     """
     import matplotlib.pyplot as plt
 
@@ -861,40 +864,41 @@ def run_chimera_mass_benchmark(
 
     Parameters
     ----------
-    root : object
-        root value.
-    output_dir : object
-        output_dir value.
-    dsps_ssp_fn : object
-        dsps_ssp_fn value.
-    fitter_cls : object
-        fitter_cls value.
-    base_config : object
-        base_config value.
-    max_weighted_mae : object
-        max_weighted_mae value.
-    max_abs_weighted_bias : object
-        max_abs_weighted_bias value.
-    min_finite_fraction : object
-        min_finite_fraction value.
-    limit : object
-        limit value.
-    num_workers : object
-        num_workers value.
-    method : object
-        method value.
-    optax_steps : object
-        optax_steps value.
-    optax_lr : object
-        optax_lr value.
-    nuts_warmup : object
-        nuts_warmup value.
-    nuts_samples : object
-        nuts_samples value.
-    nuts_chains : object
-        nuts_chains value.
-    target_accept_prob : object
-        target_accept_prob value.
+    root : str or pathlib.Path, optional
+        Project root containing ``data/``; defaults to the package root.
+    output_dir : str or pathlib.Path, optional
+        Directory for CSV, JSON and plot artifacts; None writes nothing.
+    dsps_ssp_fn : str
+        Path to the DSPS SSP HDF5 file.
+    fitter_cls : type, optional
+        Fitter class to instantiate per object; defaults to ``JAXSEDFit``.
+    base_config : FitConfig, optional
+        Template configuration passed to ``build_chimera_fit_config``.
+    max_weighted_mae : float
+        Pass threshold on weighted mean absolute log-mass error (dex).
+    max_abs_weighted_bias : float
+        Pass threshold on absolute weighted log-mass bias (dex).
+    min_finite_fraction : float
+        Minimum fraction of objects with a finite recovered mass.
+    limit : int, optional
+        Run only the first ``limit`` rows of the deterministic subset.
+    num_workers : int, optional
+        Number of worker processes; defaults to the CPU count, capped at
+        the number of rows.
+    method : str
+        Inference method (``"optax"``, ``"nuts"``, ``"optax+nuts"``, ``"ns"``).
+    optax_steps : int
+        MAP optimization steps per object.
+    optax_lr : float
+        MAP learning rate.
+    nuts_warmup : int
+        NUTS warmup steps per object.
+    nuts_samples : int
+        NUTS retained samples per object.
+    nuts_chains : int
+        NUTS chains per object.
+    target_accept_prob : float
+        NUTS target acceptance probability.
     """
     if fitter_cls is None:
         from .core import JAXSEDFit
@@ -1073,8 +1077,8 @@ def main(argv: list[str] | None = None) -> int:
 
     Parameters
     ----------
-    argv : object
-        argv value.
+    argv : list of str, optional
+        Command-line arguments; None uses ``sys.argv``.
     """
     parser = argparse.ArgumentParser(description="Run the Chimera stellar-mass recovery benchmark.")
     parser.add_argument("--output-dir", default="benchmark_outputs", help="Directory for benchmark artifacts.")

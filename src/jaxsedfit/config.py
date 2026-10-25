@@ -885,10 +885,10 @@ def _section_to_mapping(section: Any, fields_to_keys: Mapping[str, str]) -> dict
 
     Parameters
     ----------
-    section : object
-        section value.
-    fields_to_keys : object
-        fields_to_keys value.
+    section : Any
+        Prior section dataclass (e.g. ``HostPriorConfig``) whose fields hold distributions or None.
+    fields_to_keys : Mapping[str, str]
+        Map from section field name to model prior key.
     """
     out: dict[str, Any] = {}
     for field_name, key in fields_to_keys.items():
@@ -1141,8 +1141,8 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
 
     Parameters
     ----------
-    data : object
-        data value.
+    data : Mapping[str, Any]
+        Nested mapping of ``FitConfig`` fields (e.g. parsed from JSON).
     """
     valid_top_level = set(FitConfig.__dataclass_fields__)
     unknown = set(data) - valid_top_level
