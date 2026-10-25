@@ -1524,18 +1524,16 @@ def _fe_template_component(
     # In particular, the global SED grid spans several decades in wavelength;
     # Fourier-shifting the handful of optical samples on that grid produces
     # nonphysical ringing far outside the template support.
-    if template_on_wave is None:
-        convolution_wave = jnp.asarray(wave_template, dtype=jnp.float64)
-        convolution_flux = jnp.maximum(
-            jnp.asarray(flux_template, dtype=jnp.float64),
-            0.0,
-        )
-    else:
-        convolution_wave = jnp.asarray(wave, dtype=jnp.float64)
-        convolution_flux = jnp.maximum(
-            jnp.asarray(template_on_wave, dtype=jnp.float64),
-            0.0,
-        )
+    # Always convolve on the native template grid. ``template_on_wave`` (the
+    # template pre-interpolated onto ``wave``) is accepted for compatibility but
+    # no longer changes the result: convolving the truncated, resampled copy lost
+    # flux near the grid edges and disagreed with the uncached evaluation.
+    del template_on_wave
+    convolution_wave = jnp.asarray(wave_template, dtype=jnp.float64)
+    convolution_flux = jnp.maximum(
+        jnp.asarray(flux_template, dtype=jnp.float64),
+        0.0,
+    )
 
     min_fwhm_kms = 1.01 * base_fwhm_kms
     transition_kms = jnp.maximum(0.01 * base_fwhm_kms, 10.0)
@@ -1550,16 +1548,12 @@ def _fe_template_component(
         sigma_kms,
         convolution_method=convolution_method,
     )
-    model = (
-        model_on_convolution_grid
-        if template_on_wave is not None
-        else jnp.interp(
-            wave,
-            convolution_wave,
-            model_on_convolution_grid,
-            left=0.0,
-            right=0.0,
-        )
+    model = jnp.interp(
+        wave,
+        convolution_wave,
+        model_on_convolution_grid,
+        left=0.0,
+        right=0.0,
     )
     return norm * model
 
@@ -1628,7 +1622,10 @@ def _balmer_continuum_jax(
         convolution_method value.
     """
     method = str(convolution_method).lower()
-    use_local_grid = balmer_static_terms is None and method == "fft"
+    # FFT evaluations always use the local edge grid, so cached static terms
+    # (precomputed on the caller's grid) give the same result as uncached calls;
+    # they are only used by the direct convolution path.
+    use_local_grid = method == "fft"
     if use_local_grid:
         # Resolve the physical 3646-A edge independently of the target SED
         # sampling. The fixed bounds cover the UV continuum and even very broad
