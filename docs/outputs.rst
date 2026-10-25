@@ -84,6 +84,9 @@ Host galaxy and star formation
    * - ``log_sfh_tau_over_age``
      - ln(ratio)
      - Natural logarithm of main SFH timescale divided by age.
+   * - ``log_sfh_ssfr``
+     - log10(yr^-1)
+     - Sampled sSFR (current SFR per formed stellar mass) with ``galaxy.sfh_prior="ssfr_uniform"``; ``tau`` is solved from it.
    * - ``log_sfh_burst_fraction``, ``sfh_burst_fraction_fit``
      - ln(fraction), fraction
      - Burst fraction of formed stellar mass in the delayed-burst model.
