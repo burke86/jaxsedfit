@@ -3051,9 +3051,10 @@ def photometric_loglike(
     obs_variance = obs_errors**2
     variability_nev = _agn_variability_nev(agn_bol_lum_w, agn_nev)
     var_variance = jnp.where(variability_uncertainty, variability_nev * agn_component**2, 0.0)
-    # Keep the catalogue-wide systematic and AGN-template mismatch as
-    # independent contributions, as implemented by GRAHSP.
-    sys_variance = (systematics_width * obs_fluxes) ** 2 + (agn_systematics_width * agn_component) ** 2
+    # Model-uncertainty terms scale with the model flux, as in GRAHSP
+    # (dualsampler.chi2_with_norm: sys_variance = (sys_error * model_fluxes)**2).
+    # The AGN-template mismatch is an independent contribution.
+    sys_variance = (systematics_width * pred_fluxes) ** 2 + (agn_systematics_width * agn_component) ** 2
     if nebular_line_component is not None:
         nebular_line_component = jnp.nan_to_num(nebular_line_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
         nebular_line_sigma = jnp.expm1(
