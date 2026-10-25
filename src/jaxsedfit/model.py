@@ -4385,6 +4385,16 @@ def evaluate_photometric_state(
         and not spectroscopy_enabled
     )
     needs_obs_sed = bool(include_components or spectroscopy_enabled)
+
+    def band_fluxes(rest_lumin):
+        """Return band fluxes in mJy of a rest-frame luminosity density on ``rest_wave``."""
+        if fast_projection_enabled:
+            return _project_rest_luminosity_filters(context, rest_lumin)
+        if redshift_projection_enabled:
+            return _project_redshift_luminosity_filters(context, rest_lumin, redshift)
+        obs = _redshift_to_obs(rest_wave, rest_lumin * igm, obs_wave, redshift, luminosity_distance_m)
+        return _project_filters(obs, context.packed_filters_jax)
+
     if fast_projection_enabled:
         total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m) if needs_obs_sed else jnp.zeros_like(obs_wave)
         pred_fluxes_raw = _project_rest_luminosity_filters(context, total_rest)
@@ -4455,13 +4465,7 @@ def evaluate_photometric_state(
                 igm,
             )
         local_agn_line_fluxes = local_broad_line_fluxes + local_narrow_line_fluxes
-        if fast_projection_enabled:
-            coarse_agn_line_fluxes = _project_rest_luminosity_filters(context, line_att_rest)
-        elif redshift_projection_enabled:
-            coarse_agn_line_fluxes = _project_redshift_luminosity_filters(context, line_att_rest, redshift)
-        else:
-            coarse_line_obs = _redshift_to_obs(rest_wave, line_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
-            coarse_agn_line_fluxes = _project_filters(coarse_line_obs, context.packed_filters_jax)
+        coarse_agn_line_fluxes = band_fluxes(line_att_rest)
         pred_fluxes_raw = pred_fluxes_raw - coarse_agn_line_fluxes + local_agn_line_fluxes
     local_nebular_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
     coarse_nebular_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
@@ -4490,13 +4494,7 @@ def evaluate_photometric_state(
                 luminosity_distance_m,
                 igm,
             )
-        if fast_projection_enabled:
-            coarse_nebular_line_fluxes = _project_rest_luminosity_filters(context, nebular_lines_att_rest)
-        elif redshift_projection_enabled:
-            coarse_nebular_line_fluxes = _project_redshift_luminosity_filters(context, nebular_lines_att_rest, redshift)
-        else:
-            coarse_nebular_line_obs = _redshift_to_obs(rest_wave, nebular_lines_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
-            coarse_nebular_line_fluxes = _project_filters(coarse_nebular_line_obs, context.packed_filters_jax)
+        coarse_nebular_line_fluxes = band_fluxes(nebular_lines_att_rest)
         pred_fluxes_raw = pred_fluxes_raw - coarse_nebular_line_fluxes + local_nebular_line_fluxes
     host_dust_fluxes_total = jnp.zeros_like(pred_fluxes_raw)
     if host_capture_enabled or include_components or spectroscopy_enabled:
@@ -4514,13 +4512,7 @@ def evaluate_photometric_state(
         if correct_nebular_line_photometry:
             host_fluxes_total = host_fluxes_total - coarse_nebular_line_fluxes + local_nebular_line_fluxes
         if host_capture_enabled:
-            if fast_projection_enabled:
-                host_dust_fluxes_total = _project_rest_luminosity_filters(context, dust_rest)
-            elif redshift_projection_enabled:
-                host_dust_fluxes_total = _project_redshift_luminosity_filters(context, dust_rest, redshift)
-            else:
-                host_dust_obs = _redshift_to_obs(rest_wave, dust_rest * igm, obs_wave, redshift, luminosity_distance_m)
-                host_dust_fluxes_total = _project_filters(host_dust_obs, context.packed_filters_jax)
+            host_dust_fluxes_total = band_fluxes(dust_rest)
     else:
         host_obs = jnp.zeros_like(total_obs)
         host_fluxes_total = jnp.zeros_like(pred_fluxes_raw)
@@ -4571,13 +4563,7 @@ def evaluate_photometric_state(
         if correct_agn_line_photometry:
             agn_narrow_line_fluxes_total = local_narrow_line_fluxes
         else:
-            if fast_projection_enabled:
-                agn_narrow_line_fluxes_total = _project_rest_luminosity_filters(context, line_nl_att_rest)
-            elif redshift_projection_enabled:
-                agn_narrow_line_fluxes_total = _project_redshift_luminosity_filters(context, line_nl_att_rest, redshift)
-            else:
-                line_nl_obs_for_capture = _redshift_to_obs(rest_wave, line_nl_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
-                agn_narrow_line_fluxes_total = _project_filters(line_nl_obs_for_capture, context.packed_filters_jax)
+            agn_narrow_line_fluxes_total = band_fluxes(line_nl_att_rest)
     extended_capture_source_fluxes = host_capture_source_fluxes + agn_narrow_line_fluxes_total
     host_fluxes = host_fluxes_total * host_capture_fraction
     captured_host_dust_fluxes = host_dust_fluxes_total * host_capture_fraction
@@ -5225,39 +5211,16 @@ def evaluate_photometric_state(
         nebular_lines_local_obs = jnp.zeros((1,), dtype=jnp.float64)
         total_local_obs = jnp.zeros((1,), dtype=jnp.float64)
         if need_agn_fluxes:
-            if fast_projection_enabled:
-                agn_fluxes = _project_rest_luminosity_filters(context, agn_rest)
-                if correct_agn_line_photometry:
-                    agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
-            elif redshift_projection_enabled:
-                agn_fluxes = _project_redshift_luminosity_filters(context, agn_rest, redshift)
-                if correct_agn_line_photometry:
-                    agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
-            else:
-                agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
-                agn_fluxes = _project_filters(agn_obs, context.packed_filters_jax)
-                if correct_agn_line_photometry:
-                    agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
+            agn_fluxes = band_fluxes(agn_rest)
+            if correct_agn_line_photometry:
+                agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
         else:
             agn_fluxes = jnp.zeros_like(pred_fluxes)
         if host_capture_enabled and fit_agn and include_sed_agn_features and need_agn_fluxes:
             agn_fluxes = _apply_extended_capture(agn_fluxes, agn_narrow_line_fluxes_total, host_capture_fraction)
         if need_trans_fluxes:
-            if fast_projection_enabled:
-                direct_attenuated_fluxes = _project_rest_luminosity_filters(context, direct_attenuated_rest)
-                direct_intrinsic_fluxes = _project_rest_luminosity_filters(context, direct_intrinsic_rest)
-            elif redshift_projection_enabled:
-                direct_attenuated_fluxes = _project_redshift_luminosity_filters(context, direct_attenuated_rest, redshift)
-                direct_intrinsic_fluxes = _project_redshift_luminosity_filters(context, direct_intrinsic_rest, redshift)
-            else:
-                direct_attenuated_obs = _redshift_to_obs(
-                    rest_wave, direct_attenuated_rest * igm, obs_wave, redshift, luminosity_distance_m
-                )
-                direct_intrinsic_obs = _redshift_to_obs(
-                    rest_wave, direct_intrinsic_rest * igm, obs_wave, redshift, luminosity_distance_m
-                )
-                direct_attenuated_fluxes = _project_filters(direct_attenuated_obs, context.packed_filters_jax)
-                direct_intrinsic_fluxes = _project_filters(direct_intrinsic_obs, context.packed_filters_jax)
+            direct_attenuated_fluxes = band_fluxes(direct_attenuated_rest)
+            direct_intrinsic_fluxes = band_fluxes(direct_intrinsic_rest)
             trans_fluxes = _band_transmitted_fraction(direct_attenuated_fluxes, direct_intrinsic_fluxes)
         else:
             trans_fluxes = jnp.ones_like(pred_fluxes)
