@@ -264,8 +264,9 @@ def _as_config(config: SpectralComponentConfig | None) -> SpectralComponentConfi
 
     Parameters
     ----------
-    config : object
-        config value.
+    config : SpectralComponentConfig or None
+        Component configuration; anything else is replaced by a default
+        ``SpectralComponentConfig()``.
     """
     return config if isinstance(config, SpectralComponentConfig) else SpectralComponentConfig()
 
@@ -275,8 +276,9 @@ def _component_prior_config(cfg: SpectralComponentConfig) -> dict[str, Any]:
 
     Parameters
     ----------
-    cfg : object
-        cfg value.
+    cfg : SpectralComponentConfig
+        Configuration providing ``line_prior_config``, ``line_table`` and default-line
+        options.
     """
     if cfg.line_prior_config is None:
         prior = _build_default_prior_config(
@@ -302,8 +304,8 @@ def _line_table_from_prior_config(prior_config: Mapping[str, Any]):
 
     Parameters
     ----------
-    prior_config : object
-        prior_config value.
+    prior_config : Mapping[str, Any]
+        Prior configuration mapping, possibly containing ``["line"]["table"]``.
     """
     line_cfg = prior_config.get("line", None)
     if isinstance(line_cfg, Mapping):
@@ -424,12 +426,12 @@ def _evaluate_tied_line_components(
 
     Parameters
     ----------
-    wave_rest : object
-        wave_rest value.
-    cfg : object
-        cfg value.
-    site_prefix : object
-        site_prefix value.
+    wave_rest : jax.Array
+        Rest-frame wavelength grid in Angstrom; Gaussians are evaluated in ln(lambda).
+    cfg : SpectralComponentConfig
+        Component configuration controlling the line table and narrow-line overrides.
+    site_prefix : str
+        Prefix for the NumPyro sample-site names.
     """
     prior_config = _component_prior_config(cfg)
     tied_line_meta = build_joint_tied_line_meta(cfg)
@@ -514,14 +516,16 @@ def _evaluate_simple_line_components(
 
     Parameters
     ----------
-    wave_rest : object
-        wave_rest value.
-    continuum_model : object
-        continuum_model value.
-    cfg : object
-        cfg value.
-    site_prefix : object
-        site_prefix value.
+    wave_rest : jax.Array
+        Rest-frame wavelength grid in Angstrom.
+    continuum_model : jax.Array
+        Continuum model (mJy) on ``wave_rest``; its median sets the line-amplitude prior
+        scale.
+    cfg : SpectralComponentConfig
+        Configuration with ``line_centers_rest`` (Angstrom), ``line_names`` and
+        width/velocity defaults.
+    site_prefix : str
+        Prefix for the NumPyro sample-site names.
     """
     line_model = jnp.zeros_like(wave_rest)
     broad_model = jnp.zeros_like(wave_rest)
@@ -603,12 +607,13 @@ def _flambda_shape_to_fnu_mjy_shape(wave_rest, flambda_shape, pivot_rest):
 
     Parameters
     ----------
-    wave_rest : object
-        wave_rest value.
-    flambda_shape : object
-        flambda_shape value.
-    pivot_rest : object
-        pivot_rest value.
+    wave_rest : jax.Array
+        Rest-frame wavelength grid in Angstrom.
+    flambda_shape : jax.Array
+        Relative f_lambda-shaped component on ``wave_rest``.
+    pivot_rest : float or None
+        Rest wavelength (Angstrom) where the conversion is unity; None uses the median
+        of ``wave_rest``.
     """
     wave_rest = jnp.asarray(wave_rest, dtype=jnp.float64)
     flambda_shape = jnp.asarray(flambda_shape, dtype=jnp.float64)
@@ -752,8 +757,8 @@ def evaluate_joint_spectral_components(
         spectrum. The evaluated Fe II component is converted to f_nu shape
         before being added to the mJy continuum.
 
-    config : object
-        config value.
+    config : SpectralComponentConfig or None
+        Component configuration; None uses defaults.
 
     Returns
     -------

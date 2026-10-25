@@ -87,8 +87,8 @@ def __getattr__(name):
 
     Parameters
     ----------
-    name : object
-        name value.
+    name : str
+        Attribute name requested from the package.
     """
     if name == "JAXSEDFit":
         from .core import JAXSEDFit

@@ -688,32 +688,7 @@ class HostPriorConfig:
 
     def to_mapping(self) -> dict[str, Any]:
         """Convert host prior settings into model-site keys."""
-        return _section_to_mapping(
-            self,
-            {
-                "gal_lgmet": "gal_lgmet",
-                "gal_lgmet_scatter": "gal_lgmet_scatter",
-                "gal_v_kms": "gal_v_kms",
-                "gal_sigma_kms": "gal_sigma_kms",
-                "dust_alpha": "dust_alpha",
-                "dust_umin": "dust_umin",
-                "ebv_gal": "ebv_gal",
-                "log_ebv_gal": "log_ebv_gal",
-                "dust_delta": "dust_delta",
-                "log_sfh_tau_gyr": "log_sfh_tau_gyr",
-                "log_sfh_age_gyr": "log_sfh_age_gyr",
-                "log_sfh_tau_over_age": "log_sfh_tau_over_age",
-                "log_sfh_ssfr": "log_sfh_ssfr",
-                "log_sfh_burst_fraction": "log_sfh_burst_fraction",
-                "log_sfh_burst_age_gyr": "log_sfh_burst_age_gyr",
-                "log_sfh_burst_tau_gyr": "log_sfh_burst_tau_gyr",
-                "u_lgmcrit": "u_lgmcrit",
-                "u_lgy_at_mcrit": "u_lgy_at_mcrit",
-                "u_indx_lo": "u_indx_lo",
-                "u_indx_hi": "u_indx_hi",
-                "u_tau_dep": "u_tau_dep",
-            },
-        )
+        return _section_to_mapping(self)
 
 
 @dataclass
@@ -769,48 +744,6 @@ class AGNPriorConfig:
             self,
             {
                 "log_amp": "log_agn_amp",
-                "pl_slope": "pl_slope",
-                "uv_slope": "uv_slope",
-                "pl_bend_loc": "pl_bend_loc",
-                "log_pl_bend_loc": "log_pl_bend_loc",
-                "pl_bend_width": "pl_bend_width",
-                "log_pl_bend_width": "log_pl_bend_width",
-                "pl_cutoff": "pl_cutoff",
-                "log_pl_cutoff": "log_pl_cutoff",
-                "fcov": "fcov",
-                "log_fcov": "log_fcov",
-                "si": "si",
-                "cool_lam": "cool_lam",
-                "log_cool_lam": "log_cool_lam",
-                "cool_width": "cool_width",
-                "log_cool_width": "log_cool_width",
-                "hot_lam": "hot_lam",
-                "log_hot_lam": "log_hot_lam",
-                "hot_width": "hot_width",
-                "log_hot_width": "log_hot_width",
-                "hot_fcov": "hot_fcov",
-                "log_hot_fcov": "log_hot_fcov",
-                "ebv_agn": "ebv_agn",
-                "log_ebv_agn": "log_ebv_agn",
-                "broad_lines_strength": "broad_lines_strength",
-                "log_broad_lines_strength": "log_broad_lines_strength",
-                "narrow_lines_strength": "narrow_lines_strength",
-                "log_narrow_lines_strength": "log_narrow_lines_strength",
-                "broad_line_width_kms": "broad_line_width_kms",
-                "log_broad_line_width_kms": "log_broad_line_width_kms",
-                "narrow_line_width_kms": "narrow_line_width_kms",
-                "log_narrow_line_width_kms": "log_narrow_line_width_kms",
-                "balmer_norm": "balmer_norm",
-                "log_balmer_norm": "log_balmer_norm",
-                "balmer_tau": "balmer_tau",
-                "log_balmer_tau": "log_balmer_tau",
-                "balmer_vel": "balmer_vel",
-                "log_balmer_vel": "log_balmer_vel",
-                "feii_norm": "feii_norm",
-                "log_feii_norm": "log_feii_norm",
-                "feii_fwhm": "feii_fwhm",
-                "log_feii_fwhm": "log_feii_fwhm",
-                "feii_shift": "feii_shift",
             },
         )
 
@@ -868,38 +801,26 @@ class LikelihoodPriorConfig:
 
     def to_mapping(self) -> dict[str, Any]:
         """Convert likelihood prior settings into model-site keys."""
-        return _section_to_mapping(
-            self,
-            {
-                "systematics_width": "systematics_width",
-                "log_systematics_width": "log_systematics_width",
-                "agn_systematics_width": "agn_systematics_width",
-                "log_agn_systematics_width": "log_agn_systematics_width",
-                "host_capture_scale_arcsec": "host_capture_scale_arcsec",
-                "log_host_capture_scale_arcsec": "log_host_capture_scale_arcsec",
-                "host_capture_slope": "host_capture_slope",
-                "log_host_capture_slope": "log_host_capture_slope",
-                "spectrum_scale": "spectrum_scale",
-                "log_spectrum_scale": "log_spectrum_scale",
-            },
-        )
+        return _section_to_mapping(self)
 
 
-def _section_to_mapping(section: Any, fields_to_keys: Mapping[str, str]) -> dict[str, Any]:
+def _section_to_mapping(section: Any, renames: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Convert non-None section fields into model prior mappings.
 
     Parameters
     ----------
-    section : object
-        section value.
-    fields_to_keys : object
-        fields_to_keys value.
+    section : Any
+        Prior section dataclass (e.g. ``HostPriorConfig``) whose fields hold distributions or None.
+    renames : Mapping[str, str], optional
+        Model prior key for fields whose site name differs from the field name; every other
+        field maps to the site of the same name.
     """
+    renames = renames or {}
     out: dict[str, Any] = {}
-    for field_name, key in fields_to_keys.items():
-        value = getattr(section, field_name)
+    for spec in fields(section):
+        value = getattr(section, spec.name)
         if value is not None:
-            out[key] = _prior_to_mapping(value)
+            out[renames.get(spec.name, spec.name)] = _prior_to_mapping(value)
     return out
 
 
@@ -1146,8 +1067,8 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
 
     Parameters
     ----------
-    data : object
-        data value.
+    data : Mapping[str, Any]
+        Nested mapping of ``FitConfig`` fields (e.g. parsed from JSON).
     """
     valid_top_level = set(FitConfig.__dataclass_fields__)
     unknown = set(data) - valid_top_level

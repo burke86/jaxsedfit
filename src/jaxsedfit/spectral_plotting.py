@@ -277,12 +277,12 @@ def plot_initialization(
         comp_floor = max(1e-8, 0.005 * flux_ref)
 
         def _show_component(arr):
-            """_show_component helper.
+            """Return True when a component reaches the plotting amplitude floor.
 
             Parameters
             ----------
-            arr : object
-                arr value.
+            arr : array_like
+                Component flux on the plotted wavelength grid.
             """
             arr = np.asarray(arr, dtype=float)
             arr = arr[np.isfinite(arr)]
@@ -793,8 +793,8 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
 
         Parameters
         ----------
-        name : object
-            name value.
+        name : str
+            Custom component name.
         """
         return str(name).startswith('bal_')
 
@@ -803,8 +803,8 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
 
         Parameters
         ----------
-        arr : object
-            arr value.
+        arr : array_like
+            Component flux on the plotted wavelength grid.
         """
         arr = np.asarray(arr, dtype=float)
         arr = arr[np.isfinite(arr)]

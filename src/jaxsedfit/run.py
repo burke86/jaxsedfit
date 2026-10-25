@@ -14,8 +14,8 @@ def _load_config(path: str) -> FitConfig:
 
     Parameters
     ----------
-    path : object
-        path value.
+    path : str
+        Path to a ``.json`` config or a Python module defining ``CONFIG`` or ``build_config()``.
     """
     cfg_path = Path(path)
     if cfg_path.suffix == ".json":
@@ -44,8 +44,8 @@ def main(argv: list[str] | None = None) -> int:
 
     Parameters
     ----------
-    argv : object
-        argv value.
+    argv : list[str] or None
+        Command-line arguments; ``None`` uses ``sys.argv[1:]``.
     """
     parser = argparse.ArgumentParser(description="Run a single-source jaxsedfit fit.")
     parser.add_argument("config", help="Path to a Python or JSON fit config.")

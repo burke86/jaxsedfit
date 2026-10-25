@@ -273,8 +273,8 @@ def _scalar_or_list(value: Any) -> Any:
 
     Parameters
     ----------
-    value : object
-        value value.
+    value : array_like
+        Distribution parameter (scalar or array).
     """
     arr = np.asarray(value)
     if arr.shape == ():
@@ -287,8 +287,8 @@ def _numpyro_distribution_to_mapping(value: Any) -> dict[str, Any] | None:
 
     Parameters
     ----------
-    value : object
-        value value.
+    value : Any
+        Candidate NumPyro distribution; non-NumPyro objects return None.
     """
     module = getattr(value.__class__, "__module__", "")
     if not module.startswith("numpyro.distributions"):
@@ -368,8 +368,8 @@ def _prior_to_mapping(value: Any) -> dist.Distribution:
 
     Parameters
     ----------
-    value : object
-        value value.
+    value : numpyro.distributions.Distribution or Mapping[str, Any]
+        NumPyro distribution, or a serialized prior mapping with a ``"dist"`` key.
     """
     if isinstance(value, dist.Distribution):
         return value
@@ -865,8 +865,10 @@ def _coerce_dataclass(cls, value: Any):
 
     Parameters
     ----------
-    value : object
-        value value.
+    cls : type
+        Target dataclass type.
+    value : Any
+        Instance of ``cls`` or a mapping of its field names to values.
     """
     if isinstance(value, cls):
         return value
@@ -888,8 +890,9 @@ def _coerce_prior_config(value: Any) -> PriorConfig:
 
     Parameters
     ----------
-    value : object
-        value value.
+    value : PriorConfig, Mapping[str, Any] or None
+        Prior configuration; nested mappings are coerced into sub-configs and None gives
+        defaults.
     """
     if isinstance(value, PriorConfig):
         return value

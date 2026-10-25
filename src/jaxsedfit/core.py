@@ -278,42 +278,39 @@ def _joint_dense_mass_blocks(
         cfg = context.fit_config
         spectral_cfg = cfg.agn
         if bool(spectral_cfg.fit_lines) and bool(spectral_cfg.tied_lines):
-            try:
-                from .spectroscopy import (
-                    SpectralComponentConfig,
-                    build_joint_tied_line_meta,
-                    line_complex_dense_mass_blocks,
-                )
-                from .model import _fixed_spectral_line_coverage_rest
+            from .spectroscopy import (
+                SpectralComponentConfig,
+                build_joint_tied_line_meta,
+                line_complex_dense_mass_blocks,
+            )
+            from .model import _fixed_spectral_line_coverage_rest
 
-                component_cfg = SpectralComponentConfig(
-                    use_lines=True,
-                    tied_lines=True,
-                    line_table=spectral_cfg.line_table,
-                    line_prior_config=context.spectral_prior_config,
-                    line_coverage_rest=_fixed_spectral_line_coverage_rest(context, cfg),
-                    include_elg_narrow_lines=bool(spectral_cfg.include_elg_narrow_lines),
-                    include_high_ionization_lines=bool(spectral_cfg.include_high_ionization_lines),
+            component_cfg = SpectralComponentConfig(
+                use_lines=True,
+                tied_lines=True,
+                line_table=spectral_cfg.line_table,
+                line_prior_config=context.spectral_prior_config,
+                line_coverage_rest=_fixed_spectral_line_coverage_rest(context, cfg),
+                include_elg_narrow_lines=bool(spectral_cfg.include_elg_narrow_lines),
+                include_high_ionization_lines=bool(spectral_cfg.include_high_ionization_lines),
+            )
+            tied_line_meta = build_joint_tied_line_meta(component_cfg)
+            if tied_line_meta is not None:
+                native_blocks = line_complex_dense_mass_blocks(
+                    tied_line_meta,
+                    standardized_amplitudes=True,
                 )
-                tied_line_meta = build_joint_tied_line_meta(component_cfg)
-                if tied_line_meta is not None:
-                    native_blocks = line_complex_dense_mass_blocks(
-                        tied_line_meta,
-                        standardized_amplitudes=True,
+                for native_block in native_blocks:
+                    block = tuple(
+                        f"spectral_{site}"
+                        for site in native_block
+                        if f"spectral_{site}" in names and f"spectral_{site}" not in assigned
                     )
-                    for native_block in native_blocks:
-                        block = tuple(
-                            f"spectral_{site}"
-                            for site in native_block
-                            if f"spectral_{site}" in names and f"spectral_{site}" not in assigned
-                        )
-                        if block:
-                            value = np.asarray(latent_values[block[0]])
-                            if len(block) > 1 or value.size > 1:
-                                blocks.append(block)
-                            assigned.update(block)
-            except ImportError:
-                pass
+                    if block:
+                        value = np.asarray(latent_values[block[0]])
+                        if len(block) > 1 or value.size > 1:
+                            blocks.append(block)
+                        assigned.update(block)
     # Group any active line sites not known to the native geometry helper
     # (for example, a newer custom coordinate) instead of silently leaving
     # them diagonal. When no native metadata was available this also supplies
@@ -440,7 +437,7 @@ class JAXSEDFit:
 
     @map_result.setter
     def map_result(self, value: dict[str, Any] | None) -> None:
-        """map_result helper.
+        """Set the MAP payload and mark MAP as the active method.
 
         Parameters
         ----------
@@ -459,7 +456,7 @@ class JAXSEDFit:
 
     @nuts_result.setter
     def nuts_result(self, value: dict[str, Any] | None) -> None:
-        """nuts_result helper.
+        """Set the NUTS payload and mark NUTS as the active method.
 
         Parameters
         ----------
@@ -478,7 +475,7 @@ class JAXSEDFit:
 
     @ns_result.setter
     def ns_result(self, value: dict[str, Any] | None) -> None:
-        """ns_result helper.
+        """Set the nested-sampling payload and mark NS as the active method.
 
         Parameters
         ----------
@@ -497,7 +494,7 @@ class JAXSEDFit:
 
     @samples.setter
     def samples(self, value: dict[str, Any] | None) -> None:
-        """samples helper.
+        """Set posterior samples and invalidate cached predictive outputs.
 
         Parameters
         ----------
@@ -516,7 +513,7 @@ class JAXSEDFit:
 
     @predictive.setter
     def predictive(self, value: dict[str, Any] | None) -> None:
-        """predictive helper.
+        """Set plot-kind predictive outputs and reseed the predictive cache.
 
         Parameters
         ----------
@@ -539,7 +536,7 @@ class JAXSEDFit:
 
     @_plot_cache.setter
     def _plot_cache(self, value: dict[str, Any] | None) -> None:
-        """_plot_cache helper.
+        """Set the cached plotting payloads on the internal fit state.
 
         Parameters
         ----------
@@ -555,7 +552,7 @@ class JAXSEDFit:
 
     @_saved_summary.setter
     def _saved_summary(self, value: Mapping[str, Any] | None) -> None:
-        """_saved_summary helper.
+        """Set the summary restored from a saved posterior bundle.
 
         Parameters
         ----------
@@ -571,7 +568,7 @@ class JAXSEDFit:
 
     @_loaded_posterior_path.setter
     def _loaded_posterior_path(self, value: str | Path | None) -> None:
-        """_loaded_posterior_path helper.
+        """Set the path of the restored posterior bundle.
 
         Parameters
         ----------
@@ -605,8 +602,9 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        kind : object
-            kind value.
+        kind : str
+            Requested product set; ``"plot"``/``"photometry"`` or an alias
+            (``"full"``, ``"all"``, ``"sed"``, ``"photo"``).
         """
         normalized = str(kind).lower()
         aliases = {"full": "plot", "all": "plot", "sed": "plot", "photo": "photometry"}
@@ -659,10 +657,10 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        samples : object
-            samples value.
-        max_draws : object
-            max_draws value.
+        samples : Mapping[str, Any]
+            Posterior samples keyed by site name, draws on the leading axis.
+        max_draws : int or None
+            Maximum number of leading draws to keep (at least 1); None keeps all.
         """
         out: dict[str, Any] = {}
         n = None if max_draws is None else max(int(max_draws), 1)
@@ -677,8 +675,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        samples : object
-            samples value.
+        samples : Mapping[str, Any]
+            Posterior samples keyed by site name, draws on the leading axis.
         """
         return {key: np.expand_dims(np.asarray(value), axis=0) for key, value in median_mapping(samples).items()}
 
@@ -786,8 +784,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        kind : object
-            kind value.
+        kind : str
+            Normalized product set, ``"plot"`` or ``"photometry"``.
         """
         photometry_sites = [
             "pred_fluxes",
@@ -953,14 +951,14 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        method : object
-            method value.
-        path : object
-            path value.
-        figure : object
-            figure value.
-        summary : object
-            summary value.
+        method : str
+            Inference method label (``"map"``, ``"nuts"``, or ``"ns"``).
+        path : str or pathlib.Path, optional
+            Saved posterior-bundle path to record on the fit state.
+        figure : Any, optional
+            Figure handle to attach to the result.
+        summary : dict[str, Any], optional
+            Precomputed summary; computed via ``summary()`` when omitted.
         """
         state = self._ensure_fit_state()
         state.method = method
@@ -1007,21 +1005,23 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        _state : object
-            _state value.
-        kind : object
-            kind value.
-        max_draws : object
-            max_draws value.
+        _state : _FitState, optional
+            Fit state to read samples from and cache into; defaults to the
+            fitter's own state.
+        kind : str, optional
+            Prediction product set, ``"plot"`` or ``"photometry"`` (or alias).
+        max_draws : int, optional
+            Maximum number of posterior draws to evaluate; None uses all.
         extra_return_sites : iterable of str, optional
             Best-effort additional NumPyro sites to include alongside the
             selected product set.
         required_return_sites : iterable of str, optional
             Additional NumPyro sites that must be present in the prediction.
-        posterior_samples : object
-            posterior_samples value.
-        cache : object
-            cache value.
+        posterior_samples : Mapping[str, Any], optional
+            Explicit samples to predict from instead of the stored posterior;
+            results from explicit samples are never cached.
+        cache : bool, optional
+            If True, reuse and store results in the predictive cache.
         """
         state = self._ensure_fit_state() if _state is None else _state
         kind = self._prediction_kind(kind)
@@ -1244,18 +1244,18 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        model_fn : object
-            model_fn value.
-        steps : object
-            steps value.
-        learning_rate : object
-            learning_rate value.
-        progress_bar : object
-            progress_bar value.
-        rng_seed : object
-            rng_seed value.
-        init_values : object
-            init_values value.
+        model_fn : callable
+            NumPyro model to optimize (full or continuum warm-start model).
+        steps : int
+            Number of SVI optimization steps.
+        learning_rate : float
+            Adam learning rate.
+        progress_bar : bool
+            If True, show the SVI progress bar.
+        rng_seed : int
+            Seed for the SVI PRNG key.
+        init_values : dict[str, Any], optional
+            Initial site values for the AutoDelta guide; None uses defaults.
         """
         import optax
         from numpyro.optim import optax_to_numpyro
@@ -1284,16 +1284,20 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        steps : object
-            steps value.
-        learning_rate : object
-            learning_rate value.
-        progress_bar : object
-            progress_bar value.
-        staged : object
-            staged value.
-        staged_steps : object
-            staged_steps value.
+        steps : int, optional
+            Number of full-model SVI steps; defaults to
+            ``config.inference.map_steps``.
+        learning_rate : float, optional
+            Adam learning rate; defaults to ``config.inference.learning_rate``.
+        progress_bar : bool, optional
+            If True, show SVI progress bars.
+        staged : bool, optional
+            If True, first fit the continuum/host warm-start model and use it
+            to initialize the full MAP; defaults to
+            ``config.inference.staged_map``.
+        staged_steps : int, optional
+            Stage-1 SVI steps; defaults to ``config.inference.staged_steps``,
+            or ``max(1, steps // 3)`` when that is None.
         plot_init : bool, optional
             If True, plot the stage-1 continuum/host MAP solution when staged
             optimization is enabled and the final full MAP solution. The same
@@ -1436,29 +1440,31 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        num_warmup : object
-            num_warmup value.
-        num_samples : object
-            num_samples value.
-        num_chains : object
-            num_chains value.
-        target_accept_prob : object
-            target_accept_prob value.
+        num_warmup : int, optional
+            Warmup iterations per chain; defaults to ``config.inference``.
+        num_samples : int, optional
+            Retained draws per chain; defaults to ``config.inference``.
+        num_chains : int, optional
+            Number of MCMC chains; defaults to ``config.inference``.
+        target_accept_prob : float, optional
+            NUTS step-size adaptation target; defaults to ``config.inference``.
         dense_mass : bool, str, or list of tuples, optional
             NUTS mass-matrix structure. ``"blocks"`` adapts conditional SED
             and spectral blocks, ``True`` uses one global dense matrix, and
             ``False`` uses a diagonal matrix. A NumPyro block list may also be
             supplied directly.
-        max_tree_depth : object
-            max_tree_depth value.
+        max_tree_depth : int, optional
+            Tree-depth limit for retained draws; defaults to
+            ``config.inference.max_tree_depth``.
         warmup_max_tree_depth : int, optional
             Warmup-only tree-depth limit. ``None`` uses the retained-draw
             ``max_tree_depth``; set a larger value explicitly when adaptation
             requires longer trajectories.
-        use_map_init : object
-            use_map_init value.
-        progress_bar : object
-            progress_bar value.
+        use_map_init : bool, optional
+            If True, initialize chains at the MAP median, running
+            ``fit_map`` first when no MAP result exists.
+        progress_bar : bool, optional
+            If True, show MAP and MCMC progress bars.
         """
         if use_map_init and self.map_result is None:
             self.fit_map(progress_bar=progress_bar)
@@ -1642,42 +1648,45 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        num_live_points : object
-            num_live_points value.
-        max_samples : object
-            max_samples value.
-        dlogz : object
-            dlogz value.
-        num_resamples : object
-            num_resamples value.
-        difficult_model : object
-            difficult_model value.
-        parameter_estimation : object
-            parameter_estimation value.
-        num_parallel_workers : object
-            num_parallel_workers value.
-        init_efficiency_threshold : object
-            init_efficiency_threshold value.
-        max_likelihood_evals : object
-            max_likelihood_evals value.
-        efficiency_threshold : object
-            efficiency_threshold value.
-        ns_difficult_model : object
-            ns_difficult_model value.
-        ns_parameter_estimation : object
-            ns_parameter_estimation value.
-        ns_num_parallel_workers : object
-            ns_num_parallel_workers value.
-        ns_init_efficiency_threshold : object
-            ns_init_efficiency_threshold value.
-        ns_max_likelihood_evals : object
-            ns_max_likelihood_evals value.
-        ns_efficiency_threshold : object
-            ns_efficiency_threshold value.
-        ns_resamples : object
-            ns_resamples value.
-        progress_bar : object
-            progress_bar value.
+        num_live_points : int, optional
+            Number of jaxns live points; defaults to
+            ``config.inference.ns_num_live_points``.
+        max_samples : int, optional
+            Maximum number of nested-sampling samples to store.
+        dlogz : float, optional
+            Evidence-uncertainty termination threshold (``dlogZ``).
+        num_resamples : int, optional
+            Number of equal-weight posterior draws to resample; falls back to
+            ``config.inference.num_samples`` when unset everywhere.
+        difficult_model : bool, optional
+            Enable the jaxns ``difficult_model`` setting.
+        parameter_estimation : bool, optional
+            Enable the jaxns ``parameter_estimation`` setting.
+        num_parallel_workers : int, optional
+            Number of parallel jaxns workers.
+        init_efficiency_threshold : float, optional
+            jaxns initial-efficiency threshold.
+        max_likelihood_evals : int, optional
+            Termination cap on likelihood evaluations.
+        efficiency_threshold : float, optional
+            Termination threshold on sampling efficiency.
+        ns_difficult_model : bool, optional
+            Config-style alias of ``difficult_model``; overrides it when given.
+        ns_parameter_estimation : bool, optional
+            Config-style alias of ``parameter_estimation``; overrides it when
+            given.
+        ns_num_parallel_workers : int, optional
+            Alias of ``num_parallel_workers``, used only when that is None.
+        ns_init_efficiency_threshold : float, optional
+            Alias of ``init_efficiency_threshold``, used only when that is None.
+        ns_max_likelihood_evals : int, optional
+            Alias of ``max_likelihood_evals``, used only when that is None.
+        ns_efficiency_threshold : float, optional
+            Alias of ``efficiency_threshold``, used only when that is None.
+        ns_resamples : int, optional
+            Alias of ``num_resamples``, used only when that is None.
+        progress_bar : bool, optional
+            If True, run the nested sampler in verbose mode.
         """
         self._reset_fit_state()
         NestedSampler = _get_nested_sampler_cls()
@@ -1897,8 +1906,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        _state : object
-            _state value.
+        _state : _FitState, optional
+            Fit state to read; defaults to the fitter's own state.
         """
         state = self._ensure_fit_state() if _state is None else _state
         if state.samples is not None and "log_stellar_mass" in state.samples:
@@ -1912,8 +1921,9 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        _state : object
-            _state value.
+        _state : _FitState, optional
+            Fit state to summarize and update; defaults to the fitter's own
+            state.
         """
         state = self._ensure_fit_state() if _state is None else _state
         if state.samples is None:
@@ -1954,9 +1964,15 @@ class JAXSEDFit:
         return out
 
     @staticmethod
-    def _hdf5_scalar_string_dtype():
-        """Return the UTF-8 scalar string dtype used in HDF5 bundles."""
-        return h5py.string_dtype(encoding="utf-8")
+    def _gzip_kwargs(arr) -> dict[str, Any]:
+        """Return dataset compression options: gzip + shuffle for non-scalar arrays."""
+        return {"compression": "gzip", "shuffle": True} if np.ndim(arr) > 0 else {}
+
+    @staticmethod
+    def _node_type(node, default: str) -> str:
+        """Return a node's ``node_type`` attribute as ``str``."""
+        node_type = node.attrs.get("node_type", default)
+        return node_type.decode("utf-8") if isinstance(node_type, bytes) else node_type
 
     @classmethod
     def _write_hdf5_node(cls, parent, name, value):
@@ -1985,57 +2001,38 @@ class JAXSEDFit:
                 cls._write_hdf5_node(item_grp, "value", item)
             return
 
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
+            kind = "list" if isinstance(value, list) else "tuple"
             compact = cls._compact_scalar_sequence(value)
             if compact is not None:
                 ds = parent.create_dataset(name, data=compact, compression="gzip", shuffle=True)
-                ds.attrs["node_type"] = "list_array"
+                ds.attrs["node_type"] = f"{kind}_array"
                 return
             grp = parent.create_group(name)
-            grp.attrs["node_type"] = "list"
-            for idx, item in enumerate(value):
-                cls._write_hdf5_node(grp, f"item_{idx:08d}", item)
-            return
-
-        if isinstance(value, tuple):
-            compact = cls._compact_scalar_sequence(value)
-            if compact is not None:
-                ds = parent.create_dataset(name, data=compact, compression="gzip", shuffle=True)
-                ds.attrs["node_type"] = "tuple_array"
-                return
-            grp = parent.create_group(name)
-            grp.attrs["node_type"] = "tuple"
+            grp.attrs["node_type"] = kind
             for idx, item in enumerate(value):
                 cls._write_hdf5_node(grp, f"item_{idx:08d}", item)
             return
 
         if isinstance(value, (np.ndarray, np.generic)):
             arr = np.asarray(value)
-            ds_kwargs = {}
-            if arr.ndim > 0:
-                ds_kwargs["compression"] = "gzip"
-                ds_kwargs["shuffle"] = True
-            ds = parent.create_dataset(name, data=arr, **ds_kwargs)
+            ds = parent.create_dataset(name, data=arr, **cls._gzip_kwargs(arr))
             ds.attrs["node_type"] = "ndarray"
             return
 
-        if isinstance(value, bool):
-            ds = parent.create_dataset(name, data=np.bool_(value))
-            ds.attrs["node_type"] = "scalar_bool"
-            return
-
-        if isinstance(value, int):
-            ds = parent.create_dataset(name, data=np.int64(value))
-            ds.attrs["node_type"] = "scalar_int"
-            return
-
-        if isinstance(value, float):
-            ds = parent.create_dataset(name, data=np.float64(value))
-            ds.attrs["node_type"] = "scalar_float"
-            return
+        # bool before int: bool is a subclass of int
+        for py_type, np_type, node_type in (
+            (bool, np.bool_, "scalar_bool"),
+            (int, np.int64, "scalar_int"),
+            (float, np.float64, "scalar_float"),
+        ):
+            if isinstance(value, py_type):
+                ds = parent.create_dataset(name, data=np_type(value))
+                ds.attrs["node_type"] = node_type
+                return
 
         if isinstance(value, str):
-            ds = parent.create_dataset(name, data=np.array(value, dtype=cls._hdf5_scalar_string_dtype()))
+            ds = parent.create_dataset(name, data=np.array(value, dtype=h5py.string_dtype(encoding="utf-8")))
             ds.attrs["node_type"] = "scalar_str"
             return
 
@@ -2057,16 +2054,14 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        parent : object
-            parent value.
-        name : object
-            name value.
+        parent : h5py.Group or h5py.File
+            HDF5 group containing the node.
+        name : str
+            Name of the child dataset or group to read.
         """
         node = parent[name]
         if isinstance(node, h5py.Dataset):
-            node_type = node.attrs.get("node_type", "ndarray")
-            if isinstance(node_type, bytes):
-                node_type = node_type.decode("utf-8")
+            node_type = cls._node_type(node, "ndarray")
             if node_type == "scalar_str":
                 return node.asstr()[()]
             value = node[()]
@@ -2082,9 +2077,7 @@ class JAXSEDFit:
                 return tuple(np.asarray(value).tolist())
             return np.asarray(value)
 
-        node_type = node.attrs.get("node_type", "")
-        if isinstance(node_type, bytes):
-            node_type = node_type.decode("utf-8")
+        node_type = cls._node_type(node, "")
         if node_type == "none":
             return None
         if node_type == "dict":
@@ -2106,18 +2099,14 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        parent : object
-            parent value.
-        values : object
-            values value.
+        parent : h5py.Group
+            HDF5 group to receive one dataset per entry.
+        values : dict[str, Any]
+            Arrays keyed by dataset name (e.g. posterior sample sites).
         """
         for name, value in values.items():
             arr = np.asarray(value)
-            ds_kwargs = {}
-            if arr.ndim > 0:
-                ds_kwargs["compression"] = "gzip"
-                ds_kwargs["shuffle"] = True
-            parent.create_dataset(str(name), data=arr, **ds_kwargs)
+            parent.create_dataset(str(name), data=arr, **JAXSEDFit._gzip_kwargs(arr))
 
     @classmethod
     def _posterior_bundle_path(cls, path: str | Path | None, object_id: str) -> Path:
@@ -2125,10 +2114,11 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        path : object
-            path value.
-        object_id : object
-            object_id value.
+        path : str or pathlib.Path, optional
+            Output directory or explicit ``.h5`` path; defaults to ``"."``.
+            Missing directories are created.
+        object_id : str
+            Object identifier used for the ``<object_id>_samples.h5`` name.
         """
         resolved = Path("." if path is None else path)
         if resolved.suffix == cls._POSTERIOR_BUNDLE_SUFFIX:
@@ -2227,8 +2217,9 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        path : object
-            path value.
+        path : str or pathlib.Path, optional
+            Bundle file, or a directory containing exactly one
+            ``*_samples.h5`` file; defaults to the current directory.
         """
         if path is None:
             path = "."
@@ -2308,8 +2299,9 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        path : object
-            path value.
+        path : str or pathlib.Path, optional
+            Bundle file, or a directory containing exactly one
+            ``*_samples.h5`` file; defaults to the current directory.
         """
         fitter = cls.load(path)
         return fitter._make_result(
@@ -2462,12 +2454,12 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        wave_obs : object
-            wave_obs value.
-        flux_mjy : object
-            flux_mjy value.
-        redshift : object
-            redshift value.
+        wave_obs : numpy.ndarray
+            Observed-frame wavelengths in Angstrom.
+        flux_mjy : numpy.ndarray
+            Observed flux density in mJy, broadcastable to ``wave_obs``.
+        redshift : float
+            Redshift used for the rest-frame conversion.
         """
         wave_obs = np.asarray(wave_obs, dtype=float)
         flux_mjy = np.asarray(flux_mjy, dtype=float)
@@ -2481,10 +2473,10 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        flux_lambda_obs : object
-            flux_lambda_obs value.
-        redshift : object
-            redshift value.
+        flux_lambda_obs : numpy.ndarray
+            Observed-frame flux density in W/m^2/Angstrom.
+        redshift : float
+            Redshift used for the rest-frame conversion.
         """
         flux_lambda_obs = np.asarray(flux_lambda_obs, dtype=float)
         return flux_lambda_obs * 1.0e3 * (1.0 + float(redshift)) / 1.0e-17
@@ -2640,10 +2632,10 @@ class JAXSEDFit:
 
             Parameters
             ----------
-            name : object
-                name value.
-            apply_scale : object
-                apply_scale value.
+            name : str
+                Predictive site name of the spectral component.
+            apply_scale : bool, optional
+                If True, multiply by the fitted spectrum scale factor.
             """
             if name not in pred:
                 return np.zeros_like(wave_rest)
@@ -2657,10 +2649,10 @@ class JAXSEDFit:
 
             Parameters
             ----------
-            name : object
-                name value.
-            multiplier : object
-                multiplier value.
+            name : str
+                Predictive site name of the observed SED component.
+            multiplier : float, optional
+                Extra multiplicative factor applied with the spectrum scale.
             """
             if name not in pred or "obs_wave" not in pred:
                 return np.zeros_like(wave_rest)
@@ -2677,8 +2669,8 @@ class JAXSEDFit:
 
             Parameters
             ----------
-            arr : object
-                arr value.
+            arr : numpy.ndarray
+                Component flux array on the plot wavelength grid.
             """
             finite = np.asarray(arr, dtype=float)
             finite = finite[np.isfinite(finite)]
@@ -2689,8 +2681,8 @@ class JAXSEDFit:
 
             Parameters
             ----------
-            n_draws : object
-                n_draws value.
+            n_draws : int
+                Number of posterior draws to return scale factors for.
             """
             raw = np.asarray(pred.get("spectrum_scale_fit", scale_factor), dtype=float)
             if raw.ndim == 0:
@@ -2707,8 +2699,8 @@ class JAXSEDFit:
 
             Parameters
             ----------
-            draws : object
-                draws value.
+            draws : numpy.ndarray or None
+                Component draws with shape ``(n_draws, n_pixels)``.
             """
             if draws is None:
                 return None
@@ -2722,10 +2714,10 @@ class JAXSEDFit:
 
             Parameters
             ----------
-            name : object
-                name value.
-            apply_scale : object
-                apply_scale value.
+            name : str
+                Predictive site name of the spectral component.
+            apply_scale : bool, optional
+                If True, multiply by the fitted spectrum scale factor.
             """
             if name not in pred:
                 return None
@@ -2752,10 +2744,10 @@ class JAXSEDFit:
 
             Parameters
             ----------
-            name : object
-                name value.
-            multiplier : object
-                multiplier value.
+            name : str
+                Predictive site name of the observed SED component.
+            multiplier : float, optional
+                Extra multiplicative factor applied with the spectrum scale.
             """
             if name not in pred or "obs_wave" not in pred:
                 return None
