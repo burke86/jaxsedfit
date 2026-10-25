@@ -237,7 +237,15 @@ def simulate(
         )
 
     ctx = context if context is not None else build_model_context(config)
-    sim = make_simulator(ctx, include_components=include_components, include_spectral_lines=include_spectral_lines)
+    # Reuse the jitted simulator across calls on the same context: a fresh closure would miss
+    # JAX's compilation cache and re-trace and re-compile the whole model on every call.
+    simulators = ctx.__dict__.setdefault("_simulator_cache", {})
+    sim_key = (bool(include_components), bool(include_spectral_lines))
+    if sim_key not in simulators:
+        simulators[sim_key] = make_simulator(
+            ctx, include_components=include_components, include_spectral_lines=include_spectral_lines
+        )
+    sim = simulators[sim_key]
     bs = int(min(batch_size, n))
     keys = jax.random.split(jax.random.PRNGKey(int(seed)), n)
     out_f, out_c, out_p = [], {}, {}
