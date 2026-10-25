@@ -536,7 +536,6 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
         cfg = _FallbackLikelihood()
 
     obs_variance = obs_errors**2
-    obs_fluxes = np.asarray(getattr(fitter.context, "fluxes", fitter.config.photometry.fluxes), dtype=float)
     systematics_width = (
         float(np.median(np.asarray(pred["systematics_width"], dtype=float)))
         if "systematics_width" in pred
@@ -547,7 +546,7 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
         if "agn_systematics_width" in pred
         else float(getattr(cfg, "agn_systematics_width", 0.0))
     )
-    sys_variance = (systematics_width * obs_fluxes) ** 2 + (agn_systematics_width * agn_fluxes) ** 2
+    sys_variance = (systematics_width * pred_fluxes) ** 2 + (agn_systematics_width * agn_fluxes) ** 2
     if "nebular_lines_fluxes" in pred:
         nebular_lines = np.asarray(
             _median_site(pred, "nebular_lines_fluxes"), dtype=float

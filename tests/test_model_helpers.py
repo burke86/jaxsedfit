@@ -1358,7 +1358,8 @@ def test_photometric_systematic_variance_matches_grahsp_error_model():
     pred_fluxes = np.asarray([9.0])
 
     actual = float(photometric_loglike(pred_fluxes=pred_fluxes, **kwargs))
-    sigma = np.sqrt(0.5**2 + (0.1 * 8.0) ** 2 + (0.02 * 5.0) ** 2)
+    # GRAHSP (dualsampler.chi2_with_norm): sys_variance = (sys_error * model_fluxes)**2
+    sigma = np.sqrt(0.5**2 + (0.1 * 9.0) ** 2 + (0.02 * 5.0) ** 2)
     expected = -0.5 * (((8.0 - 9.0) / sigma) ** 2 + np.log(2.0 * np.pi * sigma**2))
 
     assert actual == pytest.approx(expected)

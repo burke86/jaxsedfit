@@ -401,8 +401,10 @@ Useful options:
    ``student_t_df=5``. Use ``"gaussian"`` to request a normal likelihood.
 
 ``systematics_width``
-   Fractional model-error floor. Fix it for simpler geometry, or sample it
-   with ``fit_systematics_width=True`` when the data warrant it.
+   Fractional model-error floor, added in quadrature as ``systematics_width``
+   times the model flux in each band (as in GRAHSP). Fix it for simpler
+   geometry, or sample it with ``fit_systematics_width=True`` when the data
+   warrant it.
 
 ``variability_uncertainty``
    Adds an AGN variability term to photometric uncertainty when AGN emission is
