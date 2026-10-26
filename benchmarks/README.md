@@ -54,4 +54,14 @@ python benchmarks/chimera_validation.py make-sample \
   --cosmos2015-catalog <path to COSMOS2015_Laigle+.fits>
 ```
 
+### Chimera spectra
+
+`data/chimera_validation_spectra.fits` (14 MB) holds composite spectra for the 241 objects in `chimera_validation_sample.csv` whose host has a flux-calibrated spectrum from DESI DR1 or LEGA-C. It is meant for spectral and joint photometry + spectra tests on the Chimeras. Rows are keyed by `id`, like the photometry sample. Each row holds the observed-frame wavelength [Å] and the total, error, host and weighted-quasar flux densities [mJy] as float32 arrays, at R = 1500 (header keyword `SPEC_RES`). About 30–40% of the pixels in LEGA-C hosts are masked (NaN flux, infinite error). The 241 are simply the sample objects that have a spectrum, so they are not balanced across luminosity bins and some share a host.
+
+Each spectrum is the host spectrum plus the quasar's SDSS DR7 spectrum times the chimera QSO weight. Each component is dereddened and scaled to its own photometry, the quasar is moved to the host redshift, and both are convolved to R = 1500. The spectra are built by the `make spectra` target of the Chimeras (branch `agent/chimera-spectra` of `burke86/chimeras`; about 300 MB for all 2,474 Chimeras with spectra, not committed). Rebuild the fixture from such a build with:
+
+```bash
+python benchmarks/make_chimera_spectra_sample.py --chimeras-dir <chimeras build directory with chimeras-spectra.fits>
+```
+
 `.github/workflows/chimera-validation.yml` runs this on pull requests that touch `src/` (and on manual dispatch). `.github/workflows/publish-chimera-validation.yml` then pushes the plot to the `chimera-validation-plots` branch and creates or updates a PR comment with the metrics table and the embedded plot.
