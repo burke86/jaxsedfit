@@ -76,6 +76,9 @@ jobs:
       - name: Run Chimera validation
         env:
           MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+          # glibc keeps a memory pool per thread and rarely returns freed memory; with the
+          # context-building thread this held ~15 GB of freed memory. Two pools cap it.
+          MALLOC_ARENA_MAX: "2"
         run: |
           image_url=""
           if [ "${SAME_REPO}" = "true" ]; then
