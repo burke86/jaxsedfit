@@ -7,7 +7,7 @@ from __future__ import annotations
 # files in src/jaxsedfit/resources/ for provenance details.
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -317,6 +317,15 @@ class ModelContext:
     spectral_prior_config: Mapping[str, Any] | None
     mw_ebv: float
     igm_redshift_table_jax: IGMRedshiftTableJax | None = None
+    # Whether any spectral pixel is usable, and their rest-frame (min, max) coverage
+    # widened by agn.line_coverage_margin_kms (NaN without spectra or for fitted redshift).
+    spec_has_data: bool = False
+    spec_line_coverage_rest: np.ndarray = field(default_factory=lambda: np.full(2, np.nan))
+    # True for masked pixels appended to give spectra a common length (fit_batch).
+    spec_padding: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
+    # With agn.line_activation_rest: this object's (init, min, max) tied-line group
+    # amplitudes, which replace the placeholders left in the shared line table.
+    spec_line_amp_groups: np.ndarray = field(default_factory=lambda: np.zeros((3, 0)))
 
 
 _SFD_QUERY_CACHE: dict[str, Any] = {}
@@ -333,6 +342,7 @@ _REDSHIFT_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, 
 _FIXED_LOCAL_LINE_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
 _FIXED_LOCAL_NEBULAR_LINE_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
 _FILTER_MAX_OUTSIDE_FRACTION = 0.01
+C_KMS = 299792.458
 
 
 def clear_per_object_caches() -> None:
@@ -600,6 +610,46 @@ def _build_spectral_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_m
     # mass adaptation.
     prior_config["standardize_active_priors"] = True
     return prior_config
+
+
+def _fix_line_table_amplitudes(cfg: FitConfig, prior_config: Mapping[str, Any]):
+    """Move data-scaled amplitude bounds out of a fixed tied-line table.
+
+    With ``agn.line_activation_rest`` the line table is shared by objects of
+    different flux levels (:func:`jaxsedfit.fit_batch`), so its structure must not
+    depend on the data. The data-scaled ``inisca``/``minsca``/``maxsca`` of each row
+    become per-group arrays for the context, and the table keeps placeholders.
+
+    Returns
+    -------
+    prior_config : dict
+        Copy of ``prior_config`` with placeholder amplitudes in the line table.
+    amp_groups : numpy.ndarray
+        (init, min, max) amplitude of each tied-line flux group, shape (3, n_groups).
+    """
+    from .spectroscopy import SpectralComponentConfig, build_joint_tied_line_meta
+
+    agn = cfg.agn
+    table = (prior_config.get("line") or {}).get("table")
+    if not (agn.fit_lines and agn.tied_lines and agn.line_table is None and isinstance(table, list)):
+        return prior_config, np.zeros((3, 0))
+    meta = build_joint_tied_line_meta(
+        SpectralComponentConfig(
+            line_prior_config=prior_config,
+            line_coverage_rest=tuple(agn.line_activation_rest),
+            include_elg_narrow_lines=bool(agn.include_elg_narrow_lines),
+            include_high_ionization_lines=bool(agn.include_high_ionization_lines),
+        )
+    )
+    if meta is None:
+        return prior_config, np.zeros((3, 0))
+    amp_groups = np.stack([np.asarray(meta[k], dtype=float) for k in ("amp_init_group", "amp_min_group", "amp_max_group")])
+    prior_config = dict(prior_config)
+    prior_config["line"] = {
+        **prior_config["line"],
+        "table": [{**row, "inisca": 0.01, "minsca": 1.0e-4, "maxsca": 1.0} for row in table],
+    }
+    return prior_config, amp_groups
 
 
 def _load_templates(cfg: FitConfig) -> LoadedTemplates:
@@ -2048,13 +2098,59 @@ def _build_fixed_local_nebular_line_projection_cache_jax(
     )
 
 
-def build_model_context(cfg: FitConfig) -> ModelContext:
+def usable_spectral_pixels(spectrum) -> np.ndarray:
+    """Boolean mask of a spectrum's pixels that enter the likelihood.
+
+    Parameters
+    ----------
+    spectrum : SpectroscopyData
+        One spectrum; its own ``mask`` is combined with finite, positive
+        wavelengths and errors and finite fluxes.
+    """
+    wave = np.asarray(spectrum.wave_obs, dtype=float)
+    flux = np.asarray(spectrum.fluxes, dtype=float)
+    err = np.asarray(spectrum.errors, dtype=float)
+    mask = np.asarray(spectrum.mask if spectrum.mask is not None else np.ones_like(wave, dtype=bool), dtype=bool)
+    return mask & np.isfinite(wave) & np.isfinite(flux) & np.isfinite(err) & (wave > 0.0) & (err > 0.0)
+
+
+def spectral_coverage_rest(spec_wave, spec_mask, redshift: float, margin_kms: float) -> tuple[float, float] | None:
+    """Rest-frame (min, max) wavelength covered by usable spectral pixels, widened by a margin.
+
+    Parameters
+    ----------
+    spec_wave : array_like
+        Observed-frame pixel wavelengths in Angstrom.
+    spec_mask : array_like of bool
+        Usable pixels.
+    redshift : float
+        Source redshift.
+    margin_kms : float
+        Velocity margin added on both sides.
+    """
+    spec_wave = np.asarray(spec_wave, dtype=float)
+    valid = np.asarray(spec_mask, dtype=bool) & np.isfinite(spec_wave) & (spec_wave > 0.0)
+    if not np.any(valid):
+        return None
+    redshift = max(float(redshift), 0.0)
+    margin = max(float(margin_kms), 0.0) / C_KMS
+    rest_min = float(np.min(spec_wave[valid]) / (1.0 + redshift))
+    rest_max = float(np.max(spec_wave[valid]) / (1.0 + redshift))
+    return (rest_min * (1.0 - margin), rest_max * (1.0 + margin))
+
+
+def build_model_context(cfg: FitConfig, spec_pad_to: Sequence[int] | None = None) -> ModelContext:
     """Construct the static context consumed by the jaxsedfit NumPyro model.
 
     Parameters
     ----------
     cfg : FitConfig
         Fit configuration; validated before the context is built.
+    spec_pad_to : sequence of int, optional
+        Pixel count to pad each spectrum to with masked pixels that continue its
+        log-wavelength spacing, so contexts of different objects stack
+        (:func:`jaxsedfit.fit_batch`). Padding does not change the model on the
+        real pixels.
     """
     cfg.validate()
     photometry = cfg.photometry or PhotometryData(filter_names=(), fluxes=(), errors=())
@@ -2140,22 +2236,14 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         spec_error_chunks = []
         spec_mask_chunks = []
         spec_index_chunks = []
+        spec_padding_chunks = []
+        if spec_pad_to is not None and len(spec_pad_to) != len(spectra):
+            raise ValueError("spec_pad_to needs one pixel count per spectrum.")
         for i, spectrum in enumerate(spectra):
             wave = np.asarray(spectrum.wave_obs, dtype=float)
             flux = np.asarray(spectrum.fluxes, dtype=float)
             err = np.asarray(spectrum.errors, dtype=float)
-            mask = np.asarray(
-                spectrum.mask if spectrum.mask is not None else np.ones_like(wave, dtype=bool),
-                dtype=bool,
-            )
-            mask = (
-                mask
-                & np.isfinite(wave)
-                & np.isfinite(flux)
-                & np.isfinite(err)
-                & (wave > 0.0)
-                & (err > 0.0)
-            )
+            mask = usable_spectral_pixels(spectrum)
             valid_wave = np.isfinite(wave) & (wave > 0.0)
             # Keep explicitly masked finite pixels for a regular model grid,
             # but never let an invalid wavelength enter JAX model arithmetic:
@@ -2172,16 +2260,29 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
                 wave_sorted[~valid_wave_sorted] = fill_base * (
                     1.0 + 1.0e-8 * np.arange(1, n_invalid + 1, dtype=float)
                 )
+            flux_sorted, err_sorted, mask_sorted = flux[order], err[order], mask[order]
+            n_pad = 0 if spec_pad_to is None else int(spec_pad_to[i]) - wave.size
+            if n_pad < 0:
+                raise ValueError(f"Spectrum {i} has {wave.size} pixels, more than spec_pad_to={spec_pad_to[i]}.")
+            if n_pad:
+                ln_good = np.log(wave_sorted[valid_wave_sorted])
+                step = float(np.median(np.diff(ln_good))) if ln_good.size > 1 else 1.0e-4
+                wave_sorted = np.concatenate([wave_sorted, wave_sorted[-1] * np.exp(step * np.arange(1, n_pad + 1))])
+                flux_sorted = np.concatenate([flux_sorted, np.zeros(n_pad)])
+                err_sorted = np.concatenate([err_sorted, np.full(n_pad, np.inf)])
+                mask_sorted = np.concatenate([mask_sorted, np.zeros(n_pad, dtype=bool)])
             spec_wave_chunks.append(wave_sorted)
-            spec_flux_chunks.append(flux[order])
-            spec_error_chunks.append(err[order])
-            spec_mask_chunks.append(mask[order])
-            spec_index_chunks.append(np.full(wave.size, i, dtype=int)[order])
+            spec_flux_chunks.append(flux_sorted)
+            spec_error_chunks.append(err_sorted)
+            spec_mask_chunks.append(mask_sorted)
+            spec_index_chunks.append(np.full(wave.size + n_pad, i, dtype=int))
+            spec_padding_chunks.append(np.arange(wave.size + n_pad) >= wave.size)
         spec_wave_obs = np.concatenate(spec_wave_chunks)
         spec_fluxes = np.concatenate(spec_flux_chunks)
         spec_errors = np.concatenate(spec_error_chunks)
         spec_mask = np.concatenate(spec_mask_chunks)
         spec_spectrum_index = np.concatenate(spec_index_chunks)
+        spec_padding = np.concatenate(spec_padding_chunks)
         spec_fluxes = np.nan_to_num(spec_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
         spec_errors = np.nan_to_num(spec_errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
         spec_errors = np.clip(np.abs(spec_errors), 1.0e-30, 1.0e30)
@@ -2191,6 +2292,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         spec_errors = np.array([], dtype=float)
         spec_mask = np.array([], dtype=bool)
         spec_spectrum_index = np.array([], dtype=int)
+        spec_padding = np.array([], dtype=bool)
         spec_effective_spatial_scale_arcsec = np.array([], dtype=float)
         spec_aperture_diameter_arcsec = np.array([], dtype=float)
         spec_instruments = ()
@@ -2323,6 +2425,14 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
             spec_errors = spec_errors / np.clip(spec_factors, 1e-12, None)
 
     spectral_prior_config = _build_spectral_prior_config(cfg, spec_fluxes, spec_mask)
+    spec_line_amp_groups = np.zeros((3, 0))
+    if spectral_prior_config is not None and cfg.agn.line_activation_rest is not None:
+        spectral_prior_config, spec_line_amp_groups = _fix_line_table_amplitudes(cfg, spectral_prior_config)
+    spec_coverage = None
+    if not cfg.observation.fits_redshift:
+        spec_coverage = spectral_coverage_rest(
+            spec_wave_obs, spec_mask, cfg.observation.redshift, cfg.agn.line_coverage_margin_kms
+        )
 
     return ModelContext(
         fit_config=cfg,
@@ -2382,4 +2492,8 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         spectral_prior_config=spectral_prior_config,
         mw_ebv=mw_ebv,
         igm_redshift_table_jax=igm_redshift_table_jax,
+        spec_has_data=bool(spec_wave_obs.size > 0 and np.any(spec_mask)),
+        spec_line_coverage_rest=np.asarray(spec_coverage if spec_coverage is not None else (np.nan, np.nan), dtype=float),
+        spec_padding=np.asarray(spec_padding, dtype=bool),
+        spec_line_amp_groups=spec_line_amp_groups,
     )

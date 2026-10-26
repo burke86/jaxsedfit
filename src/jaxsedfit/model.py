@@ -32,7 +32,7 @@ from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 import numpyro
 import numpyro.distributions as dist
 
-from .preload import ModelContext, _build_fixed_igm_jax as _igm_transmission
+from .preload import ModelContext, spectral_coverage_rest, _build_fixed_igm_jax as _igm_transmission
 from .spectral_results import SpectralSites
 from .velocity import shift_and_broaden_lnlam as _fourier_shift_and_broaden_lnlam
 
@@ -3214,6 +3214,8 @@ def _flambda_to_mjy(wave_obs, flux_lambda):
 def _fixed_spectral_line_coverage_rest(context: ModelContext, cfg: FitConfig) -> tuple[float, float] | None:
     """Return fixed-redshift rest coverage for the shared tied-line table.
 
+    ``cfg.agn.line_activation_rest`` replaces the spectral coverage when set.
+
     Parameters
     ----------
     context : ModelContext
@@ -3223,16 +3225,22 @@ def _fixed_spectral_line_coverage_rest(context: ModelContext, cfg: FitConfig) ->
     """
     if cfg.observation.fits_redshift:
         return None
-    spec_wave = np.asarray(context.spec_wave_obs, dtype=float)
-    spec_mask = np.asarray(context.spec_mask, dtype=bool)
-    valid = spec_mask & np.isfinite(spec_wave) & (spec_wave > 0.0)
-    if not np.any(valid):
+    if cfg.agn.line_activation_rest is not None:
+        return tuple(cfg.agn.line_activation_rest)
+    return spectral_coverage_rest(
+        context.spec_wave_obs, context.spec_mask, cfg.observation.redshift, cfg.agn.line_coverage_margin_kms
+    )
+
+
+def _spectral_line_mask_coverage_rest(context: ModelContext, cfg: FitConfig):
+    """Return the spectral coverage that masks a fixed line table, or None.
+
+    Only set with ``cfg.agn.line_activation_rest``; the value comes from the context
+    so it can differ between the objects of a batched fit.
+    """
+    if cfg.observation.fits_redshift or cfg.agn.line_activation_rest is None:
         return None
-    redshift = max(float(cfg.observation.redshift), 0.0)
-    margin = max(float(cfg.agn.line_coverage_margin_kms), 0.0) / C_KMS
-    rest_min = float(np.min(spec_wave[valid]) / (1.0 + redshift))
-    rest_max = float(np.max(spec_wave[valid]) / (1.0 + redshift))
-    return (rest_min * (1.0 - margin), rest_max * (1.0 + margin))
+    return context.spec_line_coverage_rest
 
 
 def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave, redshift):
@@ -3253,8 +3261,7 @@ def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave,
     if (
         not bool(cfg.spectroscopy_list)
         or not bool(spectral_cfg.fit_lines)
-        or len(context.spec_wave_obs) == 0
-        or not np.any(context.spec_mask)
+        or not context.spec_has_data
     ):
         return jnp.ones_like(line_wave)
 
@@ -3282,10 +3289,15 @@ def _spectral_instrumental_sigma_ln(context):
     """Return each spectral pixel's instrumental sigma in ln(wavelength), or None.
 
     Built from the per-spectrum ``SpectroscopyData.resolving_power``; pixels of
-    spectra without a resolving power get zero (no convolution).
+    spectra without a resolving power get zero (no convolution). In a batched fit
+    whose objects have different resolving powers the result is traced.
     """
-    resolving_power = np.asarray(context.spec_resolving_power, dtype=float)
     spectrum_index = np.asarray(context.spec_spectrum_index, dtype=int)
+    if isinstance(context.spec_resolving_power, jax.core.Tracer):
+        pixel_r = context.spec_resolving_power[np.clip(spectrum_index, 0, context.spec_resolving_power.shape[0] - 1)]
+        valid = jnp.isfinite(pixel_r) & (pixel_r > 0.0)
+        return jnp.where(valid, 1.0 / (2.354820045 * jnp.where(valid, pixel_r, 1.0)), 0.0)
+    resolving_power = np.asarray(context.spec_resolving_power, dtype=float)
     if resolving_power.size == 0 or spectrum_index.size == 0:
         return None
     pixel_r = resolving_power[np.clip(spectrum_index, 0, resolving_power.size - 1)]
@@ -3310,14 +3322,25 @@ def _broaden_spectral_host(context, spec_rest_wave, spec_host_intrinsic, gal_v_k
         return _shift_and_broaden_single_spectrum_lnlam(lnwave, spec_host_intrinsic, gal_v_kms, gal_sigma_kms)
     template_fwhm = context.fit_config.galaxy.ssp_template_fwhm_angstrom
     spectrum_index = np.asarray(context.spec_spectrum_index, dtype=int)
-    rest_wave_np = np.asarray(spec_rest_wave, dtype=float)
+    padding = getattr(context, "spec_padding", None)
+    if padding is not None and not isinstance(padding, jax.core.Tracer) and not np.any(padding):
+        padding = None
+    if padding is not None:
+        # Zero the padding so the broadening sees the same zero edge as an unpadded spectrum.
+        spec_host_intrinsic = jnp.where(padding, 0.0, spec_host_intrinsic)
+    traced = isinstance(spec_rest_wave, jax.core.Tracer) or isinstance(sigma_inst_ln, jax.core.Tracer)
     broadened = jnp.zeros_like(spec_host_intrinsic)
     for index in np.unique(spectrum_index):
         pixels = spectrum_index == index
-        sigma_inst_kms = C_KMS * float(sigma_inst_ln[pixels][0])
-        kernel_sigma = host_kernel_sigma_kms(
-            gal_sigma_kms, sigma_inst_kms, template_fwhm, float(np.median(rest_wave_np[pixels]))
-        )
+        first = int(np.flatnonzero(pixels)[0])
+        if traced or padding is not None:
+            real = jnp.asarray(pixels) if padding is None else jnp.asarray(pixels) & ~padding
+            sigma_inst_kms = C_KMS * sigma_inst_ln[first]
+            rest_wave_ref = jnp.nanmedian(jnp.where(real, spec_rest_wave, jnp.nan))
+        else:
+            sigma_inst_kms = C_KMS * float(sigma_inst_ln[first])
+            rest_wave_ref = float(np.median(np.asarray(spec_rest_wave, dtype=float)[pixels]))
+        kernel_sigma = host_kernel_sigma_kms(gal_sigma_kms, sigma_inst_kms, template_fwhm, rest_wave_ref)
         broadened = jnp.where(
             jnp.asarray(pixels),
             _shift_and_broaden_single_spectrum_lnlam(lnwave, spec_host_intrinsic, gal_v_kms, kernel_sigma),
@@ -3342,6 +3365,10 @@ def _evaluate_spectral_components(
     instrumental_sigma_ln=None,
     bal_continuum_mjy=None,
     include_bal_components=True,
+    line_mask_coverage_rest=None,
+    instrument_index=None,
+    pixel_padding=None,
+    line_amp_groups=None,
 ):
     """Evaluate the built-in detailed spectral components.
 
@@ -3377,6 +3404,14 @@ def _evaluate_spectral_components(
     include_bal_components : bool, optional
         Whether BAL absorption custom components are active. Other custom
         continuum and line components are unaffected.
+    line_mask_coverage_rest : object, optional
+        Rest-frame (min, max) data coverage that masks lines of the table built
+        from ``line_coverage_rest`` (see ``AGNConfig.line_activation_rest``).
+    instrument_index, pixel_padding : object, optional
+        Per-pixel spectrum index and padding flags, passed to
+        :func:`jaxsedfit.spectroscopy.evaluate_joint_spectral_components`.
+    line_amp_groups : object, optional
+        Per-group (init, min, max) line amplitudes replacing the line table's.
     """
     try:
         from .spectral_custom_components import is_bal_absorption_component
@@ -3411,6 +3446,8 @@ def _evaluate_spectral_components(
         line_prior_config=line_prior_config,
         line_flux_scale_mjy=float(spectral_cfg.line_flux_scale_mjy),
         line_coverage_rest=line_coverage_rest,
+        line_mask_coverage_rest=line_mask_coverage_rest,
+        line_amp_groups=line_amp_groups,
         include_elg_narrow_lines=bool(spectral_cfg.include_elg_narrow_lines),
         include_high_ionization_lines=bool(spectral_cfg.include_high_ionization_lines),
         broad_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
@@ -3435,6 +3472,8 @@ def _evaluate_spectral_components(
         feature_amplitude_scale=feature_amplitude_scale,
         instrumental_sigma_ln=instrumental_sigma_ln,
         bal_continuum_mjy=bal_continuum_mjy,
+        instrument_index=instrument_index,
+        pixel_padding=pixel_padding,
     )
     result["component_config"] = component_cfg
     return result
@@ -3772,8 +3811,7 @@ def evaluate_photometric_state(
     spectroscopy_enabled = bool(
         cfg.spectroscopy is not None
         and bool(cfg.spectroscopy_list)
-        and len(context.spec_wave_obs) > 0
-        and np.any(context.spec_mask)
+        and context.spec_has_data
     )
     spectral_cfg = cfg.agn
     spectral_engine_enabled = spectroscopy_enabled
@@ -3798,7 +3836,16 @@ def evaluate_photometric_state(
         include_sed_agn_features
         and not (spectral_engine_enabled and bool(spectral_cfg.fit_balmer_continuum))
     )
-    spectral_line_coverage_rest = _fixed_spectral_line_coverage_rest(context, cfg) if spectroscopy_enabled else None
+    spectral_line_activation_rest = _fixed_spectral_line_coverage_rest(context, cfg) if spectroscopy_enabled else None
+    spectral_line_mask_coverage_rest = (
+        _spectral_line_mask_coverage_rest(context, cfg) if spectroscopy_enabled else None
+    )
+    # Coverage of the data itself: equals the line-table range unless the table is fixed.
+    spectral_line_coverage_rest = (
+        spectral_line_activation_rest
+        if spectral_line_mask_coverage_rest is None
+        else spectral_line_mask_coverage_rest
+    )
     has_phot_spatial_scale = bool(
         np.any(np.isfinite(context.effective_spatial_scale_arcsec) & (np.asarray(context.effective_spatial_scale_arcsec, dtype=float) > 0.0))
     )
@@ -4797,12 +4844,16 @@ def evaluate_photometric_state(
                 context.spectral_prior_config,
                 feii_template_wave_native,
                 feii_template_flux_native,
-                line_coverage_rest=spectral_line_coverage_rest,
+                line_coverage_rest=spectral_line_activation_rest,
                 feature_amplitude_scale=feature_amplitude_scale,
                 include_lines=include_spectral_lines,
                 instrumental_sigma_ln=_spectral_instrumental_sigma_ln(context),
                 bal_continuum_mjy=spec_disk_model_fluxes,
                 include_bal_components=include_spectral_bal,
+                line_mask_coverage_rest=spectral_line_mask_coverage_rest,
+                instrument_index=context.spec_spectrum_index,
+                pixel_padding=context.spec_padding if context.spec_padding.size else None,
+                line_amp_groups=context.spec_line_amp_groups if context.spec_line_amp_groups.size else None,
             )
             spectral_cfg = cfg.agn
             if host_capture_enabled and bool(

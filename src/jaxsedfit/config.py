@@ -326,6 +326,10 @@ class AGNConfig:
     fit_spectrum_tilt: bool = False
     line_flux_scale_mjy: float = 1.0
     line_coverage_margin_kms: float = 3000.0
+    # Rest-frame range [A] that fixes the tied-line set instead of each spectrum's
+    # coverage; lines the spectra do not cover are then masked (zero amplitude), so
+    # objects at different redshifts share one model structure (see fit_batch).
+    line_activation_rest: tuple[float, float] | None = None
     include_elg_narrow_lines: bool = False
     include_high_ionization_lines: bool = False
     line_table: Sequence[Any] | None = None
@@ -371,6 +375,11 @@ class AGNConfig:
         if int(self.feature_grid_size) < 256:
             raise ValueError("AGNConfig.feature_grid_size must be at least 256.")
         self.feature_grid_size = int(self.feature_grid_size)
+        if self.line_activation_rest is not None:
+            lo, hi = (float(v) for v in self.line_activation_rest)
+            if not (np.isfinite(lo) and np.isfinite(hi) and 0.0 < lo < hi):
+                raise ValueError("AGNConfig.line_activation_rest must be an increasing pair of positive wavelengths.")
+            self.line_activation_rest = (lo, hi)
 
     def validate(self) -> None:
         """Validate inline template units and array shapes."""
