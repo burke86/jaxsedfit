@@ -81,9 +81,12 @@ jobs:
           if [ "${SAME_REPO}" = "true" ]; then
             image_url="https://raw.githubusercontent.com/${{ github.repository }}/${PLOT_BRANCH}/pr-${PR}/${SHA}.png"
           fi
+          # Log memory use while fitting (GitHub runners have 16 GB).
+          ( while sleep 20; do free -m | awk '/Mem/ {print "[mem] used " $3 " MB of " $2 " MB"}'; done ) &
           python benchmarks/chimera_validation.py run \
             --output-dir chimera-validation \
             --dsps-ssp-fn tempdata.h5 \
+            --chunk 16 \
             --sha "${SHA::7}" \
             ${image_url:+--image-url "${image_url}"}
           cat chimera-validation/output >> "${GITHUB_STEP_SUMMARY}"
