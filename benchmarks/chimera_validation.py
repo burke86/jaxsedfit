@@ -241,7 +241,7 @@ def plot_results(results, metrics, path: Path) -> None:
     np.atleast_1d(axes)[0].set_ylabel(r"$\Delta\log M_\star$ [dex]")
     if scatter is not None:
         fig.colorbar(scatter, ax=axes, label="Chimera QSO weight", pad=0.01)
-    fig.suptitle(f"Stellar-mass residuals by injected AGN luminosity (batched MAP; bars: Laplace 95% intervals; "
+    fig.suptitle(f"Stellar-mass residuals by injected AGN luminosity (point: MAP; bars: Laplace 95% intervals; "
                  f"outlier: |Δ| > {OUTLIER_DEX} dex)")
     fig.savefig(path, dpi=110)
     plt.close(fig)
@@ -252,7 +252,7 @@ def write_comment(path: Path, metrics, failures, thresholds, *, sha, elapsed, im
     lines = [
         f"## {COMMENT_MARKER}: {status}",
         "",
-        f"Commit `{sha}` · {sum(m['n'] for m in metrics)} Chimeras · batched MAP in {elapsed / 60:.1f} min",
+        f"Commit `{sha}` · {sum(m['n'] for m in metrics)} Chimeras · MAP + Laplace (`fit_batch`) in {elapsed / 60:.1f} min",
         "",
         "| AGN luminosity bin | N | median Δ | NMAD | RMS (max) | outliers (max) |",
         "|---|---:|---:|---:|---:|---:|",
