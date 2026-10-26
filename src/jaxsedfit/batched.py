@@ -32,7 +32,7 @@ from numpyro.infer.util import log_density
 from .approximate import gaussian_vi, laplace_draws, latent_sites, site_transforms
 from .config import FitConfig, serialize_config
 from .model import grahsp_photometric_model
-from .preload import ModelContext, build_model_context
+from .preload import ModelContext, build_model_context, clear_per_object_caches
 
 _NUMERIC = (np.ndarray, jax.Array, float, np.floating)
 # Zero-padded with a valid_mask whose widths depend on redshift; padding further is exact.
@@ -493,13 +493,17 @@ def fit_batch(
         calib = sorted({int(np.argmin(z)), int(np.argmax(z)),
                         *rng.choice(len(indices), min(14, len(indices)), replace=False).tolist()})
         calib_contexts = [build_model_context(configs[indices[j]]) for j in calib]
+        clear_per_object_caches()
         bctx = BatchedContext(calib_contexts)
         fit = make_batched_fitter(bctx, **settings)
         chunks = [indices[s:s + chunk_size] for s in range(0, len(indices), chunk_size)]
 
         def prepare(chunk):
             padded = list(chunk) + [chunk[-1]] * (chunk_size - len(chunk))
-            return padded, [build_model_context(configs[i]) for i in padded]
+            contexts = [build_model_context(configs[i]) for i in padded]
+            # Redshift-keyed caches would otherwise grow by tens of MB per object.
+            clear_per_object_caches()
+            return padded, contexts
 
         with ThreadPoolExecutor(max_workers=1) as pool:  # build the next chunk while XLA runs
             future = pool.submit(prepare, chunks[0])
