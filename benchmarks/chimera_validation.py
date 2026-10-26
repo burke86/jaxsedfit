@@ -274,7 +274,9 @@ def plot_results(results, metrics, name, path: Path) -> None:
         for y in (OUTLIER_DEX, -OUTLIER_DEX):
             ax.axhline(y, color="0.55", lw=0.9, ls=":", zorder=0)
         bars = sel & ~clipped
-        ax.errorbar(truth[bars], resid[bars], yerr=np.vstack([resid[bars] - lo95[bars], hi95[bars] - resid[bars]]),
+        # A derived quantity's MAP can fall outside its Laplace draws (e.g. a few SFRs), so clip at zero.
+        yerr = np.clip(np.vstack([resid[bars] - lo95[bars], hi95[bars] - resid[bars]]), 0.0, None)
+        ax.errorbar(truth[bars], resid[bars], yerr=yerr,
                     fmt="none", ecolor="0.55", elinewidth=0.8, capsize=1.5, alpha=0.55, zorder=1)
         for subset, marker in ((sel & scored & ~clipped, "o"), (sel & scored & clipped, "^")):
             scatter = ax.scatter(truth[subset], np.where(clipped[subset], np.sign(resid[subset]) * 0.97 * ylim,
