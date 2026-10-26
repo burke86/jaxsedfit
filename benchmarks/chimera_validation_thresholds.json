@@ -1,0 +1,8 @@
+{
+  "bins": {
+    "0": {"max_outlier_fraction": 1.0, "max_rms": 9.0},
+    "1": {"max_outlier_fraction": 1.0, "max_rms": 9.0},
+    "2": {"max_outlier_fraction": 1.0, "max_rms": 9.0},
+    "3": {"max_outlier_fraction": 1.0, "max_rms": 9.0}
+  }
+}

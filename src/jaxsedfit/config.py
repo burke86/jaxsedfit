@@ -437,7 +437,22 @@ class LikelihoodConfig:
 
 @dataclass
 class InferenceConfig:
-    """Inference defaults for MAP optimization, NUTS sampling, and nested sampling.
+    """Inference settings for every fitting method.
+
+    ``method`` selects the inference path (see the "Inference methods" docs page):
+
+    - ``"map"`` (alias ``"optax"``): staged MAP optimization (``map_steps``,
+      ``learning_rate``, ``staged_map``). Returns one point.
+    - ``"laplace"``: MAP, then a Gaussian at the MAP with the inverse Hessian as
+      covariance (in unconstrained space). Returns ``num_samples`` draws.
+    - ``"svi"``: MAP, then a Gaussian variational fit started at the MAP
+      (``svi_steps``, ``svi_learning_rate``, ``svi_num_particles``,
+      ``svi_full_rank``). Returns ``num_samples`` draws.
+    - ``"nuts"``: NUTS sampling (``num_warmup``, ``num_samples``, ``num_chains`` and
+      the NUTS settings below).
+    - ``"map+nuts"`` (alias ``"optax+nuts"``, the default): MAP, then NUTS started
+      from the MAP.
+    - ``"ns"``: nested sampling (the ``ns_*`` settings).
 
     ``dense_mass="blocks"`` adapts dense covariance only within physically
     related groups (host/SFH/dust energy balance, AGN continuum, torus, and—
@@ -471,6 +486,10 @@ class InferenceConfig:
     reparameterize_normalizations: bool = True
     reparameterize_spectral_features: bool = True
     use_map_init: bool = True
+    svi_steps: int = 2000
+    svi_learning_rate: float | None = None
+    svi_num_particles: int = 4
+    svi_full_rank: bool = True
     ns_num_live_points: int | None = None
     ns_max_samples: int | None = None
     ns_dlogz: float | None = None

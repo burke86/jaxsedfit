@@ -117,6 +117,12 @@ fitter = JAXSEDFit(cfg)
 fitter.fit()
 ```
 
+Faster, approximate options are `"map"` (MAP only), `"laplace"` (Gaussian at the
+MAP) and `"svi"` (Gaussian variational fit); the "Inference methods" docs page
+explains when each is appropriate. To fit a whole catalog that shares one model
+configuration, `jaxsedfit.fit_batch(configs, method="laplace")` fits many objects
+with one compiled program (see "Fitting many objects" in the docs).
+
 The public API keeps run settings on `FitConfig`, especially under
 `cfg.inference` and `cfg.output`.
 

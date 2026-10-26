@@ -39,6 +39,7 @@ class _FitState:
     map_result: dict[str, Any] | None = None
     nuts_result: dict[str, Any] | None = None
     ns_result: dict[str, Any] | None = None
+    approx_result: dict[str, Any] | None = None
     samples: Mapping[str, Any] | None = None
     predictive: Mapping[str, Any] | None = None
     predictive_cache: dict[tuple[Any, ...], Mapping[str, Any]] | None = None

@@ -91,8 +91,11 @@ def _np_to_jnp(x):
     Parameters
     ----------
     x : array_like
-        Values to convert to a float64 array.
+        Values to convert to a float64 array. JAX arrays (including tracers,
+        e.g. per-object context arrays under ``jax.vmap``) pass through.
     """
+    if isinstance(x, jax.Array):
+        return jnp.asarray(x, dtype=jnp.float64)
     return jnp.asarray(np.asarray(x, dtype=np.float64))
 
 
@@ -102,8 +105,10 @@ def _bool_to_jnp(x):
     Parameters
     ----------
     x : array_like
-        Values to convert to a boolean array.
+        Values to convert to a boolean array. JAX arrays pass through.
     """
+    if isinstance(x, jax.Array):
+        return jnp.asarray(x, dtype=bool)
     return jnp.asarray(np.asarray(x, dtype=bool))
 
 
@@ -2736,7 +2741,7 @@ def _build_nebular_components(
     }
 
 
-def _estimate_log_agn_amp_prior_loc(context: ModelContext, redshift: float) -> float:
+def _estimate_log_agn_amp_prior_loc(context: ModelContext, redshift: float) -> jnp.ndarray:
     """Estimate a rough log(lambda L_lambda, 5100 A) prior center from the photometry.
 
     Parameters
@@ -2746,18 +2751,19 @@ def _estimate_log_agn_amp_prior_loc(context: ModelContext, redshift: float) -> f
     redshift : float
         Source redshift used to pick the band nearest rest 5100 Angstrom.
     """
-    obs_fluxes_mjy = np.asarray(context.fluxes, dtype=float)
-    mask = np.asarray(context.positive_detected_mask, dtype=bool) & np.isfinite(obs_fluxes_mjy) & (obs_fluxes_mjy > 0.0)
-    if not np.any(mask):
-        return float(np.log(1.0e36))
-    filter_wavelength = np.array([f.effective_wavelength for f in context.filters], dtype=float)
-    target_obs_wave = 5100.0 * (1.0 + max(float(redshift), 0.0))
-    valid_indices = np.flatnonzero(mask)
-    best_index = valid_indices[int(np.argmin(np.abs(filter_wavelength[valid_indices] - target_obs_wave)))]
-    flux_w_m2_hz = obs_fluxes_mjy[best_index] * 1.0e-29
-    nu_obs_hz = C_MS / max(filter_wavelength[best_index] * 1.0e-10, 1.0e-30)
-    agn_amp_w = 4.0 * np.pi * float(context.luminosity_distance_m) ** 2 * nu_obs_hz * flux_w_m2_hz
-    return float(np.log(np.clip(agn_amp_w, 1.0e30, 1.0e50)))
+    # Written in jnp (no Python branching on data) so it also traces when the
+    # per-object context arrays are batched with jax.vmap.
+    if len(context.filters) == 0:  # spectrum-only fit: no photometry to seed from
+        return jnp.log(1.0e36)
+    obs_fluxes_mjy = _np_to_jnp(context.fluxes)
+    mask = _bool_to_jnp(context.positive_detected_mask) & jnp.isfinite(obs_fluxes_mjy) & (obs_fluxes_mjy > 0.0)
+    filter_wavelength = jnp.asarray([f.effective_wavelength for f in context.filters], dtype=jnp.float64)
+    target_obs_wave = 5100.0 * (1.0 + jnp.maximum(jnp.asarray(redshift, dtype=jnp.float64), 0.0))
+    best_index = jnp.argmin(jnp.where(mask, jnp.abs(filter_wavelength - target_obs_wave), jnp.inf))
+    flux_w_m2_hz = jnp.where(mask, obs_fluxes_mjy, 0.0)[best_index] * 1.0e-29
+    nu_obs_hz = C_MS / jnp.maximum(filter_wavelength[best_index] * 1.0e-10, 1.0e-30)
+    agn_amp_w = 4.0 * jnp.pi * jnp.asarray(context.luminosity_distance_m, dtype=jnp.float64) ** 2 * nu_obs_hz * flux_w_m2_hz
+    return jnp.where(jnp.any(mask), jnp.log(jnp.clip(agn_amp_w, 1.0e30, 1.0e50)), jnp.log(1.0e36))
 
 
 def _default_log_agn_amp_prior(context: ModelContext, redshift: float):

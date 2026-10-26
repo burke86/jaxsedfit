@@ -25,6 +25,8 @@ in your analysis. See :doc:`outputs` for posterior definitions and units.
 
    installation
    quickstart
+   inference
+   batch
    tutorials
    outputs
    api/index

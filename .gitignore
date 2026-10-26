@@ -1,4 +1,6 @@
 data/
+# Small committed fixture for the Chimera validation (benchmarks/chimera_validation.py).
+!benchmarks/data/
 .DS_Store
 __pycache__/
 *.py[cod]

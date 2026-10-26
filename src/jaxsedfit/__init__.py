@@ -23,6 +23,7 @@ from .config import (
 
 __all__ = [
     "AGNConfig",
+    "BatchFitResult",
     "build_chimera_fit_config",
     "CHIMERA_FILTER_NAMES",
     "EmissionLineTemplate",
@@ -31,6 +32,7 @@ __all__ = [
     "FilterSet",
     "FitConfig",
     "FitResult",
+    "fit_batch",
     "GalaxyConfig",
     "AGNPriorConfig",
     "HostPriorConfig",
@@ -106,6 +108,10 @@ def __getattr__(name):
         from . import spectroscopy as _spectroscopy
 
         return getattr(_spectroscopy, name)
+    if name in {"fit_batch", "BatchFitResult"}:
+        from . import batched as _batched
+
+        return getattr(_batched, name)
     if name in {"FitResult", "PredictionResult"}:
         from . import results as _results
 
