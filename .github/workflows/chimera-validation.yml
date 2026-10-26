@@ -1,12 +1,13 @@
 name: Chimera validation
 
-# Stellar-mass recovery on the luminosity-stratified Chimera sample with batched
-# MAP + Laplace fits (benchmarks/chimera_validation.py). The job fails if a
-# luminosity bin exceeds the outlier-fraction or RMS limits in
-# benchmarks/chimera_validation_thresholds.json. For pull requests from branches
-# of this repository it also posts (and updates) a PR comment with the metrics
-# and the residual plot; the plot is stored on the chimera-validation-plots
-# branch so the comment can embed it. Pull requests from forks get a read-only
+# Stellar-mass, AGN bolometric luminosity and SFR recovery on the
+# luminosity-stratified Chimera sample with batched MAP + Laplace fits
+# (benchmarks/chimera_validation.py). The job fails if a luminosity bin exceeds
+# the outlier-fraction or RMS limits in benchmarks/chimera_validation_thresholds.json
+# (quantities without limits there are only reported). For pull requests from
+# branches of this repository it also posts (and updates) a PR comment with the
+# metrics and the residual plots; the plots are stored on the
+# chimera-validation-plots branch so the comment can embed them. Pull requests from forks get a read-only
 # token, so they only upload the plot as an artifact and write the job summary.
 
 on:
@@ -77,9 +78,9 @@ jobs:
         env:
           MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
         run: |
-          image_url=""
+          image_base_url=""
           if [ "${SAME_REPO}" = "true" ]; then
-            image_url="https://raw.githubusercontent.com/${{ github.repository }}/${PLOT_BRANCH}/pr-${PR}/${SHA}.png"
+            image_base_url="https://raw.githubusercontent.com/${{ github.repository }}/${PLOT_BRANCH}/pr-${PR}/${SHA}"
           fi
           # Log memory use while fitting (GitHub runners have 16 GB).
           ( while sleep 20; do free -m | awk '/Mem/ {print "[mem] used " $3 " MB of " $2 " MB"}'; done ) &
@@ -88,7 +89,7 @@ jobs:
             --dsps-ssp-fn tempdata.h5 \
             --chunk 16 \
             --sha "${SHA::7}" \
-            ${image_url:+--image-url "${image_url}"}
+            ${image_base_url:+--image-base-url "${image_base_url}"}
           cat chimera-validation/output >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload validation artifacts
@@ -99,7 +100,7 @@ jobs:
           path: chimera-validation/
           if-no-files-found: ignore
 
-      - name: Push plot for the PR comment
+      - name: Push plots for the PR comment
         if: env.SAME_REPO == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -111,11 +112,11 @@ jobs:
           else
             git checkout -q --orphan "${PLOT_BRANCH}"
           fi
-          mkdir -p "pr-${PR}"
-          cp ../chimera-validation/chimera_dmass_vs_mass.png "pr-${PR}/${SHA}.png"
-          git add "pr-${PR}/${SHA}.png"
+          mkdir -p "pr-${PR}/${SHA}"
+          cp ../chimera-validation/*.png "pr-${PR}/${SHA}/"
+          git add "pr-${PR}/${SHA}"
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -q -m "Chimera validation plot for PR #${PR} (${SHA::7})"
+            commit -q -m "Chimera validation plots for PR #${PR} (${SHA::7})"
           git push -q origin "${PLOT_BRANCH}"
 
       - name: Create or update the PR comment

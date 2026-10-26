@@ -30,9 +30,11 @@ The GitHub workflows in `.github/workflows/pr-benchmarks.yml` and `.github/workf
 
 ## Chimera validation
 
-`chimera_validation.py` checks stellar-mass recovery on the luminosity-stratified Chimera sample (COSMOS galaxies combined with SDSS quasars; up to 400 objects in each bin of true injected AGN luminosity, `L < 42`, `42–43`, `43–44`, `44–45`). Each object is fitted with the staged MAP used by `JAXSEDFit.fit_map`, but all objects run through one compiled program with `jaxsedfit.batched`, so the full sample takes about 20 minutes on a laptop instead of hours of per-object NUTS. Error bars come from a Laplace approximation at the MAP.
+`chimera_validation.py` checks the recovery of stellar mass, AGN bolometric luminosity and SFR on the luminosity-stratified Chimera sample (COSMOS galaxies combined with SDSS quasars; up to 400 objects in each bin of true injected AGN luminosity, `L < 42`, `42–43`, `43–44`, `44–45`). Each object is fitted with the staged MAP used by `JAXSEDFit.fit_map`, but all objects run through one compiled program with `jaxsedfit.batched`, so the full sample takes about 20 minutes on a laptop instead of hours of per-object NUTS. Error bars come from a Laplace approximation at the MAP.
 
-The run writes `results.json`, `metrics.json`, the residual plot `chimera_dmass_vs_mass.png` and a Markdown summary (`output`). `check` fails if, in any luminosity bin, the fraction of objects with |Δlog M★| > 0.5 dex or the RMS of Δlog M★ exceeds the limits in `chimera_validation_thresholds.json`. Update those limits in the same PR as an intended change to mass recovery.
+The truths are the COSMOS2015 LePhare stellar mass and SFR (`MASS_MED`, `SFR_MED`) of the host and the injected AGN luminosity, the SDSS DR7 `logLbol` of the quasar plus log10 of the chimera QSO weight. The fitted AGN luminosity is `log_agn_bol_luminosity_fit` (5100 Å luminosity × 9.26), converted from W to erg/s. SFR metrics use star-forming hosts only (true log sSFR > −11); COSMOS2015 SFRs of quiescent hosts are effectively upper limits, so those hosts are plotted but not scored.
+
+The run writes `results.json`, `metrics.json`, one residual plot per quantity (`chimera_dmass_vs_mass`, `chimera_dlbol_vs_lbol`, `chimera_dsfr_vs_sfr`, as PNG and PDF) and a Markdown summary (`output`). `check` fails if, in any luminosity bin, the fraction of objects with |Δ| > 0.5 dex or the RMS of Δ exceeds the limits in `chimera_validation_thresholds.json`. Only stellar mass has limits so far; AGN luminosity and SFR are reported but not gated until limits are added for them. Update the limits in the same PR as an intended change to the recovery.
 
 ```bash
 python benchmarks/chimera_validation.py run \
@@ -54,6 +56,8 @@ python benchmarks/chimera_validation.py make-sample \
   --cosmos2015-catalog <path to COSMOS2015_Laigle+.fits>
 ```
 
+`.github/workflows/chimera-validation.yml` runs this on pull requests that touch `src/` (and on manual dispatch). For pull requests from branches of this repository it pushes the plots to the `chimera-validation-plots` branch and creates or updates a PR comment with the metrics tables and the embedded plots.
+
 ### Chimera spectra
 
 `data/chimera_validation_spectra.fits` (14 MB) holds composite spectra for the 241 objects in `chimera_validation_sample.csv` whose host has a flux-calibrated spectrum from DESI DR1 or LEGA-C. It is meant for spectral and joint photometry + spectra tests on the Chimeras. Rows are keyed by `id`, like the photometry sample. Each row holds the observed-frame wavelength [Å] and the total, error, host and weighted-quasar flux densities [mJy] as float32 arrays, at R = 1500 (header keyword `SPEC_RES`). About 30–40% of the pixels in LEGA-C hosts are masked (NaN flux, infinite error). The 241 are simply the sample objects that have a spectrum, so they are not balanced across luminosity bins and some share a host.
@@ -64,4 +68,4 @@ Each spectrum is the host spectrum plus the quasar's SDSS DR7 spectrum times the
 python benchmarks/make_chimera_spectra_sample.py --chimeras-dir <chimeras build directory with chimeras-spectra.fits>
 ```
 
-`.github/workflows/chimera-validation.yml` runs this on pull requests that touch `src/` (and on manual dispatch). `.github/workflows/publish-chimera-validation.yml` then pushes the plot to the `chimera-validation-plots` branch and creates or updates a PR comment with the metrics table and the embedded plot.
+`.github/workflows/chimera-validation.yml` runs this on pull requests that touch `src/` (and on manual dispatch). For pull requests from branches of this repository it pushes the plots to the `chimera-validation-plots` branch and creates or updates a PR comment with the metrics tables and the embedded plots.

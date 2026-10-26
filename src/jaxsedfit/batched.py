@@ -311,12 +311,15 @@ def make_batched_fitter(
     svi_learning_rate: float | None = None,
     svi_num_particles: int = 4,
     svi_full_rank: bool = True,
+    derived_sites: Sequence[str] = (),
     continuum_model_kwargs: dict[str, Any] | None = None,
 ) -> Callable[..., dict[str, Any]]:
     """Build a batched fitter for one :class:`BatchedContext` or :class:`BatchedInputs` layout.
 
     Parameters mirror :class:`jaxsedfit.config.InferenceConfig`; ``staged_steps``
     defaults to ``steps // 3`` as in :meth:`jaxsedfit.JAXSEDFit.fit_map`.
+    ``derived_sites`` names deterministic model sites (e.g. ``"log_sfr_fit"``) to
+    evaluate at the MAP and at every draw; they are added to ``map`` and ``samples``.
     ``continuum_model_kwargs`` are passed to ``bctx.model`` for the staged
     continuum-only MAP; the default switches off the jaxsedfit line features.
 
@@ -335,6 +338,7 @@ def make_batched_fitter(
         same size.
     """
     method = _BATCH_METHODS[method]
+    derived_sites = tuple(derived_sites)
     full = bctx.model()
     continuum = bctx.model(**(_CONTINUUM_MODEL_KWARGS if continuum_model_kwargs is None else continuum_model_kwargs))
     optimizer = optax.adam(learning_rate)
@@ -386,6 +390,23 @@ def make_batched_fitter(
         transforms_c = site_transforms(latent_sites(continuum, (first, redshift[0])))
         run_c = map_stage(continuum, transforms_c, staged_steps)
         run_f = map_stage(full, transforms, steps)
+        seeded_full = handlers.seed(full, rng_seed=0)  # all latent sites are substituted
+
+        def derived_one(params, a, z):
+            tr = handlers.trace(handlers.substitute(seeded_full, data=params)).get_trace(a, z)
+            missing = [k for k in derived_sites if k not in tr]
+            if missing:
+                raise KeyError(f"derived_sites not in the model: {missing}")
+            return {k: tr[k]["value"] for k in derived_sites}
+
+        derived_objects = jax.vmap(derived_one)
+
+        def derived_draws(samples, arrays, redshift):
+            # Loop over draws and vmap over objects: vmapping over both would hold every
+            # draw's full SED evaluation in memory at once.
+            by_draw = {k: jnp.swapaxes(v, 0, 1) for k, v in samples.items()}
+            out = jax.lax.map(lambda s: derived_objects(s, arrays, redshift), by_draw)
+            return {k: jnp.swapaxes(v, 0, 1) for k, v in out.items()}
 
         @jax.jit
         def program(keys, arrays, redshift, given):
@@ -416,6 +437,9 @@ def make_batched_fitter(
                     )
                 )(values, arrays, redshift, post_keys)
                 out["samples"], out["elbo_loss"] = draws, losses[:, -1]
+            if derived_sites:
+                out["map"] = {**values, **derived_objects(values, arrays, redshift)}
+                out["samples"] = {**out["samples"], **derived_draws(out["samples"], arrays, redshift)}
             return out
 
         return program
@@ -509,10 +533,11 @@ class BatchFitResult:
         Inference method used.
     samples : list of dict
         Per-object posterior draws (``"laplace"``/``"svi"``) or the MAP as a single
-        draw (``"map"``), keyed by site, each with a leading draw axis.
+        draw (``"map"``), keyed by site, each with a leading draw axis. Includes the
+        requested ``derived_sites``.
     map_values : list of dict
-        Per-object constrained MAP value of every latent site (all methods start
-        from the MAP).
+        Per-object constrained MAP value of every latent site and requested derived
+        site (all methods start from the MAP).
     diagnostics : list of dict
         Per-object scalars: ``loss`` (``-log p(x, z)`` at the MAP), plus
         ``hessian_min_eigenvalue`` (Laplace) or ``elbo_loss`` (SVI).
@@ -552,7 +577,7 @@ class BatchFitResult:
         Parameters
         ----------
         sites : sequence of str, optional
-            Sites to include; defaults to every scalar latent site.
+            Sites to include; defaults to every scalar site in ``samples``.
         percentiles : sequence of float
             Percentiles to tabulate (all equal to the MAP for ``"map"``).
         """
@@ -577,6 +602,7 @@ def fit_batch(
     chunk_size: int = 32,
     seed: int | None = None,
     progress_bar: bool = True,
+    derived_sites: Sequence[str] = (),
     redshift_window: float | None = 0.25,
 ) -> BatchFitResult:
     """Fit many objects at once with one compiled program per compatible group.
@@ -615,6 +641,10 @@ def fit_batch(
         results do not depend on ``chunk_size``.
     progress_bar : bool
         Show a progress bar over chunks.
+    derived_sites : sequence of str
+        Deterministic model sites to evaluate at the MAP and at every draw, e.g.
+        ``"log_sfr_fit"`` or ``"log_agn_bol_luminosity_fit"``. By default only latent
+        sites are returned.
     redshift_window : float or None
         Widest ln(1 + z) spread of spectroscopic objects sharing a line table. Wider
         windows mean fewer compiled programs but more masked lines per object; None
@@ -664,6 +694,7 @@ def fit_batch(
             svi_learning_rate=inference.svi_learning_rate,
             svi_num_particles=inference.svi_num_particles,
             svi_full_rank=inference.svi_full_rank,
+            derived_sites=derived_sites,
         )
         z = np.array([float(configs[i].observation.redshift) for i in indices])
         # Pad every spectrum slot to the group's longest, so all chunks share one shape.

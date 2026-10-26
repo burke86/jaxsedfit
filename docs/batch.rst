@@ -112,6 +112,12 @@ Results
 * ``samples[i]``: draws of every parameter for object ``i``. For ``"map"`` there is a
   single draw, the MAP.
 * ``map_values[i]``: the MAP of every parameter (all methods start from it).
+* Derived quantities: by default only the fitted parameters are returned. Pass
+  ``derived_sites`` to also evaluate deterministic sites at the MAP and at every
+  draw, for example
+  ``fit_batch(configs, derived_sites=["log_sfr_fit", "log_agn_bol_luminosity_fit"])``
+  (the AGN luminosity is in log W). They then appear in ``samples``, ``map_values``
+  and ``summary_table``.
 * ``diagnostics[i]``: ``loss`` (the negative log posterior at the MAP), plus
   ``hessian_min_eigenvalue`` for Laplace or ``elbo_loss`` for SVI.
 * ``summary_table(sites, percentiles)``: an :class:`astropy.table.Table` of
