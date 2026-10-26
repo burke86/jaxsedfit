@@ -1,10 +1,11 @@
-"""Chimera stellar-mass validation with batched MAP fits.
+"""Chimera stellar-mass, AGN luminosity and SFR validation with batched MAP fits.
 
 Fits the luminosity-stratified Chimera sample (COSMOS galaxies + SDSS quasars,
 binned by the true injected AGN luminosity) with ``jaxsedfit.batched``, plots
-the stellar-mass residual against true stellar mass in each luminosity bin, and
-checks the per-bin outlier fraction and RMS against
-``chimera_validation_thresholds.json``.
+the residuals of stellar mass, AGN bolometric luminosity and SFR against their
+true values in each luminosity bin, and checks the per-bin outlier fraction and
+RMS against ``chimera_validation_thresholds.json`` (quantities without
+thresholds there are reported but not gated).
 
 Subcommands
 -----------
@@ -13,9 +14,10 @@ make-sample
     (only needed when the sample definition changes). The truth masses are
     COSMOS2015 LePhare masses, computed at the photo-z, so hosts whose COSMOS2015
     photo-z disagrees with the spec-z used by the Chimeras are dropped; their
-    "true" masses can be off by more than a dex.
+    "true" masses can be off by more than a dex. The SFR truths are COSMOS2015
+    LePhare SFRs (SFR_MED).
 run
-    Fit the sample and write ``results.json``, ``metrics.json``, the residual plot
+    Fit the sample and write ``results.json``, ``metrics.json``, the residual plots
     and a Markdown summary (``output``) for the PR comment.
 check
     Exit non-zero if ``metrics.json`` fails the thresholds.
@@ -37,7 +39,27 @@ DEFAULT_SAMPLE = HERE / "data" / "chimera_validation_sample.csv"
 DEFAULT_THRESHOLDS = HERE / "chimera_validation_thresholds.json"
 LUMINOSITY_BIN_EDGES = [-np.inf, 42.0, 43.0, 44.0, 45.0]
 OUTLIER_DEX = 0.5
-PLOT_NAME = "chimera_dmass_vs_mass.png"
+# Recovered quantities: fitted site, truth column, offset from the site's units to the
+# truth's, and plot. The AGN truth is the injected (QSO-weighted) SDSS DR7 bolometric
+# luminosity; the host truths are COSMOS2015 LePhare medians.
+QUANTITIES = {
+    "log_stellar_mass": dict(
+        site="log_stellar_mass", truth="log_stellar_mass_truth", offset=0.0, title="Stellar mass",
+        label=r"\log_{10}(M_\star/M_\odot)", delta=r"$\Delta\log M_\star$ [dex]", plot="chimera_dmass_vs_mass.png",
+    ),
+    "log_lbol_agn": dict(
+        site="log_agn_bol_luminosity_fit", truth="log_lbol_chimera_truth", offset=7.0,  # W -> erg/s
+        title="AGN bolometric luminosity", label=r"\log_{10}(L_{\rm bol,AGN}/{\rm erg\,s^{-1}})",
+        delta=r"$\Delta\log L_{\rm bol,AGN}$ [dex]", plot="chimera_dlbol_vs_lbol.png",
+    ),
+    "log_sfr": dict(
+        site="log_sfr_fit", truth="log_sfr_truth", offset=0.0, title="Star formation rate",
+        label=r"\log_{10}({\rm SFR}/M_\odot\,{\rm yr}^{-1})", delta=r"$\Delta\log {\rm SFR}$ [dex]",
+        plot="chimera_dsfr_vs_sfr.png", unscored_label="quiescent host (not scored)",
+        note="Scored on star-forming hosts (true log sSFR > −11); quiescent hosts are plotted as open circles.",
+    ),
+}
+SFR_MIN_LOG_SSFR = -11.0
 COMMENT_MARKER = "jaxsedfit Chimera validation"
 
 
@@ -75,6 +97,7 @@ def make_sample(args) -> int:
             "log_stellar_mass_truth": float(t["MASS_MED_GAL"]),
             "log_lbol_qso_truth": float(t["logLbol_QSO"]),
             "log_lbol_chimera_truth": float(t["logLbol_QSO"]) + np.log10(weight),
+            "log_sfr_truth": float(t["SFR_MED_GAL"]),
             "photoz_cosmos2015": photoz_by_host.get(int(float(p["ID_COSMOS"])), np.nan),
         }
         if "QSO_host_contamination_dex" in truth.dtype.names:  # chimeras built with add_host_contamination.py
@@ -148,36 +171,47 @@ def fit_sample(rows, *, dsps_ssp_fn, chunk, steps, learning_rate):
     from jaxsedfit import fit_batch
 
     t0 = time.time()
-    batch = fit_batch(_configs(rows, dsps_ssp_fn, steps, learning_rate), method="laplace", chunk_size=chunk)
+    batch = fit_batch(_configs(rows, dsps_ssp_fn, steps, learning_rate), method="laplace", chunk_size=chunk,
+                      derived_sites=[q["site"] for q in QUANTITIES.values() if q["site"] != "log_stellar_mass"])
     results = []
     for row, draws, map_values, diag in zip(rows, batch.samples, batch.map_values, batch.diagnostics):
-        p02, p16, p84, p97 = np.percentile(np.asarray(draws["log_stellar_mass"]), [2.275, 16.0, 84.0, 97.725])
-        results.append({
+        result = {
             "id": row["id"],
             "luminosity_bin_index": int(row["luminosity_bin_index"]),
             "redshift": row["redshift"],
             "chimera_QSO_weight": row["chimera_QSO_weight"],
-            "log_lbol_chimera_truth": row["log_lbol_chimera_truth"],
-            "log_stellar_mass_truth": row["log_stellar_mass_truth"],
-            "log_stellar_mass_fit": float(map_values["log_stellar_mass"]),
-            "log_stellar_mass_p02275": float(p02),
-            "log_stellar_mass_p16": float(p16),
-            "log_stellar_mass_p84": float(p84),
-            "log_stellar_mass_p97725": float(p97),
-            "map_loss": diag["loss"],
-            "hessian_min_eig": diag["hessian_min_eigenvalue"],
-        })
+        }
+        for name, q in QUANTITIES.items():
+            p02, p16, p84, p97 = np.percentile(np.asarray(draws[q["site"]]) + q["offset"], [2.275, 16.0, 84.0, 97.725])
+            result.update({
+                f"{name}_truth": row[q["truth"]],
+                f"{name}_fit": float(map_values[q["site"]]) + q["offset"],
+                f"{name}_p02275": float(p02),
+                f"{name}_p16": float(p16),
+                f"{name}_p84": float(p84),
+                f"{name}_p97725": float(p97),
+            })
+        result.update({"map_loss": diag["loss"], "hessian_min_eig": diag["hessian_min_eigenvalue"]})
+        results.append(result)
     return results, time.time() - t0
 
 
 # --------------------------------------------------------------------------- #
 # Metrics, plot, comment
 # --------------------------------------------------------------------------- #
-def compute_metrics(results) -> list[dict]:
+def _in_metrics(result, name) -> bool:
+    # COSMOS2015 SFRs of quiescent hosts are only upper limits in practice, so SFR
+    # recovery is scored on star-forming hosts (they are still plotted).
+    if name == "log_sfr":
+        return result["log_sfr_truth"] - result["log_stellar_mass_truth"] > SFR_MIN_LOG_SSFR
+    return True
+
+
+def compute_metrics(results, name) -> list[dict]:
     metrics = []
     for b, (lo, hi) in enumerate(zip(LUMINOSITY_BIN_EDGES[:-1], LUMINOSITY_BIN_EDGES[1:])):
-        res = np.array([r["log_stellar_mass_fit"] - r["log_stellar_mass_truth"]
-                        for r in results if r["luminosity_bin_index"] == b])
+        res = np.array([r[f"{name}_fit"] - r[f"{name}_truth"]
+                        for r in results if r["luminosity_bin_index"] == b and _in_metrics(r, name)])
         finite = res[np.isfinite(res)]
         metrics.append({
             "bin": b,
@@ -194,17 +228,22 @@ def compute_metrics(results) -> list[dict]:
 
 
 def check_metrics(metrics, thresholds) -> list[str]:
+    """Compare per-bin metrics with the thresholds; quantities without thresholds are not gated."""
     failures = []
-    for m in metrics:
-        t = thresholds["bins"][str(m["bin"])]
-        if m["outlier_fraction"] > t["max_outlier_fraction"]:
-            failures.append(f"{m['label']}: outlier fraction {m['outlier_fraction']:.3f} > {t['max_outlier_fraction']:.3f}")
-        if m["rms"] > t["max_rms"]:
-            failures.append(f"{m['label']}: RMS {m['rms']:.3f} > {t['max_rms']:.3f} dex")
+    for name, bins in metrics.items():
+        for m in bins:
+            t = thresholds.get(name, {}).get(str(m["bin"]))
+            if t is None:
+                continue
+            prefix = f"{QUANTITIES[name]['title']}, {m['label']}"
+            if m["outlier_fraction"] > t["max_outlier_fraction"]:
+                failures.append(f"{prefix}: outlier fraction {m['outlier_fraction']:.3f} > {t['max_outlier_fraction']:.3f}")
+            if m["rms"] > t["max_rms"]:
+                failures.append(f"{prefix}: RMS {m['rms']:.3f} > {t['max_rms']:.3f} dex")
     return failures
 
 
-def plot_results(results, metrics, path: Path) -> None:
+def plot_results(results, metrics, name, path: Path) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -214,13 +253,18 @@ def plot_results(results, metrics, path: Path) -> None:
     from jaxsedfit.mplstyle import style_path
 
     plt.style.use(style_path())
-    truth = np.array([r["log_stellar_mass_truth"] for r in results])
-    resid = np.array([r["log_stellar_mass_fit"] for r in results]) - truth
-    lo95 = np.array([r["log_stellar_mass_p02275"] for r in results]) - truth
-    hi95 = np.array([r["log_stellar_mass_p97725"] for r in results]) - truth
+    q = QUANTITIES[name]
+    ylim = 3.0
+    truth = np.array([r[f"{name}_truth"] for r in results])
+    resid = np.array([r[f"{name}_fit"] for r in results]) - truth
+    lo95 = np.array([r[f"{name}_p02275"] for r in results]) - truth
+    hi95 = np.array([r[f"{name}_p97725"] for r in results]) - truth
     weight = np.array([r["chimera_QSO_weight"] for r in results])
     bins = np.array([r["luminosity_bin_index"] for r in results])
+    scored = np.array([_in_metrics(r, name) for r in results])
     norm = LogNorm(vmin=weight[weight > 0].min(), vmax=weight.max())
+    shown = np.clip(resid, -0.97 * ylim, 0.97 * ylim)  # off-scale points drawn at the edge as triangles
+    clipped = np.abs(resid) > 0.97 * ylim
 
     fig, axes = plt.subplots(1, len(metrics), figsize=(17.0, 4.2), sharex=True, sharey=True, constrained_layout=True)
     scatter = None
@@ -229,46 +273,66 @@ def plot_results(results, metrics, path: Path) -> None:
         ax.axhline(0.0, color="black", lw=1.0, ls="--", zorder=0)
         for y in (OUTLIER_DEX, -OUTLIER_DEX):
             ax.axhline(y, color="0.55", lw=0.9, ls=":", zorder=0)
-        ax.errorbar(truth[sel], resid[sel], yerr=np.vstack([resid[sel] - lo95[sel], hi95[sel] - resid[sel]]),
+        bars = sel & ~clipped
+        ax.errorbar(truth[bars], resid[bars], yerr=np.vstack([resid[bars] - lo95[bars], hi95[bars] - resid[bars]]),
                     fmt="none", ecolor="0.55", elinewidth=0.8, capsize=1.5, alpha=0.55, zorder=1)
-        scatter = ax.scatter(truth[sel], resid[sel], c=weight[sel], cmap="viridis", norm=norm, s=42, alpha=0.9,
-                             edgecolor="black", linewidth=0.35, zorder=2)
+        for subset, marker in ((sel & scored & ~clipped, "o"), (sel & scored & clipped, "^")):
+            scatter = ax.scatter(truth[subset], np.where(clipped[subset], np.sign(resid[subset]) * 0.97 * ylim,
+                                                         shown[subset]),
+                                 c=weight[subset], cmap="viridis", norm=norm, s=42, alpha=0.9, marker=marker,
+                                 edgecolor="black", linewidth=0.35, zorder=2)
+        if not scored.all():
+            ax.scatter(truth[sel & ~scored], shown[sel & ~scored], s=30, facecolor="none", edgecolor="0.45",
+                       linewidth=0.7, zorder=1.5, label=q.get("unscored_label"))
         ax.set_title(f"{m['label']}  (N={m['n']})\noutliers={100 * m['outlier_fraction']:.1f}%, RMS={m['rms']:.2f} dex",
                      fontsize=11)
-        ax.set_xlabel(r"True $\log_{10}(M_\star/M_\odot)$")
-        ax.set_ylim(-3.0, 3.0)
+        ax.set_xlabel(f"True ${q['label']}$")
+        ax.set_ylim(-ylim, ylim)
         ax.grid(alpha=0.18)
-    np.atleast_1d(axes)[0].set_ylabel(r"$\Delta\log M_\star$ [dex]")
+    first = np.atleast_1d(axes)[0]
+    first.set_ylabel(q["delta"])
+    if not scored.all():
+        first.legend(loc="lower left", fontsize=9)
     if scatter is not None:
         fig.colorbar(scatter, ax=axes, label="Chimera QSO weight", pad=0.01)
-    fig.suptitle(f"Stellar-mass residuals by injected AGN luminosity (point: MAP; bars: Laplace 95% intervals; "
-                 f"outlier: |Δ| > {OUTLIER_DEX} dex)")
     fig.savefig(path, dpi=110)
+    fig.savefig(path.with_suffix(".pdf"))
     plt.close(fig)
 
 
-def write_comment(path: Path, metrics, failures, thresholds, *, sha, elapsed, image_url) -> None:
+def write_comment(path: Path, metrics, failures, thresholds, *, sha, elapsed, image_base_url) -> None:
     status = "✅ passed" if not failures else "❌ failed"
     lines = [
         f"## {COMMENT_MARKER}: {status}",
         "",
-        f"Commit `{sha}` · {sum(m['n'] for m in metrics)} Chimeras · MAP + Laplace (`fit_batch`) in {elapsed / 60:.1f} min",
+        f"Commit `{sha}` · {sum(m['n'] for m in metrics['log_stellar_mass'])} Chimeras · "
+        f"MAP + Laplace (`fit_batch`) in {elapsed / 60:.1f} min",
         "",
-        "| AGN luminosity bin | N | median Δ | NMAD | RMS (max) | outliers (max) |",
-        "|---|---:|---:|---:|---:|---:|",
+        f"Residual = MAP − truth in bins of injected AGN luminosity (log erg/s); bars are Laplace 95% intervals; "
+        f"outlier: |Δ| > {OUTLIER_DEX} dex.",
     ]
-    for m in metrics:
-        t = thresholds["bins"][str(m["bin"])]
-        rms_flag = "" if m["rms"] <= t["max_rms"] else " ❌"
-        out_flag = "" if m["outlier_fraction"] <= t["max_outlier_fraction"] else " ❌"
-        lines.append(
-            f"| {m['label']} | {m['n']} | {m['median']:+.3f} | {m['nmad']:.3f} | "
-            f"{m['rms']:.3f} ({t['max_rms']:.3f}){rms_flag} | "
-            f"{100 * m['outlier_fraction']:.1f}% ({100 * t['max_outlier_fraction']:.1f}%){out_flag} |"
-        )
+    for name, bins in metrics.items():
+        q = QUANTITIES[name]
+        gated = name in thresholds
+        lines += ["", f"### {q['title']}" + ("" if gated else " (reported, not gated)"), ""]
+        if q.get("note"):
+            lines += [q["note"], ""]
+        lines += ["| AGN luminosity bin | N | median Δ | NMAD | RMS" + (" (max)" if gated else "")
+                  + " | outliers" + (" (max)" if gated else "") + " |",
+                  "|---|---:|---:|---:|---:|---:|"]
+        for m in bins:
+            t = thresholds.get(name, {}).get(str(m["bin"]))
+            rms = f"{m['rms']:.3f}"
+            out = f"{100 * m['outlier_fraction']:.1f}%"
+            if t is not None:
+                rms += f" ({t['max_rms']:.3f})" + ("" if m["rms"] <= t["max_rms"] else " ❌")
+                out += (f" ({100 * t['max_outlier_fraction']:.1f}%)"
+                        + ("" if m["outlier_fraction"] <= t["max_outlier_fraction"] else " ❌"))
+            lines.append(f"| {m['label']} | {m['n']} | {m['median']:+.3f} | {m['nmad']:.3f} | {rms} | {out} |")
+        lines += ["", f"![{q['title']} residuals]({image_base_url}/{q['plot']})" if image_base_url
+                  else "_Plot attached to the workflow artifacts._"]
     if failures:
         lines += ["", "**Failures**", ""] + [f"- {f}" for f in failures]
-    lines += ["", f"![Chimera stellar-mass residuals]({image_url})" if image_url else "_Plot attached to the workflow artifacts._"]
     workflow_url = os.environ.get("GITHUB_SERVER_URL", "") and (
         f"{os.environ['GITHUB_SERVER_URL']}/{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
     )
@@ -292,14 +356,16 @@ def run(args) -> int:
 
     results, elapsed = fit_sample(rows, dsps_ssp_fn=args.dsps_ssp_fn, chunk=args.chunk, steps=args.steps,
                                   learning_rate=args.learning_rate)
-    metrics = compute_metrics(results)
-    thresholds = json.loads(Path(args.thresholds).read_text())
+    metrics = {name: compute_metrics(results, name) for name in QUANTITIES}
+    thresholds = {k: v for k, v in json.loads(Path(args.thresholds).read_text()).items() if not k.startswith("_")}
     failures = check_metrics(metrics, thresholds)
 
     (out / "results.json").write_text(json.dumps(results, indent=1))
-    (out / "metrics.json").write_text(json.dumps({"bins": metrics, "failures": failures, "elapsed_s": elapsed}, indent=2))
-    plot_results(results, metrics, out / PLOT_NAME)
-    write_comment(out / "output", metrics, failures, thresholds, sha=args.sha, elapsed=elapsed, image_url=args.image_url)
+    (out / "metrics.json").write_text(json.dumps({**metrics, "failures": failures, "elapsed_s": elapsed}, indent=2))
+    for name, q in QUANTITIES.items():
+        plot_results(results, metrics[name], name, out / q["plot"])
+    write_comment(out / "output", metrics, failures, thresholds, sha=args.sha, elapsed=elapsed,
+                  image_base_url=args.image_base_url)
     print((out / "output").read_text())
     return 0
 
@@ -340,7 +406,7 @@ def main(argv=None) -> int:
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--learning-rate", type=float, default=5e-3)
     p.add_argument("--sha", default="local")
-    p.add_argument("--image-url", default=None, help="URL of the plot to embed in the comment.")
+    p.add_argument("--image-base-url", default=None, help="URL of the directory holding the plots to embed in the comment.")
     p.set_defaults(func=run)
 
     p = sub.add_parser("check", help="Exit non-zero if metrics.json fails the thresholds.")

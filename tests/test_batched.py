@@ -5,7 +5,7 @@ import jax
 import numpy as np
 import numpyro.distributions as dist
 import pytest
-from numpyro.handlers import seed, trace
+from numpyro.handlers import seed, substitute, trace
 from numpyro.infer.util import log_density
 
 from jaxsedfit.batched import BatchedContext, fit_batch
@@ -102,3 +102,21 @@ def test_fit_batch_groups_objects_with_different_priors(tmp_path, monkeypatch):
     configs[2].prior_config.stellar_mass = dist.Uniform(9.0, 12.0)
     result = fit_batch(configs, method="map", chunk_size=2, progress_bar=False)
     assert float(result.samples[2]["log_stellar_mass"][0]) >= 9.0
+
+
+def test_fit_batch_derived_sites(tmp_path, monkeypatch):
+    configs = _chimera_configs(tmp_path, monkeypatch, n=3)
+    sites = ["log_sfr_fit", "log_agn_bol_luminosity_fit"]
+    result = fit_batch(configs, method="laplace", chunk_size=2, progress_bar=False, derived_sites=sites)
+    for i, (samples, map_values) in enumerate(zip(result.samples, result.map_values)):
+        for site in sites:
+            assert np.asarray(samples[site]).shape == (8,)
+            assert np.all(np.isfinite(samples[site]))
+        # Derived values at the MAP match the per-object model evaluated there.
+        ctx = build_model_context(configs[i])
+        params = {k: v for k, v in map_values.items() if k not in sites}
+        model = seed(lambda: grahsp_photometric_model(ctx, include_components=False), 0)
+        sub = trace(substitute(model, data=params)).get_trace()
+        for site in sites:
+            np.testing.assert_allclose(map_values[site], sub[site]["value"], rtol=1e-6, atol=1e-8)
+    assert "log_sfr_fit_p50" in result.summary_table().colnames
