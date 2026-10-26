@@ -116,10 +116,11 @@ def build_host_state(
         stellar_metallicity=float(stellar_metallicity),
         stellar_metallicity_scatter=float(stellar_metallicity_scatter),
     )
-    observation = SimpleNamespace(redshift=float(redshift))
+    # Redshift and age stay unconverted so batched fits can trace them per object.
+    observation = SimpleNamespace(redshift=redshift)
     context = SimpleNamespace(
         host_basis_jax=host_basis_jax,
-        t_obs_gyr=float(t_obs_gyr),
+        t_obs_gyr=t_obs_gyr,
         fit_config=SimpleNamespace(galaxy=galaxy, observation=observation),
     )
     return _build_host_state(context, prior_config, full_output=full_output)

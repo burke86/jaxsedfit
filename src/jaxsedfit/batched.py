@@ -2,10 +2,16 @@
 
 ``JAXSEDFit`` compiles and fits one object at a time. When many objects share a
 model configuration (same filters, templates, priors and settings) and differ only
-in their photometry and redshift, the per-object ``ModelContext`` arrays can be
-stacked and the model evaluated under ``jax.vmap``, so one compiled program fits a
-whole chunk of objects. :func:`fit_batch` is the public entry point; see the
-"Fitting many objects" docs page.
+in their data and redshift, the per-object ``ModelContext`` arrays can be stacked
+and the model evaluated under ``jax.vmap``, so one compiled program fits a whole
+chunk of objects. :func:`fit_batch` is the public entry point; see the "Fitting
+many objects" docs page.
+
+Spectra change the model structure in two ways, both removed before stacking:
+pixel counts differ (spectra are padded with masked pixels), and the tied-line
+table depends on rest-frame coverage. Objects are grouped into redshift windows
+that share one line table (``AGNConfig.line_activation_rest``), and lines a
+spectrum does not cover are masked to zero amplitude.
 
 Supported methods are ``"map"``, ``"laplace"`` and ``"svi"``. The MAP mirrors
 :meth:`jaxsedfit.JAXSEDFit.fit_map` (staged continuum-only then full model, Adam on
@@ -28,6 +34,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import numpyro.distributions as dist
 from numpyro import handlers
 from numpyro.infer import init_to_median
 from numpyro.infer.util import log_density
@@ -35,7 +42,13 @@ from numpyro.infer.util import log_density
 from .approximate import gaussian_vi, laplace_draws, latent_sites, site_transforms
 from .config import FitConfig, serialize_config
 from .model import grahsp_photometric_model
-from .preload import ModelContext, build_model_context, clear_per_object_caches
+from .preload import (
+    ModelContext,
+    build_model_context,
+    clear_per_object_caches,
+    spectral_coverage_rest,
+    usable_spectral_pixels,
+)
 
 _NUMERIC = (np.ndarray, jax.Array, float, np.floating)
 # Zero-padded with a valid_mask whose widths depend on redshift; padding further is exact.
@@ -49,7 +62,10 @@ _CONTINUUM_MODEL_KWARGS = dict(
 
 
 def _leaves(obj: Any) -> list[Any]:
-    """Flatten nested dataclasses, sequences and dicts into a list of leaves."""
+    """Flatten nested dataclasses, sequences, dicts and distributions into a list of leaves."""
+    if isinstance(obj, dist.Distribution):
+        # Data-scaled spectral priors differ between objects.
+        return jax.tree_util.tree_leaves(obj)
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return [leaf for f in dataclasses.fields(obj) for leaf in _leaves(getattr(obj, f.name))]
     if isinstance(obj, (list, tuple)):
@@ -61,6 +77,9 @@ def _leaves(obj: Any) -> list[Any]:
 
 def _rebuild(obj: Any, leaves: Any) -> Any:
     """Inverse of :func:`_leaves`: rebuild ``obj`` taking leaves from an iterator."""
+    if isinstance(obj, dist.Distribution):
+        treedef = jax.tree_util.tree_structure(obj)
+        return jax.tree_util.tree_unflatten(treedef, [next(leaves) for _ in range(treedef.num_leaves)])
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         new = copy.copy(obj)
         for f in dataclasses.fields(obj):
@@ -123,11 +142,13 @@ class BatchedContext:
             for li, leaf in enumerate(per_ctx[0][fi]):
                 if not isinstance(leaf, _NUMERIC):
                     continue
-                if name not in _PADDED_FIELDS and all(_leaf_equal(leaf, pc[fi][li]) for pc in per_ctx[1:]):
+                # Only (filter, sample) arrays are padded; per-filter vectors are not.
+                padded = name in _PADDED_FIELDS and np.ndim(leaf) >= 2
+                if not padded and all(_leaf_equal(leaf, pc[fi][li]) for pc in per_ctx[1:]):
                     continue
                 shapes = {np.shape(pc[fi][li]) for pc in per_ctx}
                 width = None
-                if name in _PADDED_FIELDS:
+                if padded:
                     if len({s[:-1] for s in shapes}) != 1:
                         raise ValueError(f"{name}[{li}] has object-dependent shape {shapes}")
                     width = max(s[-1] for s in shapes) + pad_slack
@@ -193,6 +214,70 @@ class BatchedContext:
         return model
 
 
+class BatchedInputs:
+    """Layout for stacking per-object keyword inputs of an arbitrary NumPyro model.
+
+    The counterpart of :class:`BatchedContext` for models called as
+    ``model(**inputs)``, such as :func:`jaxsedfit.spectral_model.qso_fsps_joint_model`.
+    All objects must share one input structure: pad spectra to a common length
+    beforehand. Numeric leaves that differ between the calibration inputs are
+    stacked; all other values come from the first object.
+
+    Parameters
+    ----------
+    model : callable
+        NumPyro model taking keyword arguments.
+    inputs : sequence of mapping
+        Calibration inputs, one mapping of keyword arguments per object.
+    redshift_key : str
+        Key holding each object's redshift, which is stacked explicitly.
+    """
+
+    def __init__(self, model: Callable, inputs: Sequence[dict[str, Any]], redshift_key: str = "z_qso"):
+        self._model = model
+        self.redshift_key = redshift_key
+        self.template = dict(inputs[0])
+        self._template_leaves = _leaves(self.template)
+        per = [_leaves(dict(x)) for x in inputs]
+        self.varying = []
+        for li, leaf in enumerate(self._template_leaves):
+            if not isinstance(leaf, _NUMERIC) or all(_leaf_equal(leaf, p[li]) for p in per[1:]):
+                continue
+            shapes = {np.shape(p[li]) for p in per}
+            if len(shapes) != 1:
+                raise ValueError(f"Input leaf {li} has object-dependent shape {shapes}; pad the inputs first.")
+            self.varying.append(li)
+        self._varying_set = set(self.varying)
+
+    def stack(self, inputs: Sequence[dict[str, Any]]) -> tuple[list[jnp.ndarray], jnp.ndarray]:
+        """Stack the object-dependent leaves of ``inputs``; see :meth:`BatchedContext.stack`."""
+        per = [_leaves(dict(x)) for x in inputs]
+        for li, leaf in enumerate(self._template_leaves):
+            if li in self._varying_set or not isinstance(leaf, _NUMERIC):
+                continue
+            if not all(_leaf_equal(leaf, p[li]) for p in per):
+                raise ValueError(f"Input leaf {li} varies between objects but was constant in the calibration set")
+        arrays = [jnp.stack([jnp.asarray(p[li]) for p in per]) for li in self.varying]
+        redshift = jnp.asarray([float(x[self.redshift_key]) for x in inputs], dtype=jnp.float64)
+        return arrays, redshift
+
+    def inputs(self, arrays: Sequence[Any], redshift: Any) -> dict[str, Any]:
+        """Rebuild one object's keyword inputs from its (possibly traced) arrays."""
+        leaves = list(self._template_leaves)
+        for li, arr in zip(self.varying, arrays):
+            leaves[li] = arr
+        kwargs = _rebuild(self.template, iter(leaves))
+        kwargs[self.redshift_key] = redshift
+        return kwargs
+
+    def model(self, **model_kwargs) -> Callable:
+        """NumPyro model ``model(arrays, redshift)``; ``model_kwargs`` override inputs."""
+
+        def model(arrays, redshift):
+            return self._model(**{**self.inputs(arrays, redshift), **model_kwargs})
+
+        return model
+
 
 _BATCH_METHODS = {"map": "map", "optax": "map", "laplace": "laplace", "svi": "svi"}
 
@@ -214,7 +299,7 @@ def _release_memory() -> None:
 
 
 def make_batched_fitter(
-    bctx: BatchedContext,
+    bctx: BatchedContext | BatchedInputs,
     *,
     method: str = "map",
     steps: int = 2000,
@@ -226,17 +311,22 @@ def make_batched_fitter(
     svi_learning_rate: float | None = None,
     svi_num_particles: int = 4,
     svi_full_rank: bool = True,
+    continuum_model_kwargs: dict[str, Any] | None = None,
 ) -> Callable[..., dict[str, Any]]:
-    """Build a batched fitter for one :class:`BatchedContext` layout.
+    """Build a batched fitter for one :class:`BatchedContext` or :class:`BatchedInputs` layout.
 
     Parameters mirror :class:`jaxsedfit.config.InferenceConfig`; ``staged_steps``
     defaults to ``steps // 3`` as in :meth:`jaxsedfit.JAXSEDFit.fit_map`.
+    ``continuum_model_kwargs`` are passed to ``bctx.model`` for the staged
+    continuum-only MAP; the default switches off the jaxsedfit line features.
 
     Returns
     -------
     callable
-        ``fit(arrays, redshift, keys)`` taking the output of
-        :meth:`BatchedContext.stack` and one PRNG key per object. It returns a dict
+        ``fit(arrays, redshift, keys, init_values=None)`` taking the output of
+        :meth:`BatchedContext.stack`, one PRNG key per object and optional initial
+        values (constrained, with a leading object axis) for the first MAP stage;
+        later stages start from them updated with the earlier stage. It returns a dict
         with ``samples`` (constrained values per site with leading object and draw
         axes; one draw for ``"map"``), ``map`` (constrained MAP values), ``loss``
         (final ``-log p(x, z)`` at the MAP) and, for ``"laplace"``,
@@ -246,7 +336,7 @@ def make_batched_fitter(
     """
     method = _BATCH_METHODS[method]
     full = bctx.model()
-    continuum = bctx.model(**_CONTINUUM_MODEL_KWARGS)
+    continuum = bctx.model(**(_CONTINUUM_MODEL_KWARGS if continuum_model_kwargs is None else continuum_model_kwargs))
     optimizer = optax.adam(learning_rate)
     if staged_steps is None:
         staged_steps = max(1, steps // 3)
@@ -298,12 +388,12 @@ def make_batched_fitter(
         run_f = map_stage(full, transforms, steps)
 
         @jax.jit
-        def program(keys, arrays, redshift):
+        def program(keys, arrays, redshift, given):
             map_keys, post_keys = jax.vmap(lambda k: jax.random.split(k))(keys).transpose(1, 0, 2)
-            init_values = {}
+            init_values = {k: v for k, v in given.items() if k in transforms}
             if staged:
-                values_c, _ = run_c(map_keys, arrays, redshift, {})
-                init_values = {k: v for k, v in values_c.items() if k in transforms}
+                values_c, _ = run_c(map_keys, arrays, redshift, {k: v for k, v in given.items() if k in transforms_c})
+                init_values.update({k: v for k, v in values_c.items() if k in transforms})
             values, loss = run_f(map_keys, arrays, redshift, init_values)
             out = {"map": values, "loss": loss}
             if method == "map":
@@ -330,10 +420,11 @@ def make_batched_fitter(
 
         return program
 
-    def fit(arrays, redshift, keys) -> dict[str, Any]:
+    def fit(arrays, redshift, keys, init_values=None) -> dict[str, Any]:
         if "program" not in compiled:
             compiled["program"] = build(arrays, redshift)
-        out = compiled["program"](keys, arrays, redshift)
+        given = {k: jnp.asarray(v) for k, v in (init_values or {}).items()}
+        out = compiled["program"](keys, arrays, redshift, given)
         return jax.tree_util.tree_map(np.asarray, out)
 
     return fit
@@ -341,13 +432,69 @@ def make_batched_fitter(
 
 def _batch_signature(cfg: FitConfig) -> str:
     """Everything in a config except per-object data, which a batch must share."""
-    data = serialize_config(cfg)
+    stripped = copy.copy(cfg)
+    # Spectral pixels and resolving powers are per-object data (stacked after padding).
+    stripped.spectroscopy = [
+        dataclasses.replace(spectrum, wave_obs=(), fluxes=(), errors=(), mask=None, epoch_mjd=None,
+                            resolving_power=spectrum.resolving_power is not None)
+        for spectrum in cfg.spectroscopy_list
+    ]
+    data = serialize_config(stripped)
     for key in ("object_id", "redshift", "ra", "dec"):
         data["observation"].pop(key, None)
     for key in ("fluxes", "errors", "is_upper_limit"):
-        data["photometry"].pop(key, None)
+        (data["photometry"] or {}).pop(key, None)
     data.pop("output", None)
     return json.dumps(data, sort_keys=True, default=repr)
+
+
+def _uses_line_table(cfg: FitConfig) -> bool:
+    """Whether the config fits a tied-line table chosen from spectral coverage."""
+    return bool(cfg.spectroscopy_list and cfg.agn.fit_lines and cfg.agn.tied_lines
+                and not cfg.observation.fits_redshift)
+
+
+def _share_line_tables(configs: list[FitConfig], redshift_window: float | None) -> list[FitConfig]:
+    """Give spectroscopic configs in the same redshift window one fixed tied-line table.
+
+    Objects are sorted by redshift within each configuration group and split into
+    windows no wider than ``redshift_window`` in ln(1 + z). Each window's table spans
+    the union of its members' line coverage (``AGNConfig.line_activation_rest``);
+    configs that already fix the table are left alone. Returns shallow copies.
+    """
+    out = list(configs)
+    pending: dict[str, list[int]] = {}
+    for i, cfg in enumerate(configs):
+        if _uses_line_table(cfg) and cfg.agn.line_activation_rest is None:
+            pending.setdefault(_batch_signature(cfg), []).append(i)
+    for indices in pending.values():
+        coverage = {}
+        for i in indices:
+            cfg = configs[i]
+            waves, masks = zip(*[(np.asarray(sp.wave_obs, dtype=float), usable_spectral_pixels(sp))
+                                 for sp in cfg.spectroscopy_list])
+            cov = spectral_coverage_rest(np.concatenate(waves), np.concatenate(masks),
+                                         cfg.observation.redshift, cfg.agn.line_coverage_margin_kms)
+            if cov is None:
+                raise ValueError(f"Object {cfg.observation.object_id} has no usable spectral pixels.")
+            coverage[i] = cov
+        lnz = {i: np.log1p(max(float(configs[i].observation.redshift), 0.0)) for i in indices}
+        order = sorted(indices, key=lambda i: lnz[i])
+        start = 0
+        while start < len(order):
+            stop = start + 1
+            while stop < len(order) and (
+                redshift_window is None or lnz[order[stop]] - lnz[order[start]] <= redshift_window
+            ):
+                stop += 1
+            window = order[start:stop]
+            table = (min(coverage[i][0] for i in window), max(coverage[i][1] for i in window))
+            for i in window:
+                cfg = copy.copy(configs[i])
+                cfg.agn = dataclasses.replace(cfg.agn, line_activation_rest=table)
+                out[i] = cfg
+            start = stop
+    return out
 
 
 @dataclasses.dataclass
@@ -430,14 +577,25 @@ def fit_batch(
     chunk_size: int = 32,
     seed: int | None = None,
     progress_bar: bool = True,
+    redshift_window: float | None = 0.25,
 ) -> BatchFitResult:
     """Fit many objects at once with one compiled program per compatible group.
 
     Objects are grouped by everything in their configuration except per-object data
-    (object id, redshift, sky position, fluxes, errors and upper-limit flags), so a
-    batch may mix filter sets or priors; each group compiles once. Within a group,
-    objects are fitted ``chunk_size`` at a time under ``jax.vmap``, and the model
-    contexts for the next chunk are built while the current chunk runs.
+    (object id, redshift, sky position, photometric fluxes, errors and upper-limit
+    flags, spectral pixels and resolving powers), so a batch may mix filter sets or
+    priors; each group compiles once. Within a group, objects are fitted
+    ``chunk_size`` at a time under ``jax.vmap``, and the model contexts for the next
+    chunk are built while the current chunk runs.
+
+    Photometric, joint (photometry + spectra) and spectrum-only fits are supported.
+    Spectroscopic objects are additionally split into redshift windows that share
+    one tied-line table (``AGNConfig.line_activation_rest``): lines outside an
+    object's spectral coverage stay in the model with zero amplitude, constrained by
+    their priors only. Spectra in a group are padded with masked pixels to a common
+    length. Fixing the table can change a fit slightly from ``JAXSEDFit`` (tied
+    groups that straddle the coverage edge keep all their members); the returned
+    configs carry the table, so ``JAXSEDFit`` on them fits the same model.
 
     Parameters
     ----------
@@ -457,16 +615,16 @@ def fit_batch(
         results do not depend on ``chunk_size``.
     progress_bar : bool
         Show a progress bar over chunks.
+    redshift_window : float or None
+        Widest ln(1 + z) spread of spectroscopic objects sharing a line table. Wider
+        windows mean fewer compiled programs but more masked lines per object; None
+        gives each configuration group a single table.
 
     Returns
     -------
     BatchFitResult
-        Per-object draws and diagnostics, in input order.
-
-    Notes
-    -----
-    Only photometric fits are supported: spectroscopy makes the model structure
-    depend on each spectrum's coverage, which cannot be batched yet.
+        Per-object draws and diagnostics, in input order, with the configs as
+        fitted (including any fixed line table).
     """
     configs = list(configs)
     if not configs:
@@ -474,8 +632,9 @@ def fit_batch(
     method = str(configs[0].inference.method if method is None else method).lower()
     if method not in _BATCH_METHODS:
         raise ValueError("fit_batch supports method 'map' (or 'optax'), 'laplace' and 'svi'.")
-    if any(cfg.spectroscopy is not None for cfg in configs):
-        raise NotImplementedError("fit_batch supports photometric fits only; fit spectra with JAXSEDFit.")
+    if any(cfg.spectroscopy_list and cfg.observation.fits_redshift for cfg in configs):
+        raise NotImplementedError("fit_batch does not fit redshifts of spectroscopic objects; fit them with JAXSEDFit.")
+    configs = _share_line_tables(configs, redshift_window)
     base_key = jax.random.PRNGKey(int(configs[0].inference.seed if seed is None else seed))
 
     groups: dict[str, list[int]] = {}
@@ -507,11 +666,16 @@ def fit_batch(
             svi_full_rank=inference.svi_full_rank,
         )
         z = np.array([float(configs[i].observation.redshift) for i in indices])
+        # Pad every spectrum slot to the group's longest, so all chunks share one shape.
+        pad_to = None
+        if configs[indices[0]].spectroscopy_list:
+            pad_to = [max(len(configs[i].spectroscopy_list[k].wave_obs) for i in indices)
+                      for k in range(len(configs[indices[0]].spectroscopy_list))]
         rng = np.random.default_rng(0)
         # Calibrate the stacking layout on objects spanning the redshift range.
         calib = sorted({int(np.argmin(z)), int(np.argmax(z)),
                         *rng.choice(len(indices), min(14, len(indices)), replace=False).tolist()})
-        calib_contexts = [build_model_context(configs[indices[j]]) for j in calib]
+        calib_contexts = [build_model_context(configs[indices[j]], spec_pad_to=pad_to) for j in calib]
         clear_per_object_caches()
         bctx = BatchedContext(calib_contexts)
         fit = make_batched_fitter(bctx, **settings)
@@ -519,7 +683,7 @@ def fit_batch(
 
         def prepare(chunk):
             padded = list(chunk) + [chunk[-1]] * (chunk_size - len(chunk))
-            contexts = [build_model_context(configs[i]) for i in padded]
+            contexts = [build_model_context(configs[i], spec_pad_to=pad_to) for i in padded]
             # Redshift-keyed caches would otherwise grow by tens of MB per object.
             clear_per_object_caches()
             return padded, contexts

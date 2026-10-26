@@ -69,6 +69,7 @@ class TiedLineMetadata(TypedDict, total=False):
     nlr_vgroup_families: dict[str, np.ndarray]
     nlr_wgroup_families: dict[str, np.ndarray]
     amp_complex_groups: list[dict[str, Any]]
+    coverage_ln_support: np.ndarray
 
 
 def extend_loglam_grid(wave: np.ndarray, pad_kms: float = 3000.0) -> np.ndarray:
@@ -145,8 +146,10 @@ def _np_to_jnp(x):
     Parameters
     ----------
     x : array_like
-        Values to convert.
+        Values to convert; JAX arrays (including traced ones) are cast directly.
     """
+    if isinstance(x, jax.Array):
+        return jnp.asarray(x, dtype=jnp.float64)
     return jnp.asarray(np.asarray(x, dtype=np.float64))
 
 
@@ -243,7 +246,7 @@ def _resolve_pl_pivot(wave, prior_config):
     prior_config = _materialize_prior_mapping(prior_config)
     pivot = prior_config.get("PL_pivot", None)
     if pivot is not None:
-        return jnp.maximum(jnp.asarray(float(pivot)), 1e-8)
+        return jnp.maximum(jnp.asarray(pivot, dtype=jnp.float64), 1e-8)
     return _spectrum_center_pivot(wave)
 
 
@@ -262,7 +265,7 @@ def _resolve_poly_pivot(wave, prior_config, *, require_configured=False):
     prior_config = _materialize_prior_mapping(prior_config)
     pivot = prior_config.get("poly_pivot", None)
     if pivot is not None:
-        return jnp.maximum(jnp.asarray(float(pivot)), 1e-8)
+        return jnp.maximum(jnp.asarray(pivot, dtype=jnp.float64), 1e-8)
     if require_configured:
         raise ValueError(
             "Posterior reconstruction with fitted polynomial coefficients requires "
@@ -623,7 +626,7 @@ def _orthogonal_polynomial_basis_jax(wave, basis_config):
         projection = jnp.asarray(spec["projection"], dtype=jnp.float64)
         design = jnp.stack(columns, axis=0)
         residual = x ** int(spec["degree"]) - jnp.sum(projection[:, None] * design, axis=0)
-        value = residual / max(float(spec["normalization"]), 1.0e-12)
+        value = residual / jnp.maximum(jnp.asarray(spec["normalization"], dtype=jnp.float64), 1.0e-12)
         previous.append(value)
         basis.append(value)
     if not basis:
@@ -2150,13 +2153,12 @@ def _delayed_sfh_host_spectrum(fsps_grid, prior_config, host_amp, z_qso):
     t_obs_gyr = getattr(fsps_grid, "t_obs_gyr", None)
     if t_obs_gyr is None:
         t_obs_gyr = float(np.nanmax(np.power(10.0, np.asarray(host_basis.ssp_lg_age_gyr, dtype=float))))
-    static_redshift = float(prior_config.get("z_qso", 0.0))
     host_state = build_jaxsedfit_host_state(
         host_basis,
         prior_config,
         host_sfh_model="delayed",
-        t_obs_gyr=float(t_obs_gyr),
-        redshift=static_redshift,
+        t_obs_gyr=t_obs_gyr,
+        redshift=prior_config.get("z_qso", 0.0),
     )
     gal_intrinsic = _host_luminosity_w_a_to_rest_flux_units(host_state["host_rest"], z_qso)
     fsps_weights_frac = _proxy_template_weights_from_host_state(fsps_grid, host_state)
@@ -3025,6 +3027,7 @@ def build_tied_line_meta_from_linelist(
     """
     records = normalize_line_definitions(linelist)
     rows = []
+    row_support = []
     wmin = float(np.min(wave))
     wmax = float(np.max(wave))
     ln_wmin = np.log(max(wmin, 1e-300))
@@ -3044,6 +3047,7 @@ def build_tied_line_meta_from_linelist(
         ln_support = voff + LINE_COVERAGE_NSIGMA * reference_sigma_ln
         if (ln0 + ln_support) >= ln_wmin and (ln0 - ln_support) <= ln_wmax:
             rows.append(row)
+            row_support.append(ln_support)
 
     ln_lambda0 = []
     amp_init = []
@@ -3063,8 +3067,9 @@ def build_tied_line_meta_from_linelist(
     compnames = []
     component_complex_names = []
     broad_order_component_indices = []
+    coverage_ln_support = []
 
-    for row in rows:
+    for row, ln_support in zip(rows, row_support):
         ngauss = int(row.get('ngauss', 1))
         linename = str(row.get('linename', f"line_{row['lambda']:.1f}"))
         base_compname = str(row.get('compname', linename))
@@ -3096,6 +3101,7 @@ def build_tied_line_meta_from_linelist(
             else:
                 compnames.append(base_compname)
             component_complex_names.append(base_compname)
+            coverage_ln_support.append(ln_support)
             row_component_indices.append(len(names) - 1)
         if ngauss > 1 and bool(_broad_line_mask([linename])[0]):
             broad_order_component_indices.append(row_component_indices)
@@ -3390,7 +3396,31 @@ def build_tied_line_meta_from_linelist(
         'names': names,
         'compnames': compnames,
         'line_lambda': np.asarray(line_lambda, dtype=float),
+        'coverage_ln_support': np.asarray(coverage_ln_support, dtype=float),
     }
+
+
+def tied_line_coverage_mask(tied_line_meta, coverage_rest):
+    """Return 1 for components a rest-frame coverage would activate, else 0.
+
+    Applies the activation test of :func:`build_tied_line_meta_from_linelist` to
+    each component of an existing line table, so a table built over a wider range
+    can be masked down to the lines one spectrum covers. ``coverage_rest`` may be
+    traced.
+
+    Parameters
+    ----------
+    tied_line_meta : TiedLineMetadata
+        Line table metadata.
+    coverage_rest : array_like
+        Rest-frame ``(min, max)`` coverage in Angstrom.
+    """
+    ln0 = jnp.asarray(tied_line_meta['ln_lambda0'], dtype=jnp.float64)
+    support = jnp.asarray(tied_line_meta['coverage_ln_support'], dtype=jnp.float64)
+    coverage = jnp.asarray(coverage_rest, dtype=jnp.float64)
+    ln_lo = jnp.log(jnp.maximum(coverage[0], 1e-300))
+    ln_hi = jnp.log(jnp.maximum(coverage[1], 1e-300))
+    return ((ln0 + support >= ln_lo) & (ln0 - support <= ln_hi)).astype(jnp.float64)
 
 
 @dataclass(frozen=True)
@@ -3665,6 +3695,9 @@ def _build_line_component(
     amps = amp_group[fgroup] * _line_meta_array(
         tied_line_meta, "flux_ratio", jax_key="flux_ratio_jax"
     )
+    if "line_mask" in tied_line_meta:
+        # Lines of a shared table that this spectrum does not cover (batched fits).
+        amps = amps * _line_meta_array(tied_line_meta, "line_mask")
     mus = tied_line_meta["ln_lambda0"] + dmu
     broad_mask = _line_meta_array(
         tied_line_meta, "broad_mask", jax_key="broad_mask_jax"
@@ -3739,7 +3772,8 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
                          return_line_components=True,
                          emit_deterministics=True,
                          custom_components: Sequence[CustomComponentSpec] | None = None,
-                         custom_line_components: Sequence[CustomLineComponentSpec] | None = None):
+                         custom_line_components: Sequence[CustomLineComponentSpec] | None = None,
+                         pixel_mask=None):
     """Joint AGN+host spectral forward model for NumPyro inference.
 
     Intrinsic reddening behavior
@@ -3819,11 +3853,16 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         Additive custom continuum and multiplicative BAL components.
     custom_line_components : Sequence[CustomLineComponentSpec] or None
         Custom emission-line components.
+    pixel_mask : array_like of bool or None
+        Pixels that enter the likelihood; None uses all. Batched fits pad spectra
+        to a common length with masked pixels. A ``"line_mask"`` entry of
+        ``tied_line_meta`` likewise zeroes lines a spectrum does not cover.
     """
     has_observed_flux = flux is not None
     wave = _np_to_jnp(wave)
     flux = _np_to_jnp(flux)
     err = _np_to_jnp(err)
+    pixel_mask = None if pixel_mask is None else jnp.asarray(pixel_mask, dtype=bool)
     lnwave = jnp.log(wave)
     host_wave_value = getattr(fsps_grid, "wave", None)
     host_wave = wave if host_wave_value is None else _np_to_jnp(host_wave_value)
@@ -4402,7 +4441,12 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     add_jitter = _sample_prior(
         prior_config,
         'add_jitter',
-        _halfnormal_prior(prior_config, 'add_jitter', 0.1, ref_scale=jnp.mean(err)),
+        _halfnormal_prior(
+            prior_config,
+            'add_jitter',
+            0.1,
+            ref_scale=jnp.mean(err) if pixel_mask is None else jnp.sum(jnp.where(pixel_mask, err, 0.0)) / jnp.sum(pixel_mask),
+        ),
     )
 
     continuum_model = agn_model + gal_model
@@ -4500,6 +4544,8 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     student_t_df = float(prior_config.get('student_t_df', 3.0))
     if has_observed_flux:
         pixel_log_prob = dist.StudentT(df=student_t_df, loc=fiber_model, scale=sigma_tot).log_prob(flux)
+        if pixel_mask is not None:
+            pixel_log_prob = jnp.where(pixel_mask, pixel_log_prob, 0.0)
         numpyro.factor('obs', jnp.sum(pixel_log_prob))
 
 

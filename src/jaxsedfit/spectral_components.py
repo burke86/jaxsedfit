@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
@@ -21,6 +22,7 @@ from .spectral_model import (
     _sample_tied_line_groups,
     _split_many_gauss_lnlam,
     build_tied_line_meta_from_linelist,
+    tied_line_coverage_mask,
 )
 from .spectral_reparameterization import (
     NORMAL_LOGNORMAL_STANDARDIZATION,
@@ -78,6 +80,12 @@ class SpectralComponentConfig:
     include_elg_narrow_lines: bool = False
     include_high_ionization_lines: bool = False
     line_coverage_rest: tuple[float, float] | None = None
+    # Rest-frame (min, max) coverage of the data, possibly traced; when set, tied
+    # lines outside it get zero amplitude (the table itself comes from line_coverage_rest).
+    line_mask_coverage_rest: Any | None = None
+    # (init, min, max) amplitude per tied flux group, possibly traced, replacing the
+    # table's values (fixed tables shared by a batch; see AGNConfig.line_activation_rest).
+    line_amp_groups: Any | None = None
     line_centers_rest: Sequence[float] | None = None
     line_names: Sequence[str] | None = None
     broad_line_names: Sequence[str] = ()
@@ -350,6 +358,10 @@ def _instrumental_sigma_pixels(instrumental_sigma_ln, wave_obs):
     """
     if instrumental_sigma_ln is None:
         return None
+    if isinstance(instrumental_sigma_ln, jax.core.Tracer):
+        # Per-object resolution in a batched fit: the caller decided it is present.
+        sigma = jnp.broadcast_to(jnp.asarray(instrumental_sigma_ln, dtype=jnp.float64), jnp.shape(wave_obs))
+        return jnp.where(jnp.isfinite(sigma) & (sigma > 0.0), sigma, 0.0)
     sigma = np.broadcast_to(np.asarray(instrumental_sigma_ln, dtype=float), np.shape(wave_obs))
     sigma = np.where(np.isfinite(sigma) & (sigma > 0.0), sigma, 0.0)
     return sigma if np.any(sigma > 0.0) else None
@@ -386,14 +398,14 @@ def _split_instrument_broadened_gauss_lnlam(lnwave, amps, mus, sigs, broad_mask,
     return total, broad, total - broad
 
 
-def _add_in_quadrature(width, instrumental_width: float):
-    """Combine an intrinsic and a static instrumental width; exact when the latter is zero."""
-    if instrumental_width == 0.0:
+def _add_in_quadrature(width, instrumental_width):
+    """Combine an intrinsic and an instrumental width; exact when a static latter is zero."""
+    if not isinstance(instrumental_width, jax.core.Tracer) and instrumental_width == 0.0:
         return width
     return jnp.sqrt(jnp.square(width) + instrumental_width**2)
 
 
-def _broaden_per_instrument(evaluate, sigma_inst_ln, like):
+def _broaden_per_instrument(evaluate, sigma_inst_ln, like, instrument_index=None):
     """Evaluate a broadened template once per distinct instrumental sigma and merge.
 
     Parameters
@@ -405,10 +417,22 @@ def _broaden_per_instrument(evaluate, sigma_inst_ln, like):
         Static per-pixel instrumental sigma, or None.
     like : object
         Array whose shape the result takes.
+    instrument_index : array_like of int, optional
+        Static spectrum index of each pixel. Required when ``sigma_inst_ln`` is
+        traced (per-object resolution in a batched fit): the template is then
+        evaluated once per spectrum instead of once per distinct value.
     """
     if sigma_inst_ln is None:
         return evaluate(0.0)
     model = jnp.zeros_like(like)
+    if isinstance(sigma_inst_ln, jax.core.Tracer):
+        if instrument_index is None:
+            raise ValueError("A traced instrumental sigma needs the per-pixel instrument_index.")
+        index = np.asarray(instrument_index)
+        for value in np.unique(index):
+            pixels = index == value
+            model = jnp.where(jnp.asarray(pixels), evaluate(sigma_inst_ln[int(np.flatnonzero(pixels)[0])]), model)
+        return model
     for value in np.unique(sigma_inst_ln):
         model = jnp.where(jnp.asarray(sigma_inst_ln == value), evaluate(float(value)), model)
     return model
@@ -437,6 +461,11 @@ def _evaluate_tied_line_components(
     tied_line_meta = build_joint_tied_line_meta(cfg)
     if tied_line_meta is None:
         return jnp.zeros_like(wave_rest), jnp.zeros_like(wave_rest), jnp.zeros_like(wave_rest), {}
+    if cfg.line_amp_groups is not None:
+        amp_groups = jnp.asarray(cfg.line_amp_groups, dtype=jnp.float64)
+        tied_line_meta = dict(tied_line_meta)
+        for row, key in enumerate(("amp_init_group", "amp_min_group", "amp_max_group")):
+            tied_line_meta[key] = tied_line_meta[f"{key}_jax"] = amp_groups[row]
 
     dmu_group, sig_group, amp_group = _sample_tied_line_groups(
         tied_line_meta,
@@ -457,6 +486,8 @@ def _evaluate_tied_line_components(
         jnp.asarray(feature_amplitude_scale, dtype=jnp.float64),
         1.0e-12,
     )
+    if cfg.line_mask_coverage_rest is not None:
+        amps = amps * tied_line_coverage_mask(tied_line_meta, cfg.line_mask_coverage_rest)
     mus = _line_meta_array(tied_line_meta, "ln_lambda0") + dmu
 
     broad_mask = jnp.asarray(_line_meta_broad_mask(tied_line_meta), dtype=jnp.float64)
@@ -726,6 +757,8 @@ def evaluate_joint_spectral_components(
     feature_amplitude_scale=1.0,
     instrumental_sigma_ln=None,
     bal_continuum_mjy=None,
+    instrument_index=None,
+    pixel_padding=None,
 ):
     """Evaluate shared spectral components around an external continuum.
 
@@ -752,6 +785,12 @@ def evaluate_joint_spectral_components(
     bal_continuum_mjy
         Compact AGN continuum subject to BAL absorption. If omitted, the full
         supplied continuum is used for backward compatibility.
+    instrument_index
+        Optional static spectrum index of each pixel; needed when
+        ``instrumental_sigma_ln`` is traced.
+    pixel_padding
+        Optional boolean array marking padding pixels appended to give spectra a
+        common length (batched fits); they are left out of the tilt pivot.
     feii_template_wave_rest, feii_template_flux
         Rest-frame Fe II template sampled as an f_lambda-shaped relative
         spectrum. The evaluated Fe II component is converted to f_nu shape
@@ -781,7 +820,8 @@ def evaluate_joint_spectral_components(
     calibration = jnp.ones_like(wave_obs)
     if cfg.multiplicative_tilt:
         tilt = numpyro.sample(f"{site_prefix}_continuum_tilt", dist.Normal(0.0, 0.1))
-        pivot = jnp.maximum(jnp.nanmedian(wave_obs), 1.0)
+        pivot_wave = wave_obs if pixel_padding is None else jnp.where(jnp.asarray(pixel_padding), jnp.nan, wave_obs)
+        pivot = jnp.maximum(jnp.nanmedian(pivot_wave), 1.0)
         calibration = _positive_multiplicative_calibration(tilt * jnp.log(wave_obs / pivot))
 
     continuum_model = calibration * continuum_mjy
@@ -841,6 +881,7 @@ def evaluate_joint_spectral_components(
             ),
             sigma_inst_ln,
             wave_rest,
+            instrument_index,
         )
         feii_model = _flambda_shape_to_fnu_mjy_shape(
             wave_rest,
@@ -875,6 +916,7 @@ def evaluate_joint_spectral_components(
             ),
             sigma_inst_ln,
             wave_rest,
+            instrument_index,
         )
         balmer_model = _flambda_shape_to_fnu_mjy_shape(
             wave_rest,
