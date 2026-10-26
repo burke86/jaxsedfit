@@ -1,0 +1,9 @@
+{
+  "_comment": "Set from the first CI run on the 1,600-object sample (commit cc16499): per bin, measured outlier fraction + 0.05 and RMS x 1.15. Update in the same PR as an intended change to stellar-mass recovery.",
+  "bins": {
+    "0": {"max_outlier_fraction": 0.078, "max_rms": 0.220},
+    "1": {"max_outlier_fraction": 0.122, "max_rms": 0.325},
+    "2": {"max_outlier_fraction": 0.140, "max_rms": 0.357},
+    "3": {"max_outlier_fraction": 0.232, "max_rms": 0.505}
+  }
+}

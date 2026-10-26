@@ -11,6 +11,7 @@ Primary Interface
 - :class:`jaxsedfit.JAXSEDFit`
 - :class:`jaxsedfit.FitConfig`
 - :class:`jaxsedfit.FitResult`
+- :func:`jaxsedfit.fit_batch`
 - :func:`jaxsedfit.load_from_samples`
 
 API Sections

@@ -30,6 +30,7 @@ from numpyro.infer.autoguide import AutoDelta
 from numpyro.infer.reparam import Reparam
 from numpyro.diagnostics import print_summary as print_diagnostics_summary
 
+from .approximate import gaussian_vi, laplace_draws, latent_sites, site_transforms
 from .config import FitConfig, fit_config_from_mapping, serialize_config
 from .inference import (
     nuts_metric_diagnostics,
@@ -486,6 +487,11 @@ class JAXSEDFit:
         state.ns_result = value
         if value is not None:
             state.method = "ns"
+
+    @property
+    def approx_result(self) -> dict[str, Any] | None:
+        """Diagnostics of the latest Laplace or SVI fit (None for other methods)."""
+        return self._ensure_fit_state().approx_result
 
     @property
     def samples(self) -> dict[str, Any] | None:
@@ -1100,7 +1106,17 @@ class JAXSEDFit:
         output = self.config.output
         method = str(inference.method).lower()
         output_dir = Path(output.output_dir)
-        if method == "optax":
+        if method in ("laplace", "svi"):
+            approx_kwargs: dict[str, Any] = {
+                "progress_bar": progress_bar,
+                "steps": inference.map_steps,
+                "learning_rate": inference.learning_rate,
+                "staged": inference.staged_map,
+            }
+            if inference.staged_steps is not None:
+                approx_kwargs["staged_steps"] = inference.staged_steps
+            fit_output = self.fit_laplace(**approx_kwargs) if method == "laplace" else self.fit_svi(**approx_kwargs)
+        elif method in ("optax", "map"):
             map_kwargs: dict[str, Any] = {
                 "progress_bar": progress_bar,
                 "steps": inference.map_steps,
@@ -1127,7 +1143,7 @@ class JAXSEDFit:
             fit_output = self.fit_nuts(
                 **nuts_kwargs,
             )
-        elif method == "optax+nuts":
+        elif method in ("optax+nuts", "map+nuts"):
             map_kwargs = {
                 "progress_bar": progress_bar,
                 "steps": inference.map_steps,
@@ -1176,7 +1192,10 @@ class JAXSEDFit:
                 ns_kwargs["efficiency_threshold"] = inference.ns_efficiency_threshold
             fit_output = self.fit_ns(**ns_kwargs)
         else:
-            raise ValueError("method must be one of: 'optax+nuts', 'optax', 'nuts', 'ns'")
+            raise ValueError(
+                "method must be one of: 'map' (or 'optax'), 'laplace', 'svi', 'nuts', "
+                "'map+nuts' (or 'optax+nuts'), 'ns'"
+            )
 
         saved_result_path = None
         saved_fig_path = None
@@ -1423,6 +1442,146 @@ class JAXSEDFit:
         setattr(self, f"{attr_prefix}_predictive", predictive)
         setattr(self, f"{attr_prefix}_figure", fig)
         return fig
+
+    def _map_for_gaussian_approx(self, *, steps, learning_rate, staged, staged_steps, progress_bar):
+        """Run the staged MAP and return it with the model and its site transforms."""
+        self.fit_map(
+            steps=steps,
+            learning_rate=learning_rate,
+            staged=staged,
+            staged_steps=staged_steps,
+            progress_bar=progress_bar,
+        )
+        map_result = self.map_result
+        model = self._model
+        return map_result, model, site_transforms(latent_sites(model))
+
+    def fit_laplace(
+        self,
+        num_samples: int | None = None,
+        steps: int | None = None,
+        learning_rate: float | None = None,
+        staged: bool | None = None,
+        staged_steps: int | None = None,
+        progress_bar: bool = True,
+    ):
+        """Run the MAP, then draw from the Laplace approximation at the MAP.
+
+        The posterior is approximated by a Gaussian in NumPyro's unconstrained
+        parameter space, centred on the MAP with the inverse Hessian of the negative
+        log posterior as covariance. This is fast (one Hessian after the MAP) and
+        accurate for well-constrained, near-Gaussian posteriors; it is not reliable
+        for multimodal posteriors or parameters pushed against a prior bound.
+
+        Parameters
+        ----------
+        num_samples : int, optional
+            Number of draws; defaults to ``config.inference.num_samples``.
+        steps, learning_rate, staged, staged_steps : optional
+            MAP settings, as in :meth:`fit_map`.
+        progress_bar : bool, optional
+            If True, show the MAP progress bar.
+
+        Returns
+        -------
+        FitResult
+            Result with ``num_samples`` posterior draws of every latent site.
+            ``fitter.approx_result["hessian_min_eigenvalue"] <= 0`` means the Hessian
+            was not positive definite and flat directions were regularized.
+        """
+        num_samples = int(self.config.inference.num_samples if num_samples is None else num_samples)
+        map_result, model, transforms = self._map_for_gaussian_approx(
+            steps=steps, learning_rate=learning_rate, staged=staged, staged_steps=staged_steps, progress_bar=progress_bar
+        )
+        key = jax.random.PRNGKey(self.config.inference.seed + 2)
+        draws, min_eig = jax.jit(
+            lambda k: laplace_draws(model, (), map_result["median"], transforms, num_samples, k)
+        )(key)
+        self._fit_state = _FitState(map_result=map_result, method="laplace")
+        self._fit_state.approx_result = {"method": "laplace", "hessian_min_eigenvalue": float(min_eig)}
+        self.samples = {k: np.asarray(v) for k, v in draws.items()}
+        self.predictive = None
+        return self._make_result(method="laplace")
+
+    def fit_svi(
+        self,
+        num_samples: int | None = None,
+        steps: int | None = None,
+        learning_rate: float | None = None,
+        staged: bool | None = None,
+        staged_steps: int | None = None,
+        svi_steps: int | None = None,
+        svi_learning_rate: float | None = None,
+        num_particles: int | None = None,
+        full_rank: bool | None = None,
+        progress_bar: bool = True,
+    ):
+        """Run the MAP, then fit a Gaussian variational posterior started at the MAP.
+
+        Stochastic variational inference maximizes the evidence lower bound over
+        Gaussians in NumPyro's unconstrained parameter space (full covariance by
+        default, like ``AutoMultivariateNormal``). It costs more than
+        :meth:`fit_laplace` but uses the posterior over a region instead of its
+        curvature at one point, so it copes better with skewed or curved posteriors.
+
+        Parameters
+        ----------
+        num_samples : int, optional
+            Number of draws; defaults to ``config.inference.num_samples``.
+        steps, learning_rate, staged, staged_steps : optional
+            MAP settings, as in :meth:`fit_map`.
+        svi_steps : int, optional
+            Variational optimization steps; defaults to ``config.inference.svi_steps``.
+        svi_learning_rate : float, optional
+            Adam learning rate; defaults to ``config.inference.svi_learning_rate``,
+            or ``learning_rate`` when that is None.
+        num_particles : int, optional
+            Monte Carlo draws per ELBO evaluation; defaults to
+            ``config.inference.svi_num_particles``.
+        full_rank : bool, optional
+            Full (True) or diagonal (False) covariance; defaults to
+            ``config.inference.svi_full_rank``.
+        progress_bar : bool, optional
+            If True, show the MAP progress bar.
+
+        Returns
+        -------
+        FitResult
+            Result with ``num_samples`` posterior draws of every latent site.
+            ``fitter.approx_result["losses"]`` holds the negative ELBO per step.
+        """
+        inference = self.config.inference
+        num_samples = int(inference.num_samples if num_samples is None else num_samples)
+        svi_steps = int(inference.svi_steps if svi_steps is None else svi_steps)
+        if svi_learning_rate is None:
+            svi_learning_rate = inference.svi_learning_rate
+        if svi_learning_rate is None:
+            svi_learning_rate = inference.learning_rate if learning_rate is None else learning_rate
+        num_particles = int(inference.svi_num_particles if num_particles is None else num_particles)
+        full_rank = bool(inference.svi_full_rank if full_rank is None else full_rank)
+        map_result, model, transforms = self._map_for_gaussian_approx(
+            steps=steps, learning_rate=learning_rate, staged=staged, staged_steps=staged_steps, progress_bar=progress_bar
+        )
+        key = jax.random.PRNGKey(inference.seed + 3)
+        draws, losses = jax.jit(
+            lambda k: gaussian_vi(
+                model,
+                (),
+                map_result["median"],
+                transforms,
+                steps=svi_steps,
+                learning_rate=float(svi_learning_rate),
+                num_particles=num_particles,
+                full_rank=full_rank,
+                num_samples=num_samples,
+                rng_key=k,
+            )
+        )(key)
+        self._fit_state = _FitState(map_result=map_result, method="svi")
+        self._fit_state.approx_result = {"method": "svi", "losses": np.asarray(losses), "full_rank": full_rank}
+        self.samples = {k: np.asarray(v) for k, v in draws.items()}
+        self.predictive = None
+        return self._make_result(method="svi")
 
     def fit_nuts(
         self,

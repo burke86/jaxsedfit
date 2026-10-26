@@ -59,7 +59,7 @@ be supplied explicitly through :class:`jaxsedfit.FilterSet`.
 
 ``dsps_ssp_fn`` must point to a valid DSPS SSP HDF5 file. A missing SSP file
 is the most common setup failure. For quick smoke tests, use
-``cfg.inference.method = "optax"`` to run MAP optimization without posterior
+``cfg.inference.method = "map"`` to run MAP optimization without posterior
 sampling.
 
 Photometry inputs
@@ -411,7 +411,7 @@ Useful options:
    present.
 
 If NUTS repeatedly reaches maximum tree depth, first verify the MAP solution
-with an ``optax`` fit and inspect the printed NumPyro diagnostics. The default
+with a ``"map"`` fit and inspect the printed NumPyro diagnostics. The default
 ``dense_mass="blocks"`` learns covariance only within related physical groups.
 An exact sampler-only normalization coordinate improves conditioning without
 changing the posterior. Fixing
@@ -428,19 +428,29 @@ predictions, or physical posterior names.
 Inference recipes
 -----------------
 
+:doc:`inference` describes each method and when to use it, and :doc:`batch`
+covers fitting a whole catalog at once.
+
 Fast MAP-only smoke test:
 
 .. code-block:: python
 
-   cfg.inference.method = "optax"
+   cfg.inference.method = "map"
    cfg.inference.map_steps = 600
    cfg.inference.learning_rate = 5.0e-3
+
+Fast approximate uncertainties (Laplace, or variational with ``"svi"``):
+
+.. code-block:: python
+
+   cfg.inference.method = "laplace"
+   cfg.inference.num_samples = 400
 
 Standard posterior run:
 
 .. code-block:: python
 
-   cfg.inference.method = "optax+nuts"
+   cfg.inference.method = "map+nuts"
    cfg.inference.use_map_init = True
    cfg.inference.num_warmup = 200
    cfg.inference.num_samples = 200

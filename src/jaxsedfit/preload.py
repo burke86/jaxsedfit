@@ -335,6 +335,19 @@ _FIXED_LOCAL_NEBULAR_LINE_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarr
 _FILTER_MAX_OUTSIDE_FRACTION = 0.01
 
 
+def clear_per_object_caches() -> None:
+    """Drop cached arrays that depend on an object's redshift.
+
+    These caches speed up refitting the same object, but they gain an entry (tens of
+    MB) for every distinct redshift, so long runs over many objects should clear them
+    periodically; :func:`jaxsedfit.fit_batch` does so after each chunk. Model contexts
+    that were already built keep their own references and are unaffected.
+    """
+    _REDSHIFT_PROJECTION_CACHE.clear()
+    _FIXED_LOCAL_LINE_PROJECTION_CACHE.clear()
+    _FIXED_LOCAL_NEBULAR_LINE_PROJECTION_CACHE.clear()
+
+
 def _array_content_key(values: Any) -> tuple[str, str] | None:
     """Return a content hash for cache keys; ``id()`` is unsafe because ids are reused.
 
