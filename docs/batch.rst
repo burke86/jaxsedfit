@@ -57,7 +57,9 @@ Objects are grouped automatically. Two objects share a compiled program when the
 configurations agree on everything except per-object data:
 
 * the object id, redshift and sky position (``Observation``);
-* the fluxes, errors and upper-limit flags (``PhotometryData``).
+* the fluxes, errors and upper-limit flags (``PhotometryData``);
+* the spectral pixels (wavelengths, fluxes, errors, mask) and resolving power of
+  each spectrum (``SpectroscopyData``).
 
 Everything else (filters, model options, priors and inference settings) defines the
 group. A batch can therefore mix filter sets or priors, but each distinct
@@ -65,10 +67,42 @@ combination compiles its own program, so batching only pays off when many object
 share one. The redshift can be fixed per object or free (``redshift_mode``); objects
 with different ``redshift_err`` fall into different groups.
 
-Only photometric fits can be batched. With spectroscopy, the model structure depends
-on each spectrum's wavelength coverage (which lines and features are fitted), so
-objects cannot share one program. ``fit_batch`` raises ``NotImplementedError`` for
-configs with spectroscopy.
+Spectra
+-------
+
+Joint (photometry plus spectra) and spectrum-only fits are batched too. Two things
+make the spectral model differ between objects, and ``fit_batch`` removes both:
+
+* **Pixel counts.** Every spectrum in a group is padded to the group's longest with
+  masked pixels that continue its log-wavelength grid. Padding leaves the model on
+  the real pixels unchanged, apart from the Balmer-continuum convolution grid, which
+  follows the array length (a change of about 1e-8 in the log density).
+* **The tied-line table.** It normally contains the lines a spectrum covers, so it
+  changes with redshift. Objects are instead split into redshift windows no wider
+  than ``redshift_window`` in ln(1 + z) (default 0.25). Each window shares one table
+  spanning its members' coverage (``AGNConfig.line_activation_rest``), and lines
+  outside an object's own coverage get zero amplitude, so only their priors
+  constrain them. Wider windows mean fewer compiled programs but more masked lines
+  per object; ``redshift_window=None`` gives each configuration group one table.
+
+Different resolving powers are per-object data and share one program. Fitted
+redshifts cannot be batched for spectroscopic objects.
+
+A fixed table can change a fit slightly compared with :class:`jaxsedfit.JAXSEDFit`:
+a tied group that straddles the coverage edge keeps all its members, with the
+uncovered ones masked. ``batch.configs`` carries each object's table, so
+``JAXSEDFit(batch.configs[i])``, and ``batch[i]``, fit and predict the same model.
+
+Other models
+------------
+
+:class:`jaxsedfit.batched.BatchedInputs` stacks per-object keyword inputs of any
+NumPyro model with a common structure, and
+:func:`jaxsedfit.batched.make_batched_fitter` fits them with the same vmapped
+MAP, Laplace or SVI program. jaxqsofit's ``fit_batch`` uses these with
+:func:`jaxsedfit.spectral_model.qso_fsps_joint_model`, whose ``pixel_mask`` argument
+and ``tied_line_meta["line_mask"]`` entry support padded spectra and shared line
+tables.
 
 Results
 -------
@@ -92,9 +126,9 @@ Results
   plots and ``save``. It rebuilds that object's model context, which takes about a
   second, because the batch does not keep contexts in memory.
 
-Each fitted object matches the single-object fit with the same settings: the batched
-model evaluates the same log density as :class:`jaxsedfit.JAXSEDFit`, to numerical
-precision. Random starting points come from the seed and the object's position in
+Each fitted object matches the single-object fit of its returned config with the
+same settings: the batched model evaluates the same log density as
+:class:`jaxsedfit.JAXSEDFit`, to numerical precision. Random starting points come from the seed and the object's position in
 ``configs``, so results do not depend on ``chunk_size``.
 
 Performance and memory

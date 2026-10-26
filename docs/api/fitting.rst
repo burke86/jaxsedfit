@@ -25,6 +25,11 @@ See :doc:`../batch`.
 .. autoclass:: BatchFitResult
    :members: object_ids, summary_table
 
+.. autoclass:: jaxsedfit.batched.BatchedInputs
+   :members: stack, inputs, model
+
+.. autofunction:: jaxsedfit.batched.make_batched_fitter
+
 Gaussian approximations
 -----------------------
 
