@@ -16,8 +16,11 @@ SVI steps use the same functions as the single-object fits
 from __future__ import annotations
 
 import copy
+import ctypes
 import dataclasses
+import gc
 import json
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Sequence
 
@@ -192,6 +195,22 @@ class BatchedContext:
 
 
 _BATCH_METHODS = {"map": "map", "optax": "map", "laplace": "laplace", "svi": "svi"}
+
+
+def _release_memory() -> None:
+    """Free a fitted chunk's model contexts and hand the memory back to the OS.
+
+    Contexts contain reference cycles, so they are only freed by the cyclic garbage
+    collector, which runs based on object counts rather than bytes. On Linux, glibc
+    also keeps freed memory unless asked to trim it; without this, memory grew by
+    about a chunk's worth of contexts per chunk on CI runners.
+    """
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (OSError, AttributeError):
+            pass
 
 
 def make_batched_fitter(
@@ -529,6 +548,8 @@ def fit_batch(
                         if key in out:
                             diag[key] = float(out[key][j])
                     diagnostics[i] = diag
+                del out, arrays, redshift, contexts
+                _release_memory()
                 if progress is not None:
                     progress.update(1)
     if progress is not None:
