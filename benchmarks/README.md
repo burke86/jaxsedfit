@@ -58,6 +58,17 @@ python benchmarks/chimera_validation.py make-sample \
 
 `.github/workflows/chimera-validation.yml` runs this on pull requests that touch `src/` (and on manual dispatch). For pull requests from branches of this repository it pushes the plots to the `chimera-validation-plots` branch and creates or updates a PR comment with the metrics tables and the embedded plots.
 
+### Joint photometry + spectra
+
+`run --spectra` fits the objects that have a spectrum in `data/chimera_validation_spectra.fits` with their photometry and spectrum together (quasar emission lines and Fe II on; the spectrum scale is fixed because the composite spectra are scaled to the total photometry). It makes the same plots as the photometry-only run. `--compare-photometry` also fits the same objects with photometry only and adds a table comparing the two. The joint results are reported, not gated.
+
+```bash
+python benchmarks/chimera_validation.py run \
+  --output-dir /tmp/chimera-joint-validation --dsps-ssp-fn tempdata.h5 --spectra --compare-photometry --chunk 8
+```
+
+The workflow's `chimera-joint-validation` job runs this alongside the photometry-only job, pushes its plots to the `chimera-joint-validation-plots` branch and posts them in a second PR comment.
+
 ### Chimera spectra
 
 `data/chimera_validation_spectra.fits` (14 MB) holds composite spectra for the 241 objects in `chimera_validation_sample.csv` whose host has a flux-calibrated spectrum from DESI DR1 or LEGA-C. It is meant for spectral and joint photometry + spectra tests on the Chimeras. Rows are keyed by `id`, like the photometry sample. Each row holds the observed-frame wavelength [Å] and the total, error, host and weighted-quasar flux densities [mJy] as float32 arrays, at R = 1500 (header keyword `SPEC_RES`). About 30–40% of the pixels in LEGA-C hosts are masked (NaN flux, infinite error). The 241 are simply the sample objects that have a spectrum, so they are not balanced across luminosity bins and some share a host.
