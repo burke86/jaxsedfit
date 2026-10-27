@@ -22,6 +22,9 @@ from numpyro import handlers
 from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import log_density
 
+# Lower bound on the Hessian eigenvalues used by laplace_draws (unit width in unconstrained space).
+_MIN_EIGENVALUE = 1.0
+
 
 def latent_sites(model: Callable, model_args: Sequence[Any] = ()) -> dict[str, dict]:
     """Return the latent (unobserved, non-auxiliary) sample sites of ``model``."""
@@ -59,9 +62,12 @@ def laplace_draws(
     """Draw from the Laplace approximation at a MAP point.
 
     The Gaussian is centred on the MAP in unconstrained space with covariance equal
-    to the inverse Hessian of the unconstrained negative log posterior. Directions
-    with a non-positive Hessian eigenvalue (flat or non-convex) are regularized to a
-    very wide Gaussian rather than failing.
+    to the inverse Hessian of the unconstrained negative log posterior. Hessian
+    eigenvalues below one (flat or non-convex directions, or an unconverged MAP) are
+    raised to one, i.e. a unit-width Gaussian in the unconstrained coordinates, which
+    is roughly the prior scale. A much smaller floor would make the draws so wide
+    along those directions that every parameter with even a small component in
+    them is pushed to the edges of its support.
 
     Parameters
     ----------
@@ -83,14 +89,14 @@ def laplace_draws(
     draws : dict
         Constrained draws per site, with a leading ``num_samples`` axis.
     min_eigenvalue : jax.Array
-        Smallest Hessian eigenvalue; ``<= 0`` means the approximation was regularized.
+        Smallest Hessian eigenvalue; below one means the approximation was regularized.
     """
     u_map = {k: t.inv(jnp.asarray(map_values[k])) for k, t in transforms.items()}
     uflat, unravel = ravel_pytree(u_map)
     hess = jax.hessian(_unconstrained_potential(model, model_args, transforms, unravel))(uflat)
     eigval, eigvec = jnp.linalg.eigh(0.5 * (hess + hess.T))
     eps = jax.random.normal(rng_key, (num_samples, uflat.size))
-    flat_draws = uflat + (eps / jnp.sqrt(jnp.maximum(eigval, 1e-8))) @ eigvec.T
+    flat_draws = uflat + (eps / jnp.sqrt(jnp.maximum(eigval, _MIN_EIGENVALUE))) @ eigvec.T
     draws = jax.vmap(lambda d: {k: t(unravel(d)[k]) for k, t in transforms.items()})(flat_draws)
     return draws, eigval[0]
 

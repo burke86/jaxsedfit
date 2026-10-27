@@ -32,6 +32,24 @@ def test_laplace_is_exact_for_a_gaussian_posterior():
     assert np.isclose(np.std(draws["mu"]), np.sqrt(POST_VAR), rtol=0.02)
 
 
+def saddle_model():
+    # Negative curvature along a direction that is mostly x but mixes in the tightly
+    # constrained y: the Hessian of -log p at (0, 0) is [[1, 20], [20, 100]].
+    x = numpyro.sample("x", dist.Normal(0.0, 100.0))
+    y = numpyro.sample("y", dist.Normal(0.0, 100.0))
+    numpyro.factor("coupling", -0.5 * (x**2 + 100.0 * y**2 + 40.0 * x * y))
+
+
+def test_laplace_keeps_non_convex_directions_local():
+    transforms = site_transforms(latent_sites(saddle_model))
+    draws, min_eig = laplace_draws(saddle_model, (), {"x": 0.0, "y": 0.0}, transforms, 4000, jax.random.PRNGKey(4))
+    assert float(min_eig) < 0.0
+    # The non-convex direction gets unit width, so y (which has a ~4% share of it)
+    # stays near its well-constrained value instead of being thrown far away.
+    assert np.std(draws["x"]) < 2.0
+    assert np.std(draws["y"]) < 0.3
+
+
 def test_gaussian_vi_recovers_a_gaussian_posterior():
     transforms = site_transforms(latent_sites(conjugate_model))
     draws, losses = gaussian_vi(
