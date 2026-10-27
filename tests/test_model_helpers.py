@@ -2870,26 +2870,3 @@ def test_igm_matches_cigale_v2025_1_static_reference(redshift, expected):
     transmission = np.asarray(_build_fixed_igm_jax(cache, redshift), dtype=float)
 
     np.testing.assert_allclose(transmission, expected, rtol=2.0e-12, atol=1.0e-15)
-
-
-def test_spectral_continuum_term_splits_the_pixel_likelihood_exactly():
-    from jaxsedfit.model import spectroscopic_loglike
-
-    rng = np.random.default_rng(0)
-    n = 1003
-    model = 1.0 + 0.1 * np.sin(np.arange(n) / 50.0)
-    errors = np.full(n, 0.05)
-    # A coherent 3% continuum mismatch on top of the noise.
-    data = model + errors * rng.normal(size=n) + 0.03 * np.sin(np.arange(n) / 80.0)
-    mask = np.ones(n, dtype=bool)
-    mask[100:140] = False
-    for pixel_systematics in (0.0, 0.05):
-        base = float(spectroscopic_loglike(model, data, errors, mask, pixel_systematics, 1.0e8))
-        split = float(spectroscopic_loglike(
-            model, data, errors, mask, pixel_systematics, 1.0e8, continuum_bin_pixels=50, continuum_systematics_width=0.0
-        ))
-        regularized = float(spectroscopic_loglike(
-            model, data, errors, mask, pixel_systematics, 1.0e8, continuum_bin_pixels=50, continuum_systematics_width=0.05
-        ))
-        np.testing.assert_allclose(split, base, rtol=1e-8)
-        assert regularized > base

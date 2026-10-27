@@ -3080,8 +3080,6 @@ def spectroscopic_loglike(
     systematics_width,
     student_t_df,
     return_diagnostics=False,
-    continuum_bin_pixels=0,
-    continuum_systematics_width=0.0,
 ):
     """Evaluate the observed-frame spectral log-likelihood.
 
@@ -3102,18 +3100,6 @@ def spectroscopic_loglike(
     return_diagnostics : bool, optional
         If True, also return standardized-residual chi-square diagnostics
         using the same effective variance as the spectral likelihood.
-    continuum_bin_pixels : int, optional
-        If positive, split the residual into its inverse-variance-weighted mean in
-        consecutive bins of this many pixels (the continuum mismatch) and the
-        remainder (lines and absorption features). The remainder keeps the
-        per-pixel Student-t likelihood; each bin mean gets a Gaussian likelihood
-        with ``continuum_systematics_width`` times the binned model added in
-        quadrature. A per-pixel systematic floor averages down over many pixels,
-        so without this a percent-level template mismatch in the continuum
-        outweighs the photometry. With a zero continuum width and a Gaussian
-        pixel likelihood the split leaves the chi-square unchanged.
-    continuum_systematics_width : float or jax.Array, optional
-        Fractional systematic error of the binned continuum.
     """
     pred_fluxes = jnp.asarray(pred_fluxes, dtype=jnp.float64)
     obs_fluxes = jnp.asarray(obs_fluxes, dtype=jnp.float64)
@@ -3131,31 +3117,10 @@ def spectroscopic_loglike(
     variance = obs_errors**2 + (jnp.maximum(systematics_width, 0.0) * pred_fluxes) ** 2
     variance_valid = jnp.isfinite(variance) & (variance > 0.0)
     scale = jnp.sqrt(jnp.clip(variance, 1e-30, 1.0e60))
+    student = dist.StudentT(df=student_t_df, loc=pred_fluxes, scale=scale)
     valid = mask & input_valid & variance_valid & jnp.isfinite(scale)
     penalty = -1.0e6 * jnp.sum((mask & ~valid).astype(jnp.float64))
-    loc = pred_fluxes
-    continuum_loglike = jnp.asarray(0.0, dtype=jnp.float64)
-    bin_pixels = int(continuum_bin_pixels)
-    if bin_pixels > 0:
-        n_pix = pred_fluxes.shape[0]
-        n_pad = -n_pix % bin_pixels
-        pad = lambda x, value: jnp.pad(x, (0, n_pad), constant_values=value).reshape(-1, bin_pixels)
-        weight = pad(jnp.where(valid, 1.0 / jnp.clip(variance, 1e-30, 1.0e60), 0.0), 0.0)
-        weight_sum = weight.sum(axis=1)
-        filled = weight_sum > 0.0
-        safe_sum = jnp.where(filled, weight_sum, 1.0)
-        bin_residual = (weight * pad(obs_fluxes - pred_fluxes, 0.0)).sum(axis=1) / safe_sum
-        bin_model = (weight * pad(pred_fluxes, 0.0)).sum(axis=1) / safe_sum
-        # Bin-mean variance relative to its pure-noise value 1/sum(w); the pixels below
-        # already carry the noise normalization, so only the inflation is added here.
-        inflation = 1.0 + safe_sum * (jnp.maximum(continuum_systematics_width, 0.0) * bin_model) ** 2
-        continuum_loglike = jnp.sum(
-            jnp.where(filled, -0.5 * (bin_residual**2 * safe_sum / inflation + jnp.log(inflation)), 0.0)
-        )
-        # Score the pixels against the model plus the binned continuum mismatch.
-        loc = pred_fluxes + jnp.repeat(bin_residual, bin_pixels)[:n_pix]
-    student = dist.StudentT(df=student_t_df, loc=loc, scale=scale)
-    loglike = jnp.sum(jnp.where(valid, student.log_prob(obs_fluxes), 0.0)) + continuum_loglike + penalty
+    loglike = jnp.sum(jnp.where(valid, student.log_prob(obs_fluxes), 0.0)) + penalty
     if not return_diagnostics:
         return loglike
 
@@ -5112,8 +5077,6 @@ def evaluate_photometric_state(
             cfg.likelihood.spectrum_systematics_width,
             cfg.likelihood.spectrum_student_t_df,
             return_diagnostics=True,
-            continuum_bin_pixels=cfg.likelihood.spectrum_continuum_bin_pixels,
-            continuum_systematics_width=cfg.likelihood.spectrum_continuum_systematics_width,
         )
         spec_chi2 = spec_chi2_diagnostics["chi2"]
         spec_n_eff = spec_chi2_diagnostics["n_eff"]
