@@ -441,6 +441,12 @@ class LikelihoodConfig:
     igm_redshift_table_n_grid: int = 2048
     spectrum_student_t_df: float = 5.0
     spectrum_systematics_width: float = 0.05
+    # Correlated continuum term (see model.spectroscopic_loglike): bin the spectral
+    # residual in groups of this many pixels and give each bin mean this fractional
+    # systematic floor, so template mismatch in the continuum does not outweigh the
+    # photometry. 0 disables it.
+    spectrum_continuum_bin_pixels: int = 0
+    spectrum_continuum_systematics_width: float = 0.05
     fit_spectrum_scale: bool | None = None
     spectrum_scale_prior_sigma_dex: float = 0.1
 

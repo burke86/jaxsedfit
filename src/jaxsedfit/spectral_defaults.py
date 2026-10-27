@@ -14,6 +14,11 @@ MINSCA_DEFAULT = 0.0
 MAXSCA_DEFAULT = 1e10
 AMPLITUDE_FLOOR = 1e-32
 ROBUST_FLUX_HIGH_PERCENTILE = 99.5
+# Narrow-line amplitude caps scale with the spectrum's peak flux, not the 99.5th
+# percentile: a strong narrow line peaks in only a few pixels, below that percentile.
+# The fitted amplitude is the line's intrinsic peak, which the instrumental resolution
+# dilutes, hence the headroom.
+NARROW_LINE_PEAK_HEADROOM = 3.0
 
 class LineWidthPrior(NamedTuple):
     """Initial, minimum, and maximum Gaussian widths in ln-wavelength."""
@@ -372,10 +377,19 @@ DEFAULT_HIGH_IONIZATION_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
 ]
 
 
+def _robust_peak_flux(flux: np.ndarray) -> float:
+    """Peak of the 3-pixel running median of ``|flux|``: a resolved line, not a hot pixel."""
+    a = np.abs(np.asarray(flux, dtype=float))
+    if a.size < 3:
+        return float(np.max(a))
+    return float(np.max(np.median(np.stack([a[:-2], a[1:-1], a[2:]]), axis=0)))
+
+
 def _apply_robust_line_scale_priors(
     line_rows: List[Dict[str, Any]],
     fscale: float,
     fmax: float,
+    fpeak: float | None = None,
 ) -> List[Dict[str, Any]]:
     """Apply flux-aware robust bounds/initialization to line-scale priors.
 
@@ -387,13 +401,17 @@ def _apply_robust_line_scale_priors(
     fscale : float
         Typical flux level (median absolute finite flux).
     fmax : float
-        High flux level (99.5th-percentile absolute flux) bounding peak amplitudes.
+        High flux level (99.5th-percentile absolute flux) bounding broad-line amplitudes.
+    fpeak : float, optional
+        Peak absolute flux bounding narrow-line amplitudes; defaults to ``fmax``.
     """
     if len(line_rows) == 0:
         return line_rows
 
     # Keep dynamic range positive even for nearly flat/noisy spectra.
     delta = max(float(fmax - fscale), 0.1 * float(fscale), AMPLITUDE_FLOOR)
+    fpeak = fmax if fpeak is None else max(float(fpeak), float(fmax))
+    narrow_delta = max(float(fpeak - fscale), delta)
 
     for row in line_rows:
         linename = str(row.get("linename", "")).lower()
@@ -407,7 +425,7 @@ def _apply_robust_line_scale_priors(
         if is_broad:
             max_cap = 1.0 * delta
         else:
-            max_cap = 1.2 * delta
+            max_cap = NARROW_LINE_PEAK_HEADROOM * narrow_delta
         maxsca = min(maxsca, max_cap)
 
         # Keep scales strictly positive and ordered.  Default qsopar rows use
@@ -501,11 +519,12 @@ def append_optional_line_rows(
         if np.any(finite)
         else fscale
     )
+    fpeak = _robust_peak_flux(f[finite]) if np.any(finite) else fmax
     if not np.isfinite(fscale) or fscale <= 0:
         fscale = 1.0
     if not np.isfinite(fmax) or fmax <= 0:
         fmax = fscale
-    extras = _apply_robust_line_scale_priors(extras, fscale=fscale, fmax=fmax)
+    extras = _apply_robust_line_scale_priors(extras, fscale=fscale, fmax=fmax, fpeak=fpeak)
     line_config["table"] = _append_unique_by_wavelength(
         list(table), extras, atol_angstrom=1.0
     )
@@ -669,6 +688,7 @@ def _build_default_prior_config(
         if np.any(finite)
         else fscale
     )
+    fpeak = _robust_peak_flux(f[finite]) if np.any(finite) else fmax
     if not np.isfinite(fscale) or fscale <= 0:
         fscale = 1.0
     if not np.isfinite(fmax) or fmax <= 0:
@@ -753,6 +773,6 @@ def _build_default_prior_config(
                         copy.deepcopy(DEFAULT_HIGH_IONIZATION_LINE_PRIOR_ROWS),
                         atol_angstrom=1.0,
                     )
-                line_cfg["table"] = _apply_robust_line_scale_priors(table, fscale=fscale, fmax=fmax)
+                line_cfg["table"] = _apply_robust_line_scale_priors(table, fscale=fscale, fmax=fmax, fpeak=fpeak)
     cfg.update(lc)
     return PriorConfig._from_model_priors(cfg)

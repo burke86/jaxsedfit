@@ -597,3 +597,31 @@ def test_feii_template_arrays_can_be_traced_under_jit():
 
     assert np.asarray(result).shape == wave_obs.shape
     assert np.all(np.isfinite(np.asarray(result)))
+
+
+def test_narrow_line_amplitude_cap_reaches_the_spectrum_peak():
+    # A strong narrow line peaks in a few pixels, above the 99.5th flux percentile.
+    flux = np.ones(3000)
+    flux[1499:1504] = [8.0, 18.0, 20.0, 18.0, 8.0]
+    table = build_default_prior_config(flux).to_mapping()["line"]["table"]
+    rows = {row["linename"]: row for row in table}
+    assert rows["Ha_na"]["maxsca"] >= 17.0
+    assert rows["Ha_br"]["maxsca"] < 19.0
+
+
+def test_pooled_narrow_width_allows_the_loosest_member_minimum():
+    wave_obs = np.linspace(6450.0, 6800.0, 400)
+    model = substitute(
+        seed(evaluate_joint_spectral_components, jax.random.PRNGKey(3)),
+        data={"spectral_line_low_ion_log_fwhm_std": jnp.asarray(-50.0)},
+    )
+    tr = trace(model).get_trace(
+        wave_obs=wave_obs,
+        redshift=0.0,
+        continuum_mjy=np.ones_like(wave_obs),
+        config=SpectralComponentConfig(
+            use_lines=True, tied_lines=True, use_feii=False, use_balmer_continuum=False, line_flux_scale_mjy=1.0
+        ),
+    )
+    # Narrow H-alpha's relaxed floor (sigma 5e-4) no longer binds [N II] and [S II].
+    assert float(np.min(np.asarray(tr["spectral_line_sig_group"]["value"]))) < 3.0e-4
