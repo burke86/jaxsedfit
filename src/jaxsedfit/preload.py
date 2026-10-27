@@ -333,7 +333,10 @@ _SSP_DATA_CACHE: dict[str, SSPData] = {}
 _FILTER_RESPONSE_CACHE: dict[tuple[Any, ...], list[Any]] = {}
 _TEMPLATE_CACHE: dict[tuple[Any, ...], LoadedTemplates] = {}
 _DALE2014_CACHE: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+# Keyed by the rest-frame grid, which differs for every spectrum (about 35 MB per
+# entry), so only the most recently used grids are kept (dicts keep insertion order).
 _HOST_BASIS_CACHE: dict[tuple[Any, ...], HostBasis] = {}
+_HOST_BASIS_CACHE_SIZE = 8
 _REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray]] = {}
 _NEBULAR_TEMPLATE_CACHE: dict[str, NebularTemplatesJax] = {}
 _NEBULAR_REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray | None, np.ndarray]] = {}
@@ -1363,6 +1366,7 @@ def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData, ssp_imf: str = "
     )
     cached = _HOST_BASIS_CACHE.get(cache_key)
     if cached is not None:
+        _HOST_BASIS_CACHE[cache_key] = _HOST_BASIS_CACHE.pop(cache_key)  # most recent last
         return cached
     ssp_llambda = _lnu_lsun_per_hz_to_llambda_w_per_a_np(
         ssp_data.ssp_wave[None, None, :],
@@ -1390,6 +1394,8 @@ def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData, ssp_imf: str = "
         ly_lum_per_msun=ly_lum_per_msun,
     )
     _HOST_BASIS_CACHE[cache_key] = loaded
+    while len(_HOST_BASIS_CACHE) > _HOST_BASIS_CACHE_SIZE:
+        del _HOST_BASIS_CACHE[next(iter(_HOST_BASIS_CACHE))]
     return loaded
 
 
