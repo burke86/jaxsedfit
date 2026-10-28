@@ -24,6 +24,7 @@ from __future__ import annotations
 import copy
 import ctypes
 import dataclasses
+import functools
 import gc
 import json
 import sys
@@ -51,6 +52,45 @@ from .preload import (
 )
 
 _NUMERIC = (np.ndarray, jax.Array, float, np.floating)
+# XLA passes that dominate CPU compile time once the model sits inside a loop (the
+# MAP scan, the loop over draws). On the jaxqsofit spectral model they took most of
+# the compile, while switching them off left run time unchanged: compile of the
+# predictive 18 s -> 6 s, of the full MAP + Laplace program 44 s -> 33 s, and about
+# 1.5 GB less memory while compiling. Results agree to optimizer-path precision.
+BATCH_COMPILER_OPTIONS = {"xla_disable_hlo_passes": "constant_folding,simplify-while-loops"}
+
+
+def batch_compiler_options() -> dict[str, str] | None:
+    """XLA options for the batched programs: :data:`BATCH_COMPILER_OPTIONS` on CPU, else None."""
+    return dict(BATCH_COMPILER_OPTIONS) if jax.default_backend() == "cpu" else None
+
+
+def map_draws(fn: Callable, tree: Any, block: int) -> Any:
+    """Apply ``fn`` to every draw of ``tree`` (leaves with leading object and draw axes).
+
+    ``fn`` takes one draw for all objects (leading object axis) and returns a pytree
+    with a leading object axis. Draws are vmapped ``block`` at a time; when there
+    are more, the blocks run in a ``lax.map`` loop, which bounds memory but compiles
+    and runs more slowly than one vmap.
+    """
+    n_draws = jax.tree_util.tree_leaves(tree)[0].shape[1]
+    vmapped = jax.vmap(fn, in_axes=1, out_axes=1)
+    if block >= n_draws:
+        return vmapped(tree)
+    n_blocks = -(-n_draws // block)
+    pad = n_blocks * block - n_draws
+
+    def split(x):
+        x = jnp.concatenate([x, jnp.repeat(x[:, -1:], pad, axis=1)], axis=1) if pad else x
+        return jnp.moveaxis(x.reshape(x.shape[0], n_blocks, block, *x.shape[2:]), 1, 0)
+
+    out = jax.lax.map(vmapped, jax.tree_util.tree_map(split, tree))
+
+    def join(y):
+        y = jnp.moveaxis(y, 0, 1)
+        return y.reshape(y.shape[0], n_blocks * block, *y.shape[3:])[:, :n_draws]
+
+    return jax.tree_util.tree_map(join, out)
 # Zero-padded with a valid_mask whose widths depend on redshift; padding further is exact.
 _PADDED_FIELDS = {"packed_filters", "packed_filters_jax", "packed_filter_curves_jax"}
 _CONTINUUM_MODEL_KWARGS = dict(
@@ -249,6 +289,26 @@ class BatchedInputs:
             self.varying.append(li)
         self._varying_set = set(self.varying)
 
+    @classmethod
+    def from_stream(cls, model: Callable, inputs: Any, redshift_key: str = "z_qso") -> "BatchedInputs":
+        """Calibrate on every object of ``inputs`` (an iterable) without holding them all.
+
+        A layout calibrated on a few objects bakes leaves that happen to agree among
+        them into the compiled program, and a later chunk where they differ forces a
+        recompile. Streaming over all objects (for example a generator that builds
+        each object's inputs) stacks every leaf that varies anywhere, keeping only
+        the first object's inputs and one other at a time.
+        """
+        iterator = iter(inputs)
+        first = dict(next(iterator))
+        varying: set[int] = set()
+        for other in iterator:
+            varying.update(cls(model, [first, dict(other)], redshift_key).varying)
+        layout = cls(model, [first], redshift_key)
+        layout.varying = sorted(varying)
+        layout._varying_set = varying
+        return layout
+
     def stack(self, inputs: Sequence[dict[str, Any]]) -> tuple[list[jnp.ndarray], jnp.ndarray]:
         """Stack the object-dependent leaves of ``inputs``; see :meth:`BatchedContext.stack`."""
         per = [_leaves(dict(x)) for x in inputs]
@@ -282,6 +342,65 @@ class BatchedInputs:
 _BATCH_METHODS = {"map": "map", "optax": "map", "laplace": "laplace", "svi": "svi"}
 
 
+def make_batched_predictive(
+    layout: BatchedContext | BatchedInputs,
+    return_sites: Sequence[str],
+    *,
+    max_parallel: int = 256,
+    **model_kwargs,
+) -> Callable[..., dict[str, Any]]:
+    """Compiled posterior predictive for one layout: the batched ``numpyro.infer.Predictive``.
+
+    Parameters
+    ----------
+    layout : BatchedContext or BatchedInputs
+        Stacking layout of the fitted chunk.
+    return_sites : sequence of str
+        Sites to return; sites the model does not emit are skipped, as in ``Predictive``.
+    max_parallel : int
+        Object-draw evaluations vmapped at once. Draws beyond ``max_parallel //
+        n_objects`` per object run in a loop over blocks, which bounds memory.
+    **model_kwargs
+        Passed to ``layout.model`` (for example ``flux=None``).
+
+    Returns
+    -------
+    callable
+        ``predict(samples, arrays, redshift, keys)`` taking the batched fit's
+        ``samples`` (leading object and draw axes), the stacked arrays and one PRNG key
+        per object. It returns each site with leading object and draw axes. Spectra
+        stay padded; see :func:`trim_padding`.
+    """
+    model = layout.model(**model_kwargs)
+    return_sites = tuple(return_sites)
+
+    def one(draw, arrays, redshift, key):
+        tr = handlers.trace(handlers.seed(handlers.substitute(model, data=draw), key)).get_trace(arrays, redshift)
+        return {k: tr[k]["value"] for k in return_sites if k in tr}
+
+    objects = jax.vmap(one)
+
+    @functools.partial(jax.jit, compiler_options=batch_compiler_options())
+    def predict(samples, arrays, redshift, keys):
+        n_objects, n_draws = jax.tree_util.tree_leaves(samples)[0].shape[:2]
+        draw_keys = jax.vmap(lambda k: jax.random.split(k, n_draws))(keys)
+        return map_draws(
+            lambda t: objects(t[0], arrays, redshift, t[1]),
+            (samples, draw_keys),
+            max(1, int(max_parallel) // int(n_objects)),
+        )
+
+    return predict
+
+
+def trim_padding(values: Any, n_padded: int, n_real: int) -> Any:
+    """Drop masked padding pixels from one object's per-pixel output (pixel axis last)."""
+    values = np.asarray(values)
+    if n_real < n_padded and values.ndim and values.shape[-1] == n_padded:
+        return values[..., :n_real]
+    return values
+
+
 def _release_memory() -> None:
     """Free a fitted chunk's model contexts and hand the memory back to the OS.
 
@@ -312,6 +431,8 @@ def make_batched_fitter(
     svi_num_particles: int = 4,
     svi_full_rank: bool = True,
     derived_sites: Sequence[str] = (),
+    derived_draw_block: int = 1,
+    hessian: str = "exact",
     continuum_model_kwargs: dict[str, Any] | None = None,
 ) -> Callable[..., dict[str, Any]]:
     """Build a batched fitter for one :class:`BatchedContext` or :class:`BatchedInputs` layout.
@@ -320,8 +441,13 @@ def make_batched_fitter(
     defaults to ``steps // 3`` as in :meth:`jaxsedfit.JAXSEDFit.fit_map`.
     ``derived_sites`` names deterministic model sites (e.g. ``"log_sfr_fit"``) to
     evaluate at the MAP and at every draw; they are added to ``map`` and ``samples``.
-    ``continuum_model_kwargs`` are passed to ``bctx.model`` for the staged
-    continuum-only MAP; the default switches off the jaxsedfit line features.
+    ``derived_draw_block`` draws are evaluated at once for every object (see
+    :func:`map_draws`); the default of one keeps memory at one SED evaluation per
+    object. ``hessian`` selects the Laplace Hessian (see
+    :func:`jaxsedfit.approximate.laplace_draws`). ``continuum_model_kwargs`` are
+    passed to ``bctx.model`` for the staged continuum-only MAP; the default switches
+    off the jaxsedfit line features. On CPU the program is compiled with
+    :func:`batch_compiler_options`.
 
     Returns
     -------
@@ -402,13 +528,11 @@ def make_batched_fitter(
         derived_objects = jax.vmap(derived_one)
 
         def derived_draws(samples, arrays, redshift):
-            # Loop over draws and vmap over objects: vmapping over both would hold every
-            # draw's full SED evaluation in memory at once.
-            by_draw = {k: jnp.swapaxes(v, 0, 1) for k, v in samples.items()}
-            out = jax.lax.map(lambda s: derived_objects(s, arrays, redshift), by_draw)
-            return {k: jnp.swapaxes(v, 0, 1) for k, v in out.items()}
+            # Vmapping over every draw at once would hold every draw's full SED
+            # evaluation in memory, so draws go ``derived_draw_block`` at a time.
+            return map_draws(lambda s: derived_objects(s, arrays, redshift), samples, derived_draw_block)
 
-        @jax.jit
+        @functools.partial(jax.jit, compiler_options=batch_compiler_options())
         def program(keys, arrays, redshift, given):
             map_keys, post_keys = jax.vmap(lambda k: jax.random.split(k))(keys).transpose(1, 0, 2)
             init_values = {k: v for k, v in given.items() if k in transforms}
@@ -421,7 +545,7 @@ def make_batched_fitter(
                 out["samples"] = {k: v[:, None] for k, v in values.items()}
             elif method == "laplace":
                 draws, min_eig = jax.vmap(
-                    lambda v, a, z, k: laplace_draws(full, (a, z), v, transforms, num_samples, k)
+                    lambda v, a, z, k: laplace_draws(full, (a, z), v, transforms, num_samples, k, hessian=hessian)
                 )(values, arrays, redshift, post_keys)
                 out["samples"], out["hessian_min_eigenvalue"] = draws, min_eig
             else:
