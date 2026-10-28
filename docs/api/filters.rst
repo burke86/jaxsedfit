@@ -17,3 +17,8 @@ instrument, see :doc:`../filters`.
    :undoc-members:
    :special-members: __init__
    :show-inheritance:
+
+Photometry from VizieR
+----------------------
+
+.. autofunction:: jaxsedfit.vizier.query_vizier_sed

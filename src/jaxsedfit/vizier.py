@@ -1,3 +1,5 @@
+"""Query the CDS VizieR SED service and map its photometry onto jaxsedfit filters."""
+
 from __future__ import annotations
 
 from io import BytesIO
@@ -53,7 +55,7 @@ def query_vizier_sed(
     target: str,
     radius: float = 3.0,
     host: tuple[str, int, bool] = ("vizier.cfa.harvard.edu", 443, True),
-    fallback_hosts: list[tuple[str, int, bool]] | tuple[tuple[str, int, bool], ...] | None = None,
+    fallback_hosts: list[tuple[str, int, bool]] | tuple[tuple[str, int, bool], ...] | None = (("vizier.u-strasbg.fr", 80, False),),
     timeout: float = 120.0,
     verbose: bool = True,
 ) -> tuple[list[dict[str, float | str | None]], Table, str]:
@@ -68,7 +70,8 @@ def query_vizier_sed(
     host
         Primary host triple of ``(hostname, port, use_https)``.
     fallback_hosts
-        Optional additional host triples tried in order after ``host`` fails.
+        Additional host triples tried in order after ``host`` fails; defaults to
+        the Strasbourg mirror.
     timeout
         Socket timeout in seconds for each host attempt.
     verbose
