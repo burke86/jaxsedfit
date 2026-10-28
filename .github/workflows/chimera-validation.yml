@@ -2,13 +2,15 @@ name: Chimera validation
 
 # Stellar-mass, AGN bolometric luminosity and SFR recovery on the
 # luminosity-stratified Chimera sample with batched MAP + Laplace fits
-# (benchmarks/chimera_validation.py). The job fails if a luminosity bin exceeds
-# the outlier-fraction or RMS limits in benchmarks/chimera_validation_thresholds.json
-# (quantities without limits there are only reported). For pull requests from
-# branches of this repository it also posts (and updates) a PR comment with the
-# metrics and the residual plots; the plots are stored on the
-# chimera-validation-plots branch so the comment can embed them. Pull requests from forks get a read-only
-# token, so they only upload the plot as an artifact and write the job summary.
+# (benchmarks/chimera_validation.py), in two runs: photometry only (1,600
+# objects), and photometry + spectrum for the objects with a Chimera spectrum.
+#
+# The report job turns both runs into one PR comment: a compact table per run,
+# with the change from main's last run, and the plots behind a fold. It fails if
+# any bin is past its limit in benchmarks/chimera_validation_thresholds.json.
+# Runs on main store their metrics on the chimera-validation-plots branch as the
+# baseline for PRs. Pull requests from forks get a read-only token, so they only
+# get the job summary and artifacts.
 
 on:
   pull_request:
@@ -16,6 +18,17 @@ on:
       - "src/**"
       - "benchmarks/chimera_validation*"
       - "benchmarks/data/chimera_validation_sample.csv"
+      - "benchmarks/data/chimera_validation_spectra.fits"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - ".github/workflows/chimera-validation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "benchmarks/chimera_validation*"
+      - "benchmarks/data/chimera_validation_sample.csv"
+      - "benchmarks/data/chimera_validation_spectra.fits"
       - "pyproject.toml"
       - "requirements.txt"
       - ".github/workflows/chimera-validation.yml"
@@ -30,14 +43,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  chimera-validation:
+  fit:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - run: photometry
+            args: --chunk 16
+            timeout: 180
+          - run: joint
+            args: --spectra --compare-photometry --chunk 8
+            timeout: 300
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-    env:
-      SAME_REPO: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
-      PR: ${{ github.event.pull_request.number }}
-      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      PLOT_BRANCH: chimera-validation-plots
+    timeout-minutes: ${{ matrix.timeout }}
 
     steps:
       - name: Check out repository
@@ -74,36 +92,60 @@ jobs:
             --output tempdata.h5
           test -s tempdata.h5
 
-      - name: Run Chimera validation
+      - name: Fit the ${{ matrix.run }} sample
         env:
           MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          image_base_url=""
-          if [ "${SAME_REPO}" = "true" ]; then
-            image_base_url="https://raw.githubusercontent.com/${{ github.repository }}/${PLOT_BRANCH}/pr-${PR}/${SHA}"
-          fi
           # Log memory use while fitting (GitHub runners have 16 GB).
           ( while sleep 20; do free -m | awk '/Mem/ {print "[mem] used " $3 " MB of " $2 " MB"}'; done ) &
           python benchmarks/chimera_validation.py run \
-            --output-dir chimera-validation \
+            --output-dir "${{ matrix.run }}" \
             --dsps-ssp-fn tempdata.h5 \
-            --chunk 16 \
             --sha "${SHA::7}" \
-            ${image_base_url:+--image-base-url "${image_base_url}"}
-          cat chimera-validation/output >> "${GITHUB_STEP_SUMMARY}"
+            ${{ matrix.args }}
 
-      - name: Upload validation artifacts
+      - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chimera-validation
-          path: chimera-validation/
+          name: chimera-${{ matrix.run }}
+          path: ${{ matrix.run }}/
           if-no-files-found: ignore
 
-      - name: Push plots for the PR comment
+  report:
+    needs: fit
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    env:
+      SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PLOT_BRANCH: chimera-validation-plots
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install report dependencies
+        run: python -m pip install numpy
+
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: chimera-*
+          path: results
+
+      - name: Check out the plots branch
         if: env.SAME_REPO == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           git init -q plots && cd plots
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
@@ -112,26 +154,58 @@ jobs:
           else
             git checkout -q --orphan "${PLOT_BRANCH}"
           fi
-          mkdir -p "pr-${PR}/${SHA}"
-          cp ../chimera-validation/*.png "pr-${PR}/${SHA}/"
-          git add "pr-${PR}/${SHA}"
+
+      - name: Write the report
+        id: report
+        run: |
+          image_base_url=""
+          baseline=""
+          if [ "${SAME_REPO}" = "true" ] && [ -n "${PR}" ]; then
+            image_base_url="https://raw.githubusercontent.com/${{ github.repository }}/${PLOT_BRANCH}/pr-${PR}/${SHA}"
+            [ -d plots/main ] && baseline="plots/main"
+          fi
+          status=0
+          python benchmarks/chimera_validation.py report \
+            --photometry results/chimera-photometry \
+            --joint results/chimera-joint \
+            ${baseline:+--baseline "${baseline}"} \
+            ${image_base_url:+--image-base-url "${image_base_url}"} \
+            --sha "${SHA::7}" \
+            --output report.md || status=$?
+          cat report.md >> "${GITHUB_STEP_SUMMARY}"
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+
+      - name: Store plots, and main's metrics as the PR baseline
+        if: env.SAME_REPO == 'true'
+        run: |
+          if [ -n "${PR}" ]; then dest="pr-${PR}/${SHA}"; else dest="main"; fi
+          for run in photometry joint; do
+            [ -d "results/chimera-${run}" ] || continue
+            rm -rf "plots/${dest}/${run}" && mkdir -p "plots/${dest}/${run}"
+            cp results/chimera-${run}/*.png results/chimera-${run}/metrics.json "plots/${dest}/${run}/" 2>/dev/null || true
+          done
+          cd plots
+          git add -A
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -q -m "Chimera validation plots for PR #${PR} (${SHA::7})"
+            commit -q -m "Chimera validation for ${dest} (${SHA::7})" || exit 0
           git push -q origin "${PLOT_BRANCH}"
 
       - name: Create or update the PR comment
-        if: env.SAME_REPO == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: env.SAME_REPO == 'true' && github.event_name == 'pull_request'
         run: |
           marker="jaxsedfit Chimera validation"
           comment_id="$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" --paginate \
             --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"${marker}\")))][0].id // empty")"
           if [ -n "${comment_id}" ]; then
-            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/${comment_id}" -F body=@chimera-validation/output > /dev/null
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/${comment_id}" -F body=@report.md > /dev/null
           else
-            gh pr comment "${PR}" --repo "${{ github.repository }}" --body-file chimera-validation/output
+            gh pr comment "${PR}" --repo "${{ github.repository }}" --body-file report.md
           fi
 
-      - name: Check thresholds
-        run: python benchmarks/chimera_validation.py check --output-dir chimera-validation
+      - name: Gate on the thresholds
+        run: |
+          if [ "${{ needs.fit.result }}" != "success" ]; then
+            echo "A fitting job did not succeed (${{ needs.fit.result }})."
+            exit 1
+          fi
+          exit "${{ steps.report.outputs.status }}"
