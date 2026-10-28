@@ -72,3 +72,14 @@ def test_approximations_respect_bounded_supports():
     )
     assert np.all(np.asarray(laplace["scale"]) > 0)
     assert np.all(np.asarray(vi["scale"]) > 0)
+
+
+def test_finite_difference_hessian_matches_exact():
+    for model, point in ((saddle_model, {"x": 0.3, "y": -0.2}), (bounded_model, {"scale": 0.7})):
+        transforms = site_transforms(latent_sites(model))
+        key = jax.random.PRNGKey(1)
+        exact, eig_exact = laplace_draws(model, (), point, transforms, 500, key)
+        fd, eig_fd = laplace_draws(model, (), point, transforms, 500, key, hessian="finite_difference")
+        assert np.isclose(float(eig_fd), float(eig_exact), rtol=1e-6, atol=1e-6)
+        for site in exact:
+            assert np.allclose(fd[site], exact[site], rtol=1e-5, atol=1e-6)
