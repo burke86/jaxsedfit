@@ -18,7 +18,11 @@ make-sample
     LePhare SFRs (SFR_MED).
 run
     Fit the sample and write ``results.json``, ``metrics.json``, the residual plots
-    and a Markdown summary (``output``) for the PR comment.
+    and a Markdown summary (``output``) for the PR comment. With ``--spectra``, fit
+    photometry and spectra jointly instead, for the objects that have a Chimera
+    spectrum in ``data/chimera_validation_spectra.fits``; these joint results are
+    reported, not gated, and ``--compare-photometry`` adds photometry-only fits of
+    the same objects for comparison.
 check
     Exit non-zero if ``metrics.json`` fails the thresholds.
 """
@@ -37,6 +41,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 DEFAULT_SAMPLE = HERE / "data" / "chimera_validation_sample.csv"
 DEFAULT_THRESHOLDS = HERE / "chimera_validation_thresholds.json"
+DEFAULT_SPECTRA = HERE / "data" / "chimera_validation_spectra.fits"
 LUMINOSITY_BIN_EDGES = [-np.inf, 42.0, 43.0, 44.0, 45.0]
 OUTLIER_DEX = 0.5
 # Recovered quantities: fitted site, truth column, offset from the site's units to the
@@ -61,6 +66,8 @@ QUANTITIES = {
 }
 SFR_MIN_LOG_SSFR = -11.0
 COMMENT_MARKER = "jaxsedfit Chimera validation"
+# Not a superstring of COMMENT_MARKER, so the two PR comments are found separately.
+JOINT_COMMENT_MARKER = "jaxsedfit joint Chimera validation"
 
 
 def _bin_label(lo: float, hi: float) -> str:
@@ -150,9 +157,27 @@ def load_sample(path: Path) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Fit
 # --------------------------------------------------------------------------- #
-def _configs(rows, dsps_ssp_fn, steps, learning_rate):
+def load_spectra(path: Path) -> dict[str, dict]:
+    """Chimera spectra by id: observed wavelength [A], flux and error [mJy], good-pixel mask."""
+    from astropy.table import Table
+
+    table = Table.read(path)
+    out = {}
+    for row in table:
+        wave = np.asarray(row["wave_obs"], dtype=float)
+        flux = np.asarray(row["flux"], dtype=float)
+        err = np.asarray(row["flux_err"], dtype=float)
+        # flux_err is infinite where the host or the quasar spectrum is missing.
+        good = np.isfinite(flux) & np.isfinite(err) & (err > 0)
+        out[str(row["id"])] = dict(wave=wave, flux=np.where(good, flux, 0.0), err=np.where(good, err, 1.0), mask=good,
+                                   resolving_power=float(table.meta["SPEC_RES"]))
+    return out
+
+
+def _configs(rows, dsps_ssp_fn, steps, learning_rate, spectra=None):
     import numpyro.distributions as dist
 
+    from jaxsedfit import SpectroscopyData
     from jaxsedfit.benchmark import build_chimera_fit_config
 
     configs = []
@@ -162,16 +187,25 @@ def _configs(rows, dsps_ssp_fn, steps, learning_rate):
         cfg.inference.map_steps = steps
         cfg.inference.learning_rate = learning_rate
         cfg.inference.num_samples = 400
+        if spectra is not None:
+            spec = spectra[row["id"]]
+            cfg.spectroscopy = SpectroscopyData(wave_obs=spec["wave"], fluxes=spec["flux"], errors=spec["err"],
+                                                mask=spec["mask"], resolving_power=spec["resolving_power"])
+            # Quasar emission lines and Fe II in the spectrum; the composite spectra are scaled
+            # to the total photometry of each component, so the spectrum scale is not fitted.
+            cfg.agn.fit_lines = True
+            cfg.agn.fit_feii = True
+            cfg.likelihood.fit_spectrum_scale = False
         configs.append(cfg)
     return configs
 
 
-def fit_sample(rows, *, dsps_ssp_fn, chunk, steps, learning_rate):
+def fit_sample(rows, *, dsps_ssp_fn, chunk, steps, learning_rate, spectra=None):
     """Batched MAP + Laplace fits (``jaxsedfit.fit_batch``); point estimate = MAP."""
     from jaxsedfit import fit_batch
 
     t0 = time.time()
-    batch = fit_batch(_configs(rows, dsps_ssp_fn, steps, learning_rate), method="laplace", chunk_size=chunk,
+    batch = fit_batch(_configs(rows, dsps_ssp_fn, steps, learning_rate, spectra), method="laplace", chunk_size=chunk,
                       derived_sites=[q["site"] for q in QUANTITIES.values() if q["site"] != "log_stellar_mass"])
     results = []
     for row, draws, map_values, diag in zip(rows, batch.samples, batch.map_values, batch.diagnostics):
@@ -302,17 +336,44 @@ def plot_results(results, metrics, name, path: Path) -> None:
     plt.close(fig)
 
 
-def write_comment(path: Path, metrics, failures, thresholds, *, sha, elapsed, image_base_url) -> None:
-    status = "✅ passed" if not failures else "❌ failed"
-    lines = [
-        f"## {COMMENT_MARKER}: {status}",
-        "",
-        f"Commit `{sha}` · {sum(m['n'] for m in metrics['log_stellar_mass'])} Chimeras · "
-        f"MAP + Laplace (`fit_batch`) in {elapsed / 60:.1f} min",
-        "",
-        f"Residual = MAP − truth in bins of injected AGN luminosity (log erg/s); bars are Laplace 95% intervals; "
-        f"outlier: |Δ| > {OUTLIER_DEX} dex.",
-    ]
+def write_comment(path: Path, metrics, failures, thresholds, *, sha, elapsed, image_base_url, joint=False,
+                  comparison=None) -> None:
+    if joint:
+        lines = [
+            f"## {JOINT_COMMENT_MARKER} (photometry + spectra): reported, not gated",
+            "",
+            f"Commit `{sha}` · {sum(m['n'] for m in metrics['log_stellar_mass'])} Chimeras with a composite spectrum "
+            f"(host from DESI DR1 or LEGA-C + weighted SDSS quasar) · joint MAP + Laplace (`fit_batch`) in "
+            f"{elapsed / 60:.1f} min",
+            "",
+            "Same plots as the photometry-only validation, for the objects with spectra, fitted with their "
+            "photometry and spectrum together (quasar lines and Fe II on, spectrum scale fixed).",
+            "",
+            f"Residual = MAP − truth in bins of injected AGN luminosity (log erg/s); bars are Laplace 95% intervals; "
+            f"outlier: |Δ| > {OUTLIER_DEX} dex.",
+        ]
+    else:
+        status = "✅ passed" if not failures else "❌ failed"
+        lines = [
+            f"## {COMMENT_MARKER}: {status}",
+            "",
+            f"Commit `{sha}` · {sum(m['n'] for m in metrics['log_stellar_mass'])} Chimeras · "
+            f"MAP + Laplace (`fit_batch`) in {elapsed / 60:.1f} min",
+            "",
+            f"Residual = MAP − truth in bins of injected AGN luminosity (log erg/s); bars are Laplace 95% intervals; "
+            f"outlier: |Δ| > {OUTLIER_DEX} dex.",
+        ]
+    if comparison is not None:
+        lines += ["", "### Joint vs photometry only, same objects", "",
+                  "Each cell: photometry only → photometry + spectra.", "",
+                  "| Quantity | AGN luminosity bin | N | median Δ | NMAD | RMS | outliers |",
+                  "|---|---|---:|---:|---:|---:|---:|"]
+        for name, bins in metrics.items():
+            for m, c in zip(bins, comparison[name]):
+                lines.append(f"| {QUANTITIES[name]['title']} | {m['label']} | {m['n']} | "
+                             f"{c['median']:+.3f} → {m['median']:+.3f} | {c['nmad']:.3f} → {m['nmad']:.3f} | "
+                             f"{c['rms']:.3f} → {m['rms']:.3f} | "
+                             f"{100 * c['outlier_fraction']:.1f}% → {100 * m['outlier_fraction']:.1f}% |")
     for name, bins in metrics.items():
         q = QUANTITIES[name]
         gated = name in thresholds
@@ -352,22 +413,35 @@ def run(args) -> int:
             idx = [i for i, r in enumerate(rows) if r["luminosity_bin_index"] == b]
             keep += sorted(rng.choice(idx, size=min(args.per_bin, len(idx)), replace=False).tolist())
         rows = [rows[i] for i in sorted(keep)]
+    spectra = None
+    if args.spectra:
+        spectra = load_spectra(args.spectra)
+        rows = [r for r in rows if r["id"] in spectra]
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    print(f"[chimera] fitting {len(rows)} objects", flush=True)
+    print(f"[chimera] fitting {len(rows)} objects" + (" with spectra" if spectra else ""), flush=True)
 
-    results, elapsed = fit_sample(rows, dsps_ssp_fn=args.dsps_ssp_fn, chunk=args.chunk, steps=args.steps,
-                                  learning_rate=args.learning_rate)
+    fit_kwargs = dict(dsps_ssp_fn=args.dsps_ssp_fn, chunk=args.chunk, steps=args.steps, learning_rate=args.learning_rate)
+    results, elapsed = fit_sample(rows, spectra=spectra, **fit_kwargs)
     metrics = {name: compute_metrics(results, name) for name in QUANTITIES}
-    thresholds = {k: v for k, v in json.loads(Path(args.thresholds).read_text()).items() if not k.startswith("_")}
+    comparison = None
+    if spectra and args.compare_photometry:
+        print(f"[chimera] fitting the same {len(rows)} objects with photometry only", flush=True)
+        phot_results, _ = fit_sample(rows, **fit_kwargs)
+        (out / "results_photometry_only.json").write_text(json.dumps(phot_results, indent=1))
+        comparison = {name: compute_metrics(phot_results, name) for name in QUANTITIES}
+    # Joint fits are reported, not gated: the thresholds are for the photometry-only sample.
+    thresholds = {} if spectra else {
+        k: v for k, v in json.loads(Path(args.thresholds).read_text()).items() if not k.startswith("_")}
     failures = check_metrics(metrics, thresholds)
 
     (out / "results.json").write_text(json.dumps(results, indent=1))
-    (out / "metrics.json").write_text(json.dumps({**metrics, "failures": failures, "elapsed_s": elapsed}, indent=2))
+    (out / "metrics.json").write_text(json.dumps({**metrics, "failures": failures, "elapsed_s": elapsed,
+                                                  **({"photometry_only": comparison} if comparison else {})}, indent=2))
     for name, q in QUANTITIES.items():
         plot_results(results, metrics[name], name, out / q["plot"])
     write_comment(out / "output", metrics, failures, thresholds, sha=args.sha, elapsed=elapsed,
-                  image_base_url=args.image_base_url)
+                  image_base_url=args.image_base_url, joint=spectra is not None, comparison=comparison)
     print((out / "output").read_text())
     return 0
 
@@ -409,6 +483,11 @@ def main(argv=None) -> int:
     p.add_argument("--learning-rate", type=float, default=5e-3)
     p.add_argument("--sha", default="local")
     p.add_argument("--image-base-url", default=None, help="URL of the directory holding the plots to embed in the comment.")
+    p.add_argument("--spectra", nargs="?", const=str(DEFAULT_SPECTRA), default=None,
+                   help="Fit photometry + spectra jointly for the objects in this spectra file "
+                        f"(default when given without a path: {DEFAULT_SPECTRA.name}); reported, not gated.")
+    p.add_argument("--compare-photometry", action="store_true",
+                   help="With --spectra, also fit the same objects with photometry only and compare.")
     p.set_defaults(func=run)
 
     p = sub.add_parser("check", help="Exit non-zero if metrics.json fails the thresholds.")

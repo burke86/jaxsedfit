@@ -9,6 +9,11 @@ name: Chimera validation
 # metrics and the residual plots; the plots are stored on the
 # chimera-validation-plots branch so the comment can embed them. Pull requests from forks get a read-only
 # token, so they only upload the plot as an artifact and write the job summary.
+#
+# The chimera-joint-validation job makes the same plots for the objects with a
+# Chimera spectrum (benchmarks/data/chimera_validation_spectra.fits), fitted with
+# photometry and spectrum together, and compares them with photometry-only fits of
+# the same objects in a second PR comment. It is reported, not gated.
 
 on:
   pull_request:
@@ -16,6 +21,7 @@ on:
       - "src/**"
       - "benchmarks/chimera_validation*"
       - "benchmarks/data/chimera_validation_sample.csv"
+      - "benchmarks/data/chimera_validation_spectra.fits"
       - "pyproject.toml"
       - "requirements.txt"
       - ".github/workflows/chimera-validation.yml"
@@ -135,3 +141,108 @@ jobs:
 
       - name: Check thresholds
         run: python benchmarks/chimera_validation.py check --output-dir chimera-validation
+
+  chimera-joint-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      SAME_REPO: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PLOT_BRANCH: chimera-joint-validation-plots
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Restore DSPS SSP template cache
+        id: cache-dsps-ssp
+        uses: actions/cache@v4
+        with:
+          path: tempdata.h5
+          key: dsps-ssp-fsps-v3.2-lgmet-age-v1
+
+      - name: Download DSPS SSP template on cache miss
+        if: steps.cache-dsps-ssp.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 300 \
+            https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_fsps_v3.2_lgmet_age.h5 \
+            --output tempdata.h5
+          test -s tempdata.h5
+
+      - name: Run joint Chimera validation
+        env:
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+        run: |
+          image_base_url=""
+          if [ "${SAME_REPO}" = "true" ]; then
+            image_base_url="https://raw.githubusercontent.com/${{ github.repository }}/${PLOT_BRANCH}/pr-${PR}/${SHA}"
+          fi
+          # Log memory use while fitting (GitHub runners have 16 GB).
+          ( while sleep 20; do free -m | awk '/Mem/ {print "[mem] used " $3 " MB of " $2 " MB"}'; done ) &
+          python benchmarks/chimera_validation.py run \
+            --output-dir chimera-validation \
+            --dsps-ssp-fn tempdata.h5 \
+            --spectra \
+            --compare-photometry \
+            --chunk 8 \
+            --sha "${SHA::7}" \
+            ${image_base_url:+--image-base-url "${image_base_url}"}
+          cat chimera-validation/output >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chimera-joint-validation
+          path: chimera-validation/
+          if-no-files-found: ignore
+
+      - name: Push plots for the PR comment
+        if: env.SAME_REPO == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git init -q plots && cd plots
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          if git fetch -q --depth 1 origin "${PLOT_BRANCH}"; then
+            git checkout -q -b "${PLOT_BRANCH}" FETCH_HEAD
+          else
+            git checkout -q --orphan "${PLOT_BRANCH}"
+          fi
+          mkdir -p "pr-${PR}/${SHA}"
+          cp ../chimera-validation/*.png "pr-${PR}/${SHA}/"
+          git add "pr-${PR}/${SHA}"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Joint Chimera validation plots for PR #${PR} (${SHA::7})"
+          git push -q origin "${PLOT_BRANCH}"
+
+      - name: Create or update the PR comment
+        if: env.SAME_REPO == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          marker="jaxsedfit joint Chimera validation"
+          comment_id="$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" --paginate \
+            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"${marker}\")))][0].id // empty")"
+          if [ -n "${comment_id}" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/${comment_id}" -F body=@chimera-validation/output > /dev/null
+          else
+            gh pr comment "${PR}" --repo "${{ github.repository }}" --body-file chimera-validation/output
+          fi
