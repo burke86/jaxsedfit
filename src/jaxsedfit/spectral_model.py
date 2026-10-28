@@ -2436,6 +2436,39 @@ def build_fsps_template_grid(
     )
 
 
+_DELAYED_SFH_MODELS = {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}
+
+
+def _delayed_host_intrinsic_draws(fsps_grid, prior_config, samples, sl, z_qso):
+    """Rebuild the aperture-scaled delayed-SFH host spectrum for each posterior draw.
+
+    The delayed host is synthesized from its SFH parameters, not from the proxy
+    template weights it reports, so it is re-run under each draw's latent values.
+
+    Parameters
+    ----------
+    fsps_grid : FSPSTemplateGrid
+        Host grid with ``host_basis_jax`` on the padded reconstruction grid.
+    prior_config : dict[str, Any]
+        Fitted prior mapping.
+    samples : dict[str, Any]
+        Posterior samples, site name -> array with leading draw axis.
+    sl : slice
+        Draws to use.
+    z_qso : float
+        Source redshift.
+    """
+    draws = {k: jnp.asarray(np.asarray(v)[sl]) for k, v in samples.items() if np.ndim(v) >= 1}
+
+    def one(draw):
+        with numpyro.handlers.seed(rng_seed=0), numpyro.handlers.substitute(data=draw):
+            host, _, _ = _delayed_sfh_host_spectrum(fsps_grid, prior_config, jnp.nan, z_qso)
+            aperture_scale = jnp.exp(_sample_log_host_aperture_scale(prior_config))
+        return aperture_scale * host
+
+    return jax.lax.map(one, draws)
+
+
 def reconstruct_posterior_components(
     wave_out: np.ndarray,
     samples: Dict[str, Any],
@@ -2510,6 +2543,8 @@ def reconstruct_posterior_components(
     if wave_out.ndim != 1 or wave_out.size < 2 or not np.all(np.isfinite(wave_out)):
         raise ValueError("wave_out must be a finite 1D wavelength grid.")
 
+    z_host = float(prior_config.get("z_qso", 0.0) if redshift is None else redshift)
+    delayed_host = decompose_host and str(prior_config.get("host_sfh_model", "flexible")).lower() in _DELAYED_SFH_MODELS
     if decompose_host:
         host_wave_out = extend_loglam_grid(wave_out, pad_kms=float(prior_config.get("host_pad_kms", 3000.0)))
         fsps_grid = build_fsps_template_grid(
@@ -2517,6 +2552,8 @@ def reconstruct_posterior_components(
             age_grid_gyr=age_grid_gyr,
             logzsol_grid=logzsol_grid,
             dsps_ssp_fn=dsps_ssp_fn,
+            z_qso=z_host,
+            build_physical_host_basis=delayed_host,
             template_norms=template_norms,
         )
         templates = np.asarray(fsps_grid.templates, dtype=float)
@@ -2630,8 +2667,11 @@ def reconstruct_posterior_components(
     lnwave_j = jnp.asarray(lnwave, dtype=jnp.float64)
     host_wave_j = jnp.asarray(host_wave_out, dtype=jnp.float64)
     host_lnwave_j = jnp.log(host_wave_j)
-    templates_j = jnp.asarray(templates, dtype=jnp.float64)
-    fsps_weights_j = jnp.asarray(fsps_weights, dtype=jnp.float64)
+    if delayed_host:
+        host_intrinsic_draws = _delayed_host_intrinsic_draws(fsps_grid, prior_config, samples, sl, z_host)
+    else:
+        # Flexible-SFH weights already carry the host amplitude and aperture scale.
+        host_intrinsic_draws = jnp.asarray(fsps_weights, dtype=jnp.float64) @ jnp.asarray(templates, dtype=jnp.float64).T
     poly_coeffs_j = jnp.asarray(poly_coeffs, dtype=jnp.float64)
     poly_powers_j = None
     if fit_poly and fit_poly_order > 1:
@@ -2641,7 +2681,7 @@ def reconstruct_posterior_components(
         poly_powers_j = _orthogonal_polynomial_basis_jax(wave_j, basis_config)
 
     def _one_builtin_components(
-        weights_i,
+        host_intrinsic,
         pl_norm_i,
         pl_slope_i,
         gal_v_i,
@@ -2662,8 +2702,8 @@ def reconstruct_posterior_components(
 
         Parameters
         ----------
-        weights_i : jax.Array
-            Host template weights for this draw, shape (n_templates,).
+        host_intrinsic : jax.Array
+            Unbroadened host spectrum for this draw on the padded host grid.
         pl_norm_i : jax.Array
             Power-law f_lambda at the pivot for this draw.
         pl_slope_i : jax.Array
@@ -2695,7 +2735,6 @@ def reconstruct_posterior_components(
         poly_coeffs_i : jax.Array
             Calibration coefficients for degrees 2..order, shape (order - 1,).
         """
-        host_intrinsic = templates_j @ weights_i
         gal_sigma_model_i = host_kernel_sigma_kms(
             gal_sigma_i,
             sigma_inst_kms,
@@ -2782,7 +2821,7 @@ def reconstruct_posterior_components(
         poly_draws,
         reddening_atten_draws,
     ) = jax.vmap(_one_builtin_components)(
-        fsps_weights_j,
+        host_intrinsic_draws,
         jnp.asarray(pl_norm, dtype=jnp.float64),
         jnp.asarray(pl_slope, dtype=jnp.float64),
         jnp.asarray(gal_v, dtype=jnp.float64),
