@@ -3,9 +3,8 @@
 Fits the luminosity-stratified Chimera sample (COSMOS galaxies + SDSS quasars,
 binned by the true injected AGN luminosity) with ``jaxsedfit.batched``, plots
 the residuals of stellar mass, AGN bolometric luminosity and SFR against their
-true values in each luminosity bin, and checks the per-bin outlier fraction and
-RMS against ``chimera_validation_thresholds.json`` (quantities without
-thresholds there are reported but not gated).
+true values in each luminosity bin, and gates the per-bin outlier fraction and
+RMS against ``chimera_validation_thresholds.json``.
 
 Subcommands
 -----------
@@ -17,14 +16,13 @@ make-sample
     "true" masses can be off by more than a dex. The SFR truths are COSMOS2015
     LePhare SFRs (SFR_MED).
 run
-    Fit the sample and write ``results.json``, ``metrics.json``, the residual plots
-    and a Markdown summary (``output``) for the PR comment. With ``--spectra``, fit
-    photometry and spectra jointly instead, for the objects that have a Chimera
-    spectrum in ``data/chimera_validation_spectra.fits``; these joint results are
-    reported, not gated, and ``--compare-photometry`` adds photometry-only fits of
-    the same objects for comparison.
-check
-    Exit non-zero if ``metrics.json`` fails the thresholds.
+    Fit the sample and write ``results.json``, ``metrics.json`` and the residual
+    plots. With ``--spectra``, fit photometry and spectra jointly instead, for the
+    objects that have a Chimera spectrum in ``data/chimera_validation_spectra.fits``.
+report
+    Write one compact Markdown report (``output``) for the photometry-only and,
+    optionally, the joint run, with the change from main's metrics when given, and
+    exit non-zero if any bin fails its threshold.
 """
 from __future__ import annotations
 
@@ -66,8 +64,8 @@ QUANTITIES = {
 }
 SFR_MIN_LOG_SSFR = -11.0
 COMMENT_MARKER = "jaxsedfit Chimera validation"
-# Not a superstring of COMMENT_MARKER, so the two PR comments are found separately.
-JOINT_COMMENT_MARKER = "jaxsedfit joint Chimera validation"
+RUN_TITLES = {"photometry": "Photometry only", "joint": "Photometry + spectra"}
+SHORT_TITLES = {"log_stellar_mass": "M★", "log_lbol_agn": "L<sub>bol</sub>", "log_sfr": "SFR"}
 
 
 def _bin_label(lo: float, hi: float) -> str:
@@ -336,72 +334,102 @@ def plot_results(results, metrics, name, path: Path) -> None:
     plt.close(fig)
 
 
-def write_comment(path: Path, metrics, failures, thresholds, *, sha, elapsed, image_base_url, joint=False,
-                  comparison=None) -> None:
-    if joint:
-        lines = [
-            f"## {JOINT_COMMENT_MARKER} (photometry + spectra): reported, not gated",
-            "",
-            f"Commit `{sha}` · {sum(m['n'] for m in metrics['log_stellar_mass'])} Chimeras with a composite spectrum "
-            f"(host from DESI DR1 or LEGA-C + weighted SDSS quasar) · joint MAP + Laplace (`fit_batch`) in "
-            f"{elapsed / 60:.1f} min",
-            "",
-            "Same plots as the photometry-only validation, for the objects with spectra, fitted with their "
-            "photometry and spectrum together (quasar lines and Fe II on, spectrum scale fixed).",
-            "",
-            f"Residual = MAP − truth in bins of injected AGN luminosity (log erg/s); bars are Laplace 95% intervals; "
-            f"outlier: |Δ| > {OUTLIER_DEX} dex.",
-        ]
-    else:
-        status = "✅ passed" if not failures else "❌ failed"
-        lines = [
-            f"## {COMMENT_MARKER}: {status}",
-            "",
-            f"Commit `{sha}` · {sum(m['n'] for m in metrics['log_stellar_mass'])} Chimeras · "
-            f"MAP + Laplace (`fit_batch`) in {elapsed / 60:.1f} min",
-            "",
-            f"Residual = MAP − truth in bins of injected AGN luminosity (log erg/s); bars are Laplace 95% intervals; "
-            f"outlier: |Δ| > {OUTLIER_DEX} dex.",
-        ]
-    if comparison is not None:
-        lines += ["", "### Joint vs photometry only, same objects", "",
-                  "Each cell: photometry only → photometry + spectra.", "",
-                  "| Quantity | AGN luminosity bin | N | median Δ | NMAD | RMS | outliers |",
-                  "|---|---|---:|---:|---:|---:|---:|"]
-        for name, bins in metrics.items():
-            for m, c in zip(bins, comparison[name]):
-                lines.append(f"| {QUANTITIES[name]['title']} | {m['label']} | {m['n']} | "
-                             f"{c['median']:+.3f} → {m['median']:+.3f} | {c['nmad']:.3f} → {m['nmad']:.3f} | "
-                             f"{c['rms']:.3f} → {m['rms']:.3f} | "
-                             f"{100 * c['outlier_fraction']:.1f}% → {100 * m['outlier_fraction']:.1f}% |")
+def _workflow_url() -> str:
+    server = os.environ.get("GITHUB_SERVER_URL")
+    if not server:
+        return ""
+    return f"{server}/{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
+
+
+def _cell(m, base, limit) -> str:
+    """``RMS · outliers`` for one bin, with the change from main and a ❌ past a limit."""
+    rms = f"{m['rms']:.2f}"
+    out = f"{100 * m['outlier_fraction']:.0f}%"
+    if base is not None:
+        d_rms = m["rms"] - base["rms"]
+        d_out = 100 * (m["outlier_fraction"] - base["outlier_fraction"])
+        if abs(d_rms) >= 0.005:
+            rms += f" ({d_rms:+.2f})"
+        if abs(d_out) >= 0.5:
+            out += f" ({d_out:+.0f})"
+    if limit is not None:
+        rms += "" if m["rms"] <= limit["max_rms"] else " ❌"
+        out += "" if m["outlier_fraction"] <= limit["max_outlier_fraction"] else " ❌"
+    return f"{rms} · {out}"
+
+
+def _summary_table(metrics, baseline, thresholds) -> list[str]:
+    labels = [m["label"] for m in metrics["log_stellar_mass"]]
+    lines = ["| | " + " | ".join(labels) + " |", "|---|" + "---:|" * len(labels)]
+    for name in QUANTITIES:
+        base = (baseline or {}).get(name)
+        cells = [_cell(m, base[i] if base else None, thresholds.get(name, {}).get(str(m["bin"])))
+                 for i, m in enumerate(metrics[name])]
+        lines.append(f"| {SHORT_TITLES[name]} | " + " | ".join(cells) + " |")
+    return lines
+
+
+def _detail_tables(metrics, thresholds, image_base_url) -> list[str]:
+    lines = []
     for name, bins in metrics.items():
         q = QUANTITIES[name]
-        gated = name in thresholds
-        lines += ["", f"### {q['title']}" + ("" if gated else " (reported, not gated)"), ""]
-        if q.get("note"):
-            lines += [q["note"], ""]
-        lines += ["| AGN luminosity bin | N | median Δ | NMAD | RMS" + (" (max)" if gated else "")
-                  + " | outliers" + (" (max)" if gated else "") + " |",
+        lines += ["", f"**{q['title']}**" + (f" — {q['note']}" if q.get("note") else ""), "",
+                  "| AGN luminosity bin | N | median Δ | NMAD | RMS (limit) | outliers (limit) |",
                   "|---|---:|---:|---:|---:|---:|"]
         for m in bins:
-            t = thresholds.get(name, {}).get(str(m["bin"]))
-            rms = f"{m['rms']:.3f}"
-            out = f"{100 * m['outlier_fraction']:.1f}%"
-            if t is not None:
-                rms += f" ({t['max_rms']:.3f})" + ("" if m["rms"] <= t["max_rms"] else " ❌")
-                out += (f" ({100 * t['max_outlier_fraction']:.1f}%)"
-                        + ("" if m["outlier_fraction"] <= t["max_outlier_fraction"] else " ❌"))
-            lines.append(f"| {m['label']} | {m['n']} | {m['median']:+.3f} | {m['nmad']:.3f} | {rms} | {out} |")
-        lines += ["", f"![{q['title']} residuals]({image_base_url}/{q['plot']})" if image_base_url
-                  else "_Plot attached to the workflow artifacts._"]
+            t = thresholds.get(name, {}).get(str(m["bin"]), {})
+            rms_limit = f" ({t['max_rms']:.3f})" if t else ""
+            out_limit = f" ({100 * t['max_outlier_fraction']:.1f}%)" if t else ""
+            lines.append(f"| {m['label']} | {m['n']} | {m['median']:+.3f} | {m['nmad']:.3f} | "
+                         f"{m['rms']:.3f}{rms_limit} | {100 * m['outlier_fraction']:.1f}%{out_limit} |")
+        if image_base_url:
+            lines += ["", f"![{q['title']} residuals]({image_base_url}/{q['plot']})"]
+    return lines
+
+
+def render_report(runs, thresholds, *, sha, baseline=None, baseline_sha=None,
+                  image_base_urls=None) -> tuple[str, list[str]]:
+    """Markdown report for the photometry-only and (optionally) joint runs.
+
+    ``runs`` and ``baseline`` map a run name (``photometry``, ``joint``) to its
+    ``metrics.json`` contents; ``thresholds`` maps a run name to its limits.
+    """
+    failures = [f"{RUN_TITLES[name]}: {f}" for name, m in runs.items()
+                for f in check_metrics(_quantity_metrics(m), thresholds.get(name, {}))]
+    status = "✅ passed" if not failures else "❌ failed"
+    sizes = " · ".join(f"{RUN_TITLES[name].lower()}: {sum(b['n'] for b in m['log_stellar_mass'])} Chimeras "
+                       f"in {m['elapsed_s'] / 60:.0f} min" for name, m in runs.items())
+    versus = f" vs main `{baseline_sha}`" if baseline else ""
+    lines = [
+        f"## {COMMENT_MARKER}: {status}",
+        "",
+        f"`{sha}`{versus} · {sizes}",
+        "",
+        f"Each cell: RMS of MAP − truth [dex] · fraction of outliers (|Δ| > {OUTLIER_DEX} dex), in bins of injected "
+        "AGN log luminosity [erg/s]"
+        + ("; change from main in parentheses" if baseline else "")
+        + "; ❌ marks a value past its limit.",
+    ]
+    for name, m in runs.items():
+        lines += ["", f"**{RUN_TITLES[name]}**", ""] + _summary_table(
+            _quantity_metrics(m), (baseline or {}).get(name), thresholds.get(name, {}))
     if failures:
         lines += ["", "**Failures**", ""] + [f"- {f}" for f in failures]
-    workflow_url = os.environ.get("GITHUB_SERVER_URL", "") and (
-        f"{os.environ['GITHUB_SERVER_URL']}/{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
-    )
-    if workflow_url:
-        lines += ["", f"[Workflow run]({workflow_url})"]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for name, m in runs.items():
+        lines += ["", f"<details><summary>{RUN_TITLES[name]}: limits, per-bin statistics and plots</summary>"]
+        if m.get("photometry_only"):
+            lines += ["", "The same objects fitted with photometry only:", ""]
+            lines += _summary_table(m["photometry_only"], None, {})
+        lines += _detail_tables(_quantity_metrics(m), thresholds.get(name, {}), (image_base_urls or {}).get(name))
+        lines += ["", "</details>"]
+    url = _workflow_url()
+    if url:
+        lines += ["", f"[Workflow run]({url})"]
+    return "\n".join(lines) + "\n", failures
+
+
+def _quantity_metrics(metrics):
+    return {name: metrics[name] for name in QUANTITIES}
 
 
 def run(args) -> int:
@@ -430,29 +458,34 @@ def run(args) -> int:
         phot_results, _ = fit_sample(rows, **fit_kwargs)
         (out / "results_photometry_only.json").write_text(json.dumps(phot_results, indent=1))
         comparison = {name: compute_metrics(phot_results, name) for name in QUANTITIES}
-    # Joint fits are reported, not gated: the thresholds are for the photometry-only sample.
-    thresholds = {} if spectra else {
-        k: v for k, v in json.loads(Path(args.thresholds).read_text()).items() if not k.startswith("_")}
-    failures = check_metrics(metrics, thresholds)
-
     (out / "results.json").write_text(json.dumps(results, indent=1))
-    (out / "metrics.json").write_text(json.dumps({**metrics, "failures": failures, "elapsed_s": elapsed,
+    (out / "metrics.json").write_text(json.dumps({**metrics, "elapsed_s": elapsed, "sha": args.sha,
                                                   **({"photometry_only": comparison} if comparison else {})}, indent=2))
     for name, q in QUANTITIES.items():
         plot_results(results, metrics[name], name, out / q["plot"])
-    write_comment(out / "output", metrics, failures, thresholds, sha=args.sha, elapsed=elapsed,
-                  image_base_url=args.image_base_url, joint=spectra is not None, comparison=comparison)
-    print((out / "output").read_text())
     return 0
 
 
-def check(args) -> int:
-    metrics = json.loads((Path(args.output_dir) / "metrics.json").read_text())
-    if metrics["failures"]:
-        print("Chimera validation failed:\n  " + "\n  ".join(metrics["failures"]))
+def report(args) -> int:
+    def read(path):
+        path = Path(path) / "metrics.json" if path else None
+        return json.loads(path.read_text()) if path and path.is_file() else None
+
+    runs = {name: read(path) for name, path in (("photometry", args.photometry), ("joint", args.joint))}
+    runs = {name: m for name, m in runs.items() if m is not None}
+    if not runs:
+        print("No metrics.json found.")
         return 1
-    print("Chimera validation passed.")
-    return 0
+    baseline = {name: read(Path(args.baseline) / name) for name in runs} if args.baseline else None
+    baseline = {name: m for name, m in (baseline or {}).items() if m is not None} or None
+    baseline_sha = next((m.get("sha", "?") for m in (baseline or {}).values()), None)
+    thresholds = {k: v for k, v in json.loads(Path(args.thresholds).read_text()).items() if not k.startswith("_")}
+    image_base_urls = {name: f"{args.image_base_url}/{name}" for name in runs} if args.image_base_url else None
+    text, failures = render_report(runs, thresholds, sha=args.sha, baseline=baseline, baseline_sha=baseline_sha,
+                                   image_base_urls=image_base_urls)
+    Path(args.output).write_text(text, encoding="utf-8")
+    print(text)
+    return 1 if failures else 0
 
 
 def main(argv=None) -> int:
@@ -476,23 +509,27 @@ def main(argv=None) -> int:
     p.add_argument("--output-dir", required=True)
     p.add_argument("--dsps-ssp-fn", required=True)
     p.add_argument("--sample", default=str(DEFAULT_SAMPLE))
-    p.add_argument("--thresholds", default=str(DEFAULT_THRESHOLDS))
     p.add_argument("--per-bin", type=int, default=None, help="Random subset per luminosity bin (default: all).")
     p.add_argument("--chunk", type=int, default=32, help="Objects per compiled batch.")
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--learning-rate", type=float, default=5e-3)
     p.add_argument("--sha", default="local")
-    p.add_argument("--image-base-url", default=None, help="URL of the directory holding the plots to embed in the comment.")
     p.add_argument("--spectra", nargs="?", const=str(DEFAULT_SPECTRA), default=None,
                    help="Fit photometry + spectra jointly for the objects in this spectra file "
-                        f"(default when given without a path: {DEFAULT_SPECTRA.name}); reported, not gated.")
+                        f"(default when given without a path: {DEFAULT_SPECTRA.name}).")
     p.add_argument("--compare-photometry", action="store_true",
                    help="With --spectra, also fit the same objects with photometry only and compare.")
     p.set_defaults(func=run)
 
-    p = sub.add_parser("check", help="Exit non-zero if metrics.json fails the thresholds.")
-    p.add_argument("--output-dir", required=True)
-    p.set_defaults(func=check)
+    p = sub.add_parser("report", help="Write the PR report and exit non-zero if a threshold fails.")
+    p.add_argument("--photometry", help="Output directory of the photometry-only run.")
+    p.add_argument("--joint", help="Output directory of the joint (photometry + spectra) run.")
+    p.add_argument("--baseline", help="Directory with main's photometry/ and joint/ metrics.json, for the change from main.")
+    p.add_argument("--thresholds", default=str(DEFAULT_THRESHOLDS))
+    p.add_argument("--image-base-url", default=None, help="URL holding photometry/ and joint/ plot directories.")
+    p.add_argument("--sha", default="local")
+    p.add_argument("--output", default="output")
+    p.set_defaults(func=report)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -1,9 +1,43 @@
 {
-  "_comment": "Per quantity and AGN-luminosity bin. Stellar-mass limits were set from the first CI run on the 1,600-object sample (commit cc16499): measured outlier fraction + 0.05 and RMS x 1.15. Quantities missing here (log_lbol_agn, log_sfr) are reported in the PR comment but not gated. Update in the same PR as an intended change to the recovery.",
-  "log_stellar_mass": {
-    "0": {"max_outlier_fraction": 0.078, "max_rms": 0.220},
-    "1": {"max_outlier_fraction": 0.122, "max_rms": 0.325},
-    "2": {"max_outlier_fraction": 0.140, "max_rms": 0.357},
-    "3": {"max_outlier_fraction": 0.232, "max_rms": 0.505}
+  "_comment": "Per run, quantity and AGN-luminosity bin. Limits are the reference run's RMS x 1.15 and outlier fraction + 0.05: photometry-only stellar mass from cc16499, everything else from fcf3b9c (#137). Update them in the same PR as an intended change to the recovery.",
+  "photometry": {
+    "log_stellar_mass": {
+      "0": {"max_outlier_fraction": 0.078, "max_rms": 0.220},
+      "1": {"max_outlier_fraction": 0.122, "max_rms": 0.325},
+      "2": {"max_outlier_fraction": 0.140, "max_rms": 0.357},
+      "3": {"max_outlier_fraction": 0.232, "max_rms": 0.505}
+    },
+    "log_lbol_agn": {
+      "0": {"max_outlier_fraction": 0.658, "max_rms": 0.964},
+      "1": {"max_outlier_fraction": 0.675, "max_rms": 0.904},
+      "2": {"max_outlier_fraction": 0.620, "max_rms": 0.911},
+      "3": {"max_outlier_fraction": 0.902, "max_rms": 1.244}
+    },
+    "log_sfr": {
+      "0": {"max_outlier_fraction": 0.285, "max_rms": 0.500},
+      "1": {"max_outlier_fraction": 0.425, "max_rms": 0.638},
+      "2": {"max_outlier_fraction": 0.383, "max_rms": 0.678},
+      "3": {"max_outlier_fraction": 0.438, "max_rms": 0.731}
+    }
+  },
+  "joint": {
+    "log_stellar_mass": {
+      "0": {"max_outlier_fraction": 0.079, "max_rms": 0.269},
+      "1": {"max_outlier_fraction": 0.070, "max_rms": 0.245},
+      "2": {"max_outlier_fraction": 0.112, "max_rms": 0.291},
+      "3": {"max_outlier_fraction": 0.197, "max_rms": 0.461}
+    },
+    "log_lbol_agn": {
+      "0": {"max_outlier_fraction": 1.000, "max_rms": 3.067},
+      "1": {"max_outlier_fraction": 1.000, "max_rms": 2.578},
+      "2": {"max_outlier_fraction": 0.925, "max_rms": 1.383},
+      "3": {"max_outlier_fraction": 0.650, "max_rms": 0.767}
+    },
+    "log_sfr": {
+      "0": {"max_outlier_fraction": 0.981, "max_rms": 1.309},
+      "1": {"max_outlier_fraction": 0.789, "max_rms": 1.037},
+      "2": {"max_outlier_fraction": 0.842, "max_rms": 1.274},
+      "3": {"max_outlier_fraction": 0.939, "max_rms": 1.201}
+    }
   }
 }
