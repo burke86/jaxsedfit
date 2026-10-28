@@ -1,6 +1,8 @@
 data/
 # Small committed fixture for the Chimera validation (benchmarks/chimera_validation.py).
 !benchmarks/data/
+# Small photometry tables used by the tutorial notebooks.
+!notebooks/data/
 .DS_Store
 __pycache__/
 *.py[cod]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import inspect
 import json
 import os
@@ -126,28 +125,11 @@ def _workflow_url() -> str:
 
 
 def _load_fairall9_payload() -> tuple[float, list[dict[str, object]]]:
-    notebook_path = REPO_ROOT / "notebooks" / "04_fairall9_fake_photoz.ipynb"
-    nb = json.loads(notebook_path.read_text(encoding="utf-8"))
-    for cell in nb["cells"]:
-        if cell.get("cell_type") != "code":
-            continue
-        source = "".join(cell.get("source", []))
-        if "phot_rows =" not in source or "true_redshift" not in source:
-            continue
-        module = ast.parse(source)
-        true_redshift = None
-        phot_rows = None
-        for node in module.body:
-            if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
-                continue
-            name = node.targets[0].id
-            if name == "true_redshift":
-                true_redshift = float(ast.literal_eval(node.value))
-            elif name == "phot_rows":
-                phot_rows = ast.literal_eval(node.value)
-        if true_redshift is not None and phot_rows is not None:
-            return true_redshift, phot_rows
-    raise RuntimeError(f"Could not extract Fairall 9 photometry from {notebook_path}")
+    """Return the Fairall 9 redshift and photometry used by the tutorials."""
+    from astropy.table import Table
+
+    table = Table.read(REPO_ROOT / "notebooks" / "data" / "fairall9_vizier_photometry.ecsv")
+    return float(table.meta["redshift"]), [dict(zip(table.colnames, row)) for row in table]
 
 
 def _benchmark_prior_config():
