@@ -1,0 +1,29 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: grahsp_filter, datatype: string}
+# - {name: flux_mjy, datatype: float64}
+# - {name: err_mjy, datatype: float64}
+# - {name: psf_fwhm_arcsec, datatype: float64}
+# - {name: vizier_filter, datatype: string}
+# - {name: catalog, datatype: string}
+# meta: !!omap
+# - {object: Fairall 9}
+# - {redshift: 0.04587}
+# - {source: CDS VizieR SED service via jaxsedfit.vizier.query_vizier_sed; fluxes in mJy.}
+# schema: astropy-2.0
+grahsp_filter flux_mjy err_mjy psf_fwhm_arcsec vizier_filter catalog
+W4 463.99998664855957 7.000000216066837 11.99 WISE:W4 II/311/wise
+W3 241.99999868869781 4.000000189989805 7.36 WISE:W3 I/353/gsc242
+W2 104.99999672174454 1.0000000474974513 6.84 WISE:W2 II/365/catwise
+W1 73.39999824762344 0.7999999797903001 6.08 WISE:W1 II/365/catwise
+Ks_2mass 45.80000042915344 1.500000013038516 2.5 2MASS:Ks I/353/gsc242
+H_2mass 40.19999876618385 1.0999999940395355 2.5 2MASS:H I/353/gsc242
+J_2mass 25.200000032782555 0.6000000284984708 2.5 2MASS:J VII/275/glade1
+i_sdss 17.500000074505806 1.7999999690800905 1.26 SDSS:i I/353/gsc242
+r_sdss 14.100000262260437 2.400000113993883 1.32 SDSS:r I/353/gsc242
+V_johnson 12.09999993443489 0.19999999494757503 nan Johnson:V J/AJ/138/845/table2
+g_sdss 10.80000028014183 2.6000000070780516 1.44 SDSS:g I/353/gsc242
+B_johnson 12.69999984651804 0.09999999747378752 nan Johnson:B J/AJ/138/845/table2
+NUV_galex 5.270000081509352 0.029999999242136255 5.3 GALEX:NUV I/353/gsc242
+FUV_galex 4.360000137239695 0.03999999898951501 4.3 GALEX:FUV I/353/gsc242
