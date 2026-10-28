@@ -2938,13 +2938,9 @@ class JAXSEDFit:
         plotter.flux_prereduced = flux_rest
         plotter.err_prereduced = err_rest
         plotter.model_total = component("pred_spectrum_fluxes", apply_scale=False)
-        # Standardize residuals with the likelihood's effective sigma, not the raw errors.
-        spectrum_systematics_width = max(float(self.config.likelihood.spectrum_systematics_width), 0.0)
-        model_total = np.asarray(plotter.model_total, dtype=float)
+        # Standardize residuals with the likelihood's effective sigma (errors plus fitted jitter).
         plotter.err_effective = (
-            np.sqrt(np.asarray(err_rest, dtype=float) ** 2 + (spectrum_systematics_width * model_total) ** 2)
-            if model_total.shape == np.shape(err_rest)
-            else err_rest
+            component("spectrum_sigma_tot", apply_scale=False) if "spectrum_sigma_tot" in pred else err_rest
         )
         spec_host_component = component("spec_host_model_fluxes")
         plotter.host = (

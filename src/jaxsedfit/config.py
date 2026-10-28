@@ -440,7 +440,6 @@ class LikelihoodConfig:
     # the IGM). 0 evaluates the exact model every step.
     igm_redshift_table_n_grid: int = 2048
     spectrum_student_t_df: float = 5.0
-    spectrum_systematics_width: float = 0.05
     fit_spectrum_scale: bool | None = None
     spectrum_scale_prior_sigma_dex: float = 0.1
 
