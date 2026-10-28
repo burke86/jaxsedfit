@@ -3072,12 +3072,58 @@ def photometric_loglike(
     }
 
 
+def _sample_spectral_jitter_variance(prior_config, pred_fluxes, feii_fluxes, obs_errors, mask):
+    """Sample the PyQSOFit/jaxqsofit spectral jitter and return its extra variance.
+
+    The same three terms as the spectrum-only fit, added to the quoted errors in
+    quadrature: ``frac_jitter * |model|``, ``frac_fe_jitter * |Fe II|`` and
+    ``add_jitter``. The quoted spectral errors are not assumed correct.
+
+    Parameters
+    ----------
+    prior_config : mapping or None
+        Spectral prior mapping (``context.spectral_prior_config``); None uses the
+        jaxqsofit defaults.
+    pred_fluxes : jax.Array
+        Total model spectral fluxes in mJy, shape (n_pix,).
+    feii_fluxes : jax.Array
+        Fe II model spectral fluxes in mJy, shape (n_pix,).
+    obs_errors : jax.Array
+        1-sigma spectral uncertainties in mJy, shape (n_pix,).
+    mask : jax.Array
+        Boolean mask of pixels used in the likelihood, shape (n_pix,).
+    """
+    from .spectral_model import _halfnormal_prior, _sample_prior as _sample_spectral_prior
+
+    prior_config = {} if prior_config is None else prior_config
+    prior_config = {
+        "frac_fe_jitter": {"dist": "Delta", "value": 0.20},
+        "add_jitter": {"dist": "Delta", "value": 0.0},
+        **prior_config,
+    }
+    obs_errors = jnp.asarray(obs_errors, dtype=jnp.float64)
+    mask = jnp.asarray(mask, dtype=bool) & jnp.isfinite(obs_errors) & (obs_errors > 0.0)
+    mean_error = jnp.sum(jnp.where(mask, obs_errors, 0.0)) / jnp.maximum(jnp.sum(mask), 1)
+    frac_jitter = _sample_spectral_prior(prior_config, "frac_jitter", dist.HalfNormal(0.02))
+    frac_fe_jitter = _sample_spectral_prior(prior_config, "frac_fe_jitter", dist.Delta(0.20))
+    add_jitter = _sample_spectral_prior(
+        prior_config,
+        "add_jitter",
+        _halfnormal_prior(prior_config, "add_jitter", 0.1, ref_scale=mean_error),
+    )
+    return (
+        (frac_jitter * jnp.abs(pred_fluxes)) ** 2
+        + (frac_fe_jitter * jnp.abs(feii_fluxes)) ** 2
+        + add_jitter**2
+    )
+
+
 def spectroscopic_loglike(
     pred_fluxes,
     obs_fluxes,
     obs_errors,
     mask,
-    systematics_width,
+    jitter_variance,
     student_t_df,
     return_diagnostics=False,
 ):
@@ -3093,8 +3139,9 @@ def spectroscopic_loglike(
         1-sigma spectral uncertainties in mJy, shape (n_pix,).
     mask : jax.Array
         Boolean mask of pixels used in the likelihood, shape (n_pix,).
-    systematics_width : float or jax.Array
-        Fractional systematic error, scaled by the model flux.
+    jitter_variance : float or jax.Array
+        Extra variance added to ``obs_errors**2`` in mJy^2, scalar or shape
+        (n_pix,); see :func:`_sample_spectral_jitter_variance`.
     student_t_df : float or jax.Array
         Student-t degrees of freedom.
     return_diagnostics : bool, optional
@@ -3114,7 +3161,7 @@ def spectroscopic_loglike(
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     obs_fluxes = jnp.nan_to_num(obs_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     obs_errors = jnp.nan_to_num(obs_errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
-    variance = obs_errors**2 + (jnp.maximum(systematics_width, 0.0) * pred_fluxes) ** 2
+    variance = obs_errors**2 + jnp.maximum(jnp.asarray(jitter_variance, dtype=jnp.float64), 0.0)
     variance_valid = jnp.isfinite(variance) & (variance > 0.0)
     scale = jnp.sqrt(jnp.clip(variance, 1e-30, 1.0e60))
     student = dist.StudentT(df=student_t_df, loc=pred_fluxes, scale=scale)
@@ -5065,16 +5112,25 @@ def evaluate_photometric_state(
             spectral_photometry_adjustment = shared_spectral_photometry - native_replaced_photometry
             pred_fluxes = pred_fluxes + spectral_photometry_adjustment
             spec_model_fluxes = spectral_components["total"]
-        if jnp.ndim(spectrum_scale) > 0:
-            spec_model_fluxes = spectrum_scale[spec_spectrum_index] * spec_model_fluxes
+            spec_feii_fluxes = spectral_components["feii"]
         else:
-            spec_model_fluxes = spectrum_scale * spec_model_fluxes
+            spec_feii_fluxes = jnp.zeros_like(spec_model_fluxes)
+        pixel_spectrum_scale = spectrum_scale[spec_spectrum_index] if jnp.ndim(spectrum_scale) > 0 else spectrum_scale
+        spec_model_fluxes = pixel_spectrum_scale * spec_model_fluxes
+        spec_jitter_variance = _sample_spectral_jitter_variance(
+            context.spectral_prior_config,
+            spec_model_fluxes,
+            pixel_spectrum_scale * spec_feii_fluxes,
+            spec_errors,
+            spec_mask,
+        )
+        numpyro.deterministic("spectrum_sigma_tot", jnp.sqrt(spec_errors**2 + spec_jitter_variance))
         spec_logl, spec_chi2_diagnostics = spectroscopic_loglike(
             spec_model_fluxes,
             spec_fluxes,
             spec_errors,
             spec_mask,
-            cfg.likelihood.spectrum_systematics_width,
+            spec_jitter_variance,
             cfg.likelihood.spectrum_student_t_df,
             return_diagnostics=True,
         )

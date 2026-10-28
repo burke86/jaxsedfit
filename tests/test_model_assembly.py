@@ -127,6 +127,25 @@ def test_spectrum_only_context_and_likelihood(monkeypatch):
     assert "photometry_obs" not in tr
 
 
+def test_joint_spectrum_likelihood_fits_the_jaxqsofit_jitter(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(spectroscopy_enabled=True, fit_host=False, n_wave=256)
+    cfg.photometry = None
+    cfg.filters = FilterSet()
+    cfg.agn.fit_lines = False
+    cfg.agn.use_smart_line_priors = False
+    context = build_model_context(cfg)
+    tr = _deterministic_trace(context, {**_fixed_component_data(), "frac_jitter": 0.3})
+
+    assert isinstance(tr["frac_jitter"]["fn"], dist.HalfNormal)
+    assert float(tr["frac_jitter"]["fn"].scale) == pytest.approx(0.02)
+    model = np.asarray(tr["pred_spectrum_fluxes"]["value"])
+    sigma = np.sqrt(0.1**2 + (0.3 * model) ** 2)
+    np.testing.assert_allclose(tr["spectrum_sigma_tot"]["value"], sigma)
+    expected = dist.StudentT(cfg.likelihood.spectrum_student_t_df, model, sigma).log_prob(np.ones(3)).sum()
+    assert float(tr["spectroscopy_loglike_factor"]["fn"].log_factor) == pytest.approx(float(expected))
+
+
 def test_fit_config_requires_at_least_one_dataset():
     cfg = FitConfig(observation=Observation(redshift=0.1))
     with pytest.raises(ValueError, match="photometry, spectroscopy, or both"):

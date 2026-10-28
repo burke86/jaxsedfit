@@ -1439,13 +1439,14 @@ def test_spectroscopic_likelihood_ignores_nonfinite_masked_predictions():
     assert logl == pytest.approx(0.0)
 
 
-def test_spectroscopic_chi2_diagnostics_use_mask_and_systematics_variance():
+def test_spectroscopic_chi2_diagnostics_use_mask_and_jitter_variance():
+    pred = np.asarray([1.0, 3.0, 4.0])
     _, diagnostics = spectroscopic_log_likelihood(
-        np.asarray([1.0, 3.0, 4.0]),
+        pred,
         np.asarray([2.0, 2.0, 9.0]),
         np.asarray([1.0, 1.0, 1.0]),
         np.asarray([True, True, False]),
-        0.5,
+        (0.5 * pred) ** 2,
         5.0,
         return_diagnostics=True,
     )
@@ -2547,7 +2548,6 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
             filter_names=["W1", "r_sdss", "u_sdss", "g_sdss", "z_sdss", "i_sdss"],
             photometry_method=["catalog", "psf", "psf", "catalog", "psf", "psf"],
         ),
-        likelihood=SimpleNamespace(spectrum_systematics_width=0.05),
         agn=SimpleNamespace(
             custom_components=(
                 SimpleNamespace(
@@ -2574,6 +2574,7 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
             "pred_spectrum_fluxes": np.asarray([[1.1, 2.2, 3.3], [1.3, 2.4, 3.5]]),
             "spec_host_model_fluxes": np.asarray([[0.2, 0.3, 0.4], [0.25, 0.35, 0.45]]),
             "spec_disk_model_fluxes": np.asarray([[0.5, 0.6, 0.7], [0.55, 0.65, 0.75]]),
+            "spectrum_sigma_tot": np.asarray([[0.2, 0.3, 0.4], [0.4, 0.5, 0.6]]),
             "spec_torus_model_fluxes": np.asarray([[0.05, 0.06, 0.07], [0.055, 0.065, 0.075]]),
             "spectral_continuum_model": np.asarray([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]),
             "spectral_line_model": np.asarray([[0.1, 0.2, 0.3], [0.3, 0.4, 0.5]]),
@@ -2604,7 +2605,7 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
     assert np.all(captured["model_total"] > captured["flux"] * 0.0)
     np.testing.assert_allclose(
         captured["err_effective"],
-        np.sqrt(captured["err"] ** 2 + (0.05 * captured["model_total"]) ** 2),
+        JAXSEDFit._mjy_to_rest_flambda_1e17(np.asarray([4000.0, 5000.0, 6000.0]), np.asarray([0.3, 0.4, 0.5]), 1.0),
     )
     assert np.all(captured["host"] > 0.0)
     np.testing.assert_allclose(
