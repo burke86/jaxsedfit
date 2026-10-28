@@ -35,6 +35,11 @@ def test_chimera_report_gates_every_quantity_and_shows_the_change_from_main():
     assert len(failures) == 3 * 4  # every quantity is gated in every bin
     assert "❌ failed" in text
 
+    # A run whose fit job crashed is a failure, not a silent omission.
+    text, failures = cv.render_report({"photometry": _metrics(0.4, 0.1)}, thresholds, sha="abc", missing=["joint"])
+    assert failures == ["Photometry + spectra: no results (the fit did not finish; see the workflow run)"]
+    assert "❌ failed" in text and "photometry + spectra: ❌ no results" in text
+
 
 def test_perf_report_fails_only_slowdowns_beyond_the_noise():
     bench = _load("jaxsedfit_pr_benchmark")
