@@ -2,6 +2,7 @@ import numpy as np
 import numpyro.distributions as dist
 import pytest
 
+from jaxsedfit.spectral_reparameterization import TruncatedLogNormal
 from jaxsedfit.spectral_config import (
     AGNConfig,
     BALConfig,
@@ -483,8 +484,9 @@ def test_build_default_prior_config_uses_explicit_dist_fields():
     assert np.isclose(mapping["Fe_uv_norm"].loc, np.log(0.03 * 2.0))
     assert float(mapping["Fe_uv_norm"].scale) == 1.0
     assert isinstance(mapping["log_Fe_op_over_uv"], dist.Normal)
-    assert isinstance(mapping["Fe_FWHM"], dist.LogNormal)
-    assert isinstance(mapping["Fe_shift"], dist.Normal)
+    assert isinstance(mapping["Fe_FWHM"], TruncatedLogNormal)
+    assert float(mapping["Fe_FWHM"].high) == 10000.0
+    assert float(mapping["Fe_shift"].high) == 0.01
     assert isinstance(mapping["frac_jitter"], dist.HalfNormal)
     assert mapping["frac_fe_jitter"] == {"dist": "Delta", "value": 0.20}
     assert mapping["add_jitter"] == {"dist": "Delta", "value": 0.0}

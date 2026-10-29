@@ -198,10 +198,10 @@ and joint spectral amplitudes have different normalizations.
      - Native Fe II strength relative to the broad-line normalization.
    * - ``feii_fwhm``
      - km / s
-     - Native Fe II broadening FWHM.
+     - Native Fe II broadening FWHM. Default prior: log-normal around 3000 km/s, at most 10,000 km/s.
    * - ``feii_shift``
      - dimensionless
-     - Native Fe II shift coordinate; applied as velocity c times shift in ln wavelength.
+     - Native Fe II shift coordinate; applied as velocity c times shift in ln wavelength. Default prior: Normal(0, 0.01), limited to ±0.01 (about ±3000 km/s).
    * - ``balmer_norm``
      - dimensionless
      - Native Balmer-continuum strength relative to the disk L_lambda normalization.
@@ -515,10 +515,10 @@ per-spectrum calibration and aperture capture.
      - Observed normalization at the configured f_nu pivot, transformed to the shared source coordinate using spectral_feature_amplitude_scale.
    * - ``spectral_feii_fwhm``, ``spectral_balmer_vel``
      - km / s
-     - Fe II FWHM and Balmer broadening scale.
+     - Fe II FWHM and Balmer broadening scale. The default Fe II width prior is log-normal around 3000 km/s with an upper limit of 10,000 km/s, so a very broad, featureless template cannot stand in for continuum.
    * - ``spectral_feii_shift``
      - dimensionless
-     - Fe II ln-wavelength shift coordinate (velocity approximately c times shift).
+     - Fe II ln-wavelength shift coordinate (velocity approximately c times shift). Default prior: Normal(0, 0.01), limited to ±0.01 (about ±3000 km/s).
    * - ``spectral_balmer_tau``
      - dimensionless
      - Balmer edge optical depth.

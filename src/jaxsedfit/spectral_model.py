@@ -30,6 +30,7 @@ from .spectral_custom_components import (
     normalize_custom_line_components,
 )
 from .spectral_contract import SpectralSites, normalize_line_definitions
+from .spectral_reparameterization import TruncatedLogNormal
 from .spectral_config import ErrorScaledHalfNormalPrior
 from .velocity import shift_and_broaden_lnlam as _fourier_shift_and_broaden_lnlam
 
@@ -37,6 +38,10 @@ C_KMS = 299792.458
 LINE_COVERAGE_NSIGMA = 3.0
 BROAD_LINE_COVERAGE_FWHM_KMS = 10000.0
 NARROW_LINE_COVERAGE_FWHM_KMS = 1200.0
+# Upper limit of the default Fe II width prior [km/s].
+FE_FWHM_KMS_MAX = 10000.0
+# Fe II velocity shift limit (v/c), about 3000 km/s.
+FE_SHIFT_MAX = 0.01
 _SFD_QUERY_CACHE: Dict[str, Any] = {}
 _LUMINOSITY_H0 = 70.0
 _LUMINOSITY_OM0 = 0.3
@@ -1716,6 +1721,12 @@ def _prior_distribution(prior_config, key, default_distribution):
         return dist.LogNormal(
             jnp.asarray(cfg.get("loc", 0.0), dtype=jnp.float64),
             jnp.maximum(jnp.asarray(cfg.get("scale", 1.0), dtype=jnp.float64), 1.0e-6),
+        )
+    if dist_name == "truncatedlognormal":
+        return TruncatedLogNormal(
+            jnp.asarray(cfg.get("loc", 0.0), dtype=jnp.float64),
+            jnp.maximum(jnp.asarray(cfg.get("scale", 1.0), dtype=jnp.float64), 1.0e-6),
+            jnp.asarray(cfg.get("high", jnp.inf), dtype=jnp.float64),
         )
     if dist_name in {"halfnormal", "half_normal"}:
         return dist.HalfNormal(jnp.maximum(jnp.asarray(cfg.get("scale", 1.0), dtype=jnp.float64), 1.0e-6))
@@ -4126,8 +4137,8 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             prior_config,
             value_key=fe_fwhm_value_key,
             log_key=fe_fwhm_log_key,
-            default_value_distribution=dist.LogNormal(np.log(3000.0), 0.5),
-            default_log_distribution=dist.Normal(np.log(3000.0), 0.5),
+            default_value_distribution=TruncatedLogNormal(np.log(3000.0), 0.5, FE_FWHM_KMS_MAX),
+            default_log_distribution=dist.TruncatedNormal(np.log(3000.0), 0.5, high=np.log(FE_FWHM_KMS_MAX)),
         )
         if fe_fwhm_value_key != 'Fe_FWHM':
             numpyro.deterministic('Fe_FWHM', fe_fwhm)
@@ -4143,7 +4154,9 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             (key for key in ('Fe_shift', 'Fe_uv_shift', 'Fe_op_shift') if key in prior_config),
             'Fe_shift',
         )
-        fe_shift = _sample_prior(prior_config, fe_shift_key, dist.Normal(0.0, 0.01))
+        fe_shift = _sample_prior(
+            prior_config, fe_shift_key, dist.TruncatedNormal(0.0, 0.01, low=-FE_SHIFT_MAX, high=FE_SHIFT_MAX)
+        )
         if fe_shift_key != 'Fe_shift':
             numpyro.deterministic('Fe_shift', fe_shift)
         fe_uv_shift = (

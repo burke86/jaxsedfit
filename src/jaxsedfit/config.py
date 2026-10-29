@@ -8,6 +8,7 @@ import numpy as np
 import numpyro.distributions as dist
 
 from .spectral_contract import SpectrumConfig
+from .spectral_reparameterization import TruncatedLogNormal
 
 
 @dataclass
@@ -549,6 +550,13 @@ def _numpyro_distribution_to_mapping(value: Any) -> dict[str, Any] | None:
         Candidate NumPyro distribution instance. Unsupported non-distribution
         objects return ``None``.
     """
+    if isinstance(value, TruncatedLogNormal):
+        return {
+            "dist": "TruncatedLogNormal",
+            "loc": _scalar_or_list(value.loc),
+            "scale": _scalar_or_list(value.scale),
+            "high": _scalar_or_list(value.high),
+        }
     module = getattr(value.__class__, "__module__", "")
     if not module.startswith("numpyro.distributions"):
         return None
@@ -621,6 +629,8 @@ def _mapping_to_numpyro_distribution(value: Mapping[str, Any]) -> dist.Distribut
         )
     if family in {"lognormal", "log-normal", "log_normal"}:
         return dist.LogNormal(value.get("loc", 0.0), value.get("scale", 1.0))
+    if family == "truncatedlognormal":
+        return TruncatedLogNormal(value.get("loc", 0.0), value.get("scale", 1.0), value.get("high", np.inf))
     if family in {"halfnormal", "half_normal"}:
         return dist.HalfNormal(value.get("scale", 1.0))
     if family in {"student_t", "studentt", "t"}:

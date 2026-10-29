@@ -8,7 +8,8 @@ import numpyro.distributions as dist
 
 from .spectral_config import PriorConfig
 from .spectral_custom_components import CustomComponentSpec, make_custom_component
-from .spectral_model import gaussian_bal_optical_depth_component
+from .spectral_model import FE_FWHM_KMS_MAX, FE_SHIFT_MAX, gaussian_bal_optical_depth_component
+from .spectral_reparameterization import TruncatedLogNormal
 
 MINSCA_DEFAULT = 0.0
 MAXSCA_DEFAULT = 1e10
@@ -716,8 +717,9 @@ def _build_default_prior_config(
         "log_gal_sigma_kms": dist.TruncatedNormal(np.log(150.0), 0.4, low=np.log(30.0), high=np.log(500.0)),
         "Fe_uv_norm": dist.LogNormal(np.log(max(0.03 * fscale, 1e-12)), 1.0),
         "log_Fe_op_over_uv": dist.Normal(0.0, 1.0),
-        "Fe_FWHM": dist.LogNormal(np.log(3000.0), 0.5),
-        "Fe_shift": dist.Normal(0.0, 1e-3),
+        # Upper limit keeps a very broad, featureless Fe II from standing in for continuum.
+        "Fe_FWHM": TruncatedLogNormal(np.log(3000.0), 0.5, FE_FWHM_KMS_MAX),
+        "Fe_shift": dist.TruncatedNormal(0.0, 1e-3, low=-FE_SHIFT_MAX, high=FE_SHIFT_MAX),
         "Balmer_norm": dist.LogNormal(np.log(max(1e-3 * fscale, AMPLITUDE_FLOOR)), 0.5),
         "Balmer_Tau": dist.LogNormal(np.log(0.5), 0.25),
         "log_Balmer_vel": dist.TruncatedNormal(np.log(3000.0), 0.3, low=np.log(1000.0), high=np.log(15000.0)),
