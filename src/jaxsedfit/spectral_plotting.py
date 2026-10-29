@@ -16,12 +16,12 @@ import numpy as np
 from astropy import units as u
 
 from .filters import load_filter_curves
-from .plotting import _STANDARDIZED_RESIDUAL_LABEL, _standardized_residuals
+from .plotting import PLOT_COLORS, _STANDARDIZED_RESIDUAL_LABEL, _standardized_residuals
 
 _SDSS_PSF_BANDS = ("u", "g", "r", "i", "z")
 _SDSS_FILTER_CACHE = None
 _BAL_COMPONENT_COLOR = "#D55E00"
-_TOTAL_LINES_COLOR = "#56B4E9"
+_TOTAL_LINES_COLOR = PLOT_COLORS["agn_lines"]
 _BAL_COMPONENT_LINEWIDTH = 1.8
 _CUSTOM_COMPONENT_LINEWIDTH = 1.4
 _CUSTOM_COMPONENT_COLORS = (
@@ -33,8 +33,12 @@ _CUSTOM_COMPONENT_COLORS = (
     "deeppink",
 )
 _NAMED_COMPONENT_COLORS = {
-    "broad_lines": "#CC79A7",
-    "narrow_lines": "#009E73",
+    # The total line model uses the SED's AGN-line color; its broad part a darker shade.
+    "broad_lines": "#97266d",
+    "narrow_lines": PLOT_COLORS["nebular"],
+    "jaxsedfit_torus": PLOT_COLORS["torus"],
+    "jaxsedfit_host_dust": PLOT_COLORS["host_dust"],
+    "jaxsedfit_sed_balmer": PLOT_COLORS["balmer"],
 }
 
 
@@ -288,16 +292,16 @@ def plot_initialization(
             arr = arr[np.isfinite(arr)]
             return arr.size > 0 and float(np.nanmax(np.abs(arr))) >= comp_floor
 
-        ax.plot(wave, flux, color="k", lw=1.0, alpha=1.0, label="data", zorder=2, rasterized=True)
-        ax.plot(wave, model, color="b", lw=1.8, label=model_label, zorder=6, rasterized=True)
+        ax.plot(wave, flux, color=PLOT_COLORS["data"], lw=1.0, alpha=1.0, label="data", zorder=2, rasterized=True)
+        ax.plot(wave, model, color=PLOT_COLORS["model"], lw=1.8, label=model_label, zorder=6, rasterized=True)
         if _show_component(host):
-            ax.plot(wave, host, color="purple", lw=1.8, label="host galaxy", zorder=4, rasterized=True)
+            ax.plot(wave, host, color=PLOT_COLORS["host"], lw=1.8, label="host galaxy", zorder=4, rasterized=True)
         else:
-            ax.plot(wave, host, color="purple", lw=1.8, zorder=4, rasterized=True)
+            ax.plot(wave, host, color=PLOT_COLORS["host"], lw=1.8, zorder=4, rasterized=True)
         if _show_component(powerlaw):
-            ax.plot(wave, powerlaw, color="orange", lw=1.5, label="power law", zorder=5, rasterized=True)
+            ax.plot(wave, powerlaw, color=PLOT_COLORS["agn_disk"], lw=1.5, label="power law", zorder=5, rasterized=True)
         else:
-            ax.plot(wave, powerlaw, color="orange", lw=1.5, zorder=5, rasterized=True)
+            ax.plot(wave, powerlaw, color=PLOT_COLORS["agn_disk"], lw=1.5, zorder=5, rasterized=True)
         if _show_component(line):
             ax.plot(wave, line, color=_TOTAL_LINES_COLOR, lw=1.5, label="lines", zorder=5, rasterized=True)
 
@@ -834,11 +838,11 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
     pred_bands = getattr(fitter, "pred_bands_psf" if use_psf_space else "pred_bands", None) or {}
     if plot_1sigma and pred_bands:
         band_colors = {
-            'total_model': 'b',
-            'host': 'purple',
-            'PL': 'orange',
-            'FeII': 'teal',
-            'Balmer_cont': 'y',
+            'total_model': PLOT_COLORS["model"],
+            'host': PLOT_COLORS["host"],
+            'PL': PLOT_COLORS["agn_disk"],
+            'FeII': PLOT_COLORS["feii"],
+            'Balmer_cont': PLOT_COLORS["balmer"],
             'lines': _TOTAL_LINES_COLOR,
         }
         for key, color in band_colors.items():
@@ -880,7 +884,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
                     fitter.wave,
                     lo,
                     hi,
-                    color='darkorange',
+                    color=PLOT_COLORS["agn_disk"],
                     alpha=sigma_alpha,
                     linewidth=0,
                     zorder=0,
@@ -890,28 +894,28 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
     ax.plot(
         fitter.wave_prereduced,
         fitter.flux_prereduced,
-        color='k' if not use_psf_space else 'gray',
+        color=PLOT_COLORS["data"] if not use_psf_space else 'gray',
         lw=1,
         label='data' if not use_psf_space else 'fiber data',
         zorder=2,
         alpha=1.0 if not use_psf_space else 0.6,
         rasterized=True,
     )
-    ax.plot(fitter.wave, total_model_plot, color='b', lw=1.8, label=total_model_label, zorder=6, rasterized=True)
+    ax.plot(fitter.wave, total_model_plot, color=PLOT_COLORS["model"], lw=1.8, label=total_model_label, zorder=6, rasterized=True)
     if _show_component(host_plot):
-        ax.plot(fitter.wave, host_plot, color='purple', lw=1.8, label=host_label, zorder=4, rasterized=True)
+        ax.plot(fitter.wave, host_plot, color=PLOT_COLORS["host"], lw=1.8, label=host_label, zorder=4, rasterized=True)
     else:
-        ax.plot(fitter.wave, host_plot, color='purple', lw=1.8, zorder=4, rasterized=True)
+        ax.plot(fitter.wave, host_plot, color=PLOT_COLORS["host"], lw=1.8, zorder=4, rasterized=True)
     if _show_component(pl_plot):
-        ax.plot(fitter.wave, pl_plot, color='orange', lw=1.5, label=powerlaw_label, zorder=5, rasterized=True)
+        ax.plot(fitter.wave, pl_plot, color=PLOT_COLORS["agn_disk"], lw=1.5, label=powerlaw_label, zorder=5, rasterized=True)
     else:
-        ax.plot(fitter.wave, pl_plot, color='orange', lw=1.5, zorder=5, rasterized=True)
+        ax.plot(fitter.wave, pl_plot, color=PLOT_COLORS["agn_disk"], lw=1.5, zorder=5, rasterized=True)
     if bool(plot_intrinsic_powerlaw) and pl_intrinsic_plot.size == len(fitter.wave):
         if _show_component(pl_intrinsic_plot):
             ax.plot(
                 fitter.wave,
                 pl_intrinsic_plot,
-                color='darkorange',
+                color=PLOT_COLORS["agn_disk"],
                 lw=1.4,
                 ls='--',
                 label=intrinsic_powerlaw_label,
@@ -919,15 +923,15 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
                 rasterized=True,
             )
         else:
-            ax.plot(fitter.wave, pl_intrinsic_plot, color='darkorange', lw=1.4, ls='--', zorder=5, rasterized=True)
+            ax.plot(fitter.wave, pl_intrinsic_plot, color=PLOT_COLORS["agn_disk"], lw=1.4, ls='--', zorder=5, rasterized=True)
     if _show_component(fe_total_model):
-        ax.plot(fitter.wave, fe_total_model, color='teal', lw=1.2, label=fe_label, zorder=5, rasterized=True)
+        ax.plot(fitter.wave, fe_total_model, color=PLOT_COLORS["feii"], lw=1.2, label=fe_label, zorder=5, rasterized=True)
     else:
-        ax.plot(fitter.wave, fe_total_model, color='teal', lw=1.2, zorder=5, rasterized=True)
+        ax.plot(fitter.wave, fe_total_model, color=PLOT_COLORS["feii"], lw=1.2, zorder=5, rasterized=True)
     if _show_component(bc_plot):
-        ax.plot(fitter.wave, bc_plot, color='y', lw=1.2, label=bc_label, zorder=5, rasterized=True)
+        ax.plot(fitter.wave, bc_plot, color=PLOT_COLORS["balmer"], lw=1.2, label=bc_label, zorder=5, rasterized=True)
     else:
-        ax.plot(fitter.wave, bc_plot, color='y', lw=1.2, zorder=5, rasterized=True)
+        ax.plot(fitter.wave, bc_plot, color=PLOT_COLORS["balmer"], lw=1.2, zorder=5, rasterized=True)
     custom_component_zorder = 4.8
     bal_legend_drawn = False
     for idx, (name, model) in enumerate(custom_components + custom_line_components):
@@ -1018,7 +1022,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             xerr=phot_xerr,
             fmt='o',
             ms=7,
-            color='crimson',
+            color=PLOT_COLORS["model"],
             mec='white',
             mew=0.8,
             elinewidth=1.0,

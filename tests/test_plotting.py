@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from jaxsedfit.plotting import (
+    PLOT_COLORS,
     _COMPONENT_STYLE,
     _STANDARDIZED_RESIDUAL_LABEL,
     _bridged_jaxsedfit_agn_lines,
@@ -62,10 +63,11 @@ def test_component_style_separates_feii_from_agn_lines():
 
 def test_spectral_line_colors_are_stable_and_semantic():
     for index in range(12):
-        assert _spectral_component_color("broad_lines", index) == "#CC79A7"
-        assert _spectral_component_color("narrow_lines", index) == "#009E73"
+        assert _spectral_component_color("broad_lines", index) == "#97266d"
+        assert _spectral_component_color("jaxsedfit_torus", index) == PLOT_COLORS["torus"]
+        assert _spectral_component_color("narrow_lines", index) == PLOT_COLORS["nebular"]
     assert _spectral_component_color("bal_civ", 2) == "#D55E00"
-    assert _TOTAL_LINES_COLOR == "#56B4E9"
+    assert _TOTAL_LINES_COLOR == PLOT_COLORS["agn_lines"]
     assert _spectral_component_linewidth("bal_civ") == pytest.approx(1.8)
     assert _spectral_component_linewidth("broad_lines") == pytest.approx(1.4)
 
@@ -160,7 +162,7 @@ def test_plot_fit_sed_writes_output(tmp_path):
         if line.get_label() == "Observed spectrum"
     ]
     assert len(spectrum_lines) == 1
-    assert spectrum_lines[0].get_color() == "#c53030"
+    assert spectrum_lines[0].get_color() == PLOT_COLORS["data"]
     assert np.array_equal(spectrum_lines[0].get_xdata(), np.array([1800.0, 2600.0]))
     assert np.array_equal(spectrum_lines[0].get_ydata(), np.array([2.4, 2.6]))
     agn_line_curves = [line for line in fig.axes[0].lines if line.get_label() == "AGN lines"]
