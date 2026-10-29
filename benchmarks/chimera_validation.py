@@ -120,8 +120,7 @@ def make_sample(args) -> int:
             raise SystemExit("--max-qso-host-contamination needs chimeras built with add_host_contamination.py")
         rows = [r for r in rows if r["qso_host_contamination_dex"] < args.max_qso_host_contamination]
 
-    # Same selection as notebooks/03_chimera_benchmarks.ipynb: up to N objects per bin of
-    # true injected AGN luminosity, drawn without selecting on the QSO weight.
+    # Up to N objects per bin of true injected AGN luminosity, drawn without selecting on the QSO weight.
     rng = np.random.default_rng(args.seed)
     selected = []
     for b, (lo, hi) in enumerate(zip(LUMINOSITY_BIN_EDGES[:-1], LUMINOSITY_BIN_EDGES[1:])):
@@ -194,6 +193,10 @@ def _configs(rows, dsps_ssp_fn, steps, learning_rate, spectra=None):
             cfg.agn.fit_lines = True
             cfg.agn.fit_feii = True
             cfg.likelihood.fit_spectrum_scale = False
+            # The spectra resolve the host's absorption lines and continuum shape; without the
+            # velocity dispersion and a recent burst, the AGN continuum absorbs the host misfit.
+            cfg.galaxy.fit_host_kinematics = True
+            cfg.galaxy.host_sfh_model = "delayed_burst"
         configs.append(cfg)
     return configs
 
