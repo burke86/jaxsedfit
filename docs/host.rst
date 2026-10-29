@@ -68,7 +68,9 @@ Star-formation history
 ``"diffstar"``
    The Diffstar parameterization.
 
-By default the delayed SFHs use GRAHSP-like priors on the SFH age and ``tau``. Flat
+By default the delayed SFHs use GRAHSP-like priors on the SFH age and ``tau``:
+log-uniform from about 160 Myr to 10 Gyr (or the age of the Universe) and from 0.1 to
+10 Gyr. :doc:`likelihood` lists all default priors, including the burst's. Flat
 priors on age and ``tau`` are not flat in derived quantities: they imply a fairly
 informative prior on the specific star-formation rate. When the photometry does not
 constrain the SFH well, you can put the prior on the sSFR (current SFR per formed

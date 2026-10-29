@@ -133,6 +133,139 @@ the fields you set change; everything else keeps its default.
 ``log_*`` parameters other than ``log_stellar_mass`` use the natural logarithm (see
 :doc:`outputs`).
 
+Default priors
+~~~~~~~~~~~~~~
+
+These are the priors used when ``cfg.prior_config`` leaves a field unset. "ln" and
+"log-uniform" refer to the natural logarithm; stellar mass is in log10. A parameter
+marked "fixed" is not fitted unless you give it a prior.
+
+.. list-table:: Host
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Parameter
+     - Default prior
+   * - ``log_stellar_mass``
+     - Student-t, 5 degrees of freedom, centered at 10 with scale 2 (log10 M\ :sub:`☉`)
+   * - ``log_sfh_age_gyr``
+     - Log-uniform from 10\ :sup:`-0.8` Gyr (about 160 Myr) to 10 Gyr or the age of
+       the Universe at the redshift, whichever is smaller
+   * - ``log_sfh_tau_gyr``
+     - Log-uniform from 0.1 to 10 Gyr
+   * - burst (``host_sfh_model="delayed_burst"``)
+     - Mass fraction log-uniform from 10\ :sup:`-4` to 0.2; age log-uniform from
+       10 Myr to the smaller of the SFH age and 500 Myr; e-folding time log-uniform
+       from 10 to 200 Myr
+   * - ``log_sfh_ssfr`` (``sfh_prior="ssfr_uniform"``)
+     - Uniform in log10 sSFR over ``galaxy.ssfr_prior_range`` (−14 to −8); see
+       :doc:`host`
+   * - ``gal_lgmet``, ``gal_lgmet_scatter``
+     - Fixed at ``galaxy.stellar_metallicity`` (0.019) and
+       ``galaxy.stellar_metallicity_scatter`` (0)
+   * - ``ebv_gal``
+     - Log-uniform from 0.01 to 10 mag
+   * - ``dust_delta`` (``attenuation_curve="noll2009"``)
+     - Normal(−0.2, 0.3) truncated to [−0.8, 0.4]
+   * - ``dust_alpha`` (Dale et al. 2014 dust)
+     - Uniform from 0.75 to 2.75
+   * - ``dust_umin`` (Draine & Li 2007 dust)
+     - Uniform from 0.1 to 25
+   * - ``gal_v_kms``, ``gal_sigma_kms`` (``fit_host_kinematics``, spectra only)
+     - Normal(0, 150) and HalfNormal(150), in km/s
+   * - nebular ``logU``, ``zgas``, ``ne``
+     - Fixed (see :doc:`host`)
+
+.. list-table:: AGN continuum and torus
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Parameter
+     - Default prior
+   * - ``log_agn_amp``
+     - Normal with width 3 (ln), centered 4 below a rough estimate of
+       λL\ :sub:`λ`\ (5100 Å) from the band nearest rest 5100 Å
+   * - ``pl_slope``
+     - Normal(−1.85, 0.6) truncated to [−2.7, −1.0]
+   * - ``uv_slope``
+     - Fixed at 0, as in GRAHSP
+   * - ``pl_bend_loc``
+     - Normal(1000, 500) Å truncated to [500, 1500] Å
+   * - ``pl_bend_width``
+     - Normal(5.05, 4.95) truncated to [0.1, 10]
+   * - ``pl_cutoff``
+     - Fixed at 10\ :sup:`5` Å
+   * - ``ebv_agn``
+     - Log-uniform from 0.01 to 10 mag (in addition to ``ebv_gal``; see
+       :doc:`agn`)
+   * - ``fcov``
+     - Uniform from 0.05 to 0.95
+   * - ``si``
+     - Normal(0, 1)
+   * - ``cool_lam``, ``hot_lam``
+     - Uniform from 10 to 30 µm and from 1 to 5.5 µm
+   * - ``cool_width``, ``hot_width``
+     - Uniform from 0.2 to 0.65 dex
+   * - ``hot_fcov``
+     - Log-uniform from 0.04 to 10
+
+.. list-table:: AGN emission features
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Parameter
+     - Default prior
+   * - ``broad_lines_strength``
+     - Log-uniform from 0.3 to 20 (broadband line template)
+   * - ``narrow_lines_strength``
+     - Log-normal around 1, width 0.5 (ln)
+   * - ``broad_line_width_kms``
+     - Log-normal around 3000 km/s, width 0.4 (ln), truncated to 1000–15,000 km/s
+   * - ``narrow_line_width_kms``
+     - Log-normal around 500 km/s, width 0.3 (ln), truncated to 100–1500 km/s
+   * - ``feii_norm``
+     - Log-uniform from 0.63 to 31.6, relative to the broad lines
+   * - ``feii_fwhm``, ``feii_shift`` (``fit_feii_broadening``)
+     - Log-normal around 3000 km/s with width 0.3 (ln), and Normal(0, 0.01) in v/c;
+       otherwise fixed at 3000 km/s and 0
+   * - ``balmer_norm``, ``balmer_tau``, ``balmer_vel``
+     - Log-normal around 10\ :sup:`-3`, 1 and 3000 km/s, with widths 1, 0.5 and
+       0.4 (ln)
+   * - spectral Fe II (joint fits): ``spectral_feii_norm``, ``_fwhm``, ``_shift``
+     - Log-normal around 10\ :sup:`-3` with width 2 (ln); log-normal around
+       3000 km/s with width 0.4 (ln); Normal(0, 0.01) in v/c
+   * - spectral Balmer continuum: ``spectral_balmer_norm``, ``_tau``, ``_vel``
+     - Log-normal around 10\ :sup:`-3`, 1 and 3000 km/s, with widths 2, 0.5 and
+       0.4 (ln)
+   * - spectral emission lines
+     - From the line table (see :doc:`agn`)
+
+.. list-table:: Calibration and error model
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Parameter
+     - Default prior
+   * - ``systematics_width``
+     - ln-normal around 0.10 with width 0.05, truncated to 0.07–0.15
+   * - ``agn_systematics_width``
+     - Log-normal around 0.20, width 0.5 (ln)
+   * - ``log_host_capture_scale_arcsec``
+     - Normal(ln 3, 1), with the host-capture model on
+   * - ``missing_psf_host_capture_fraction``
+     - Uniform from 0 to 1
+   * - ``log_spectrum_scale``
+     - Normal with width ``spectrum_scale_prior_sigma_dex`` (0.1 dex)
+   * - ``spectral_continuum_tilt``
+     - Normal(0, 0.1), with ``agn.fit_spectrum_tilt``
+   * - ``frac_jitter``
+     - HalfNormal(0.02)
+   * - ``frac_fe_jitter``, ``add_jitter``
+     - Fixed at 0.20 and 0
+   * - ``redshift`` (``redshift_mode="fit"``)
+     - Normal around the input redshift with width ``redshift_err`` (at least
+       0.001), truncated at zero, or the tabulated prior below
+
 Fitting the redshift
 --------------------
 
