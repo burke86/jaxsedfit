@@ -45,6 +45,44 @@ In joint fits, the lines covered by the spectrum use the detailed spectral line
 model; the SED-scale corrections still apply to filters outside the spectral
 coverage.
 
+AGN luminosity and reddening
+----------------------------
+
+The disk, Fe II, Balmer continuum and AGN emission lines pass through two dust
+screens: the host galaxy's (``ebv_gal``, which also attenuates the stars) and an
+additional nuclear one (``ebv_agn``). The torus sees only the host screen. The AGN
+luminosities therefore come in two versions:
+
+``dereddened``
+   Corrected for both screens: the intrinsic luminosity of the model.
+   ``log_agn_bol_luminosity_fit`` is this version.
+
+``attenuated``
+   Not corrected: what an observer would measure from the AGN continuum, as in
+   quasar catalogs that do not correct for reddening, such as the SDSS
+   luminosities of Shen et al. (2011).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 46 54
+
+   * - Output
+     - Definition
+   * - ``log_agn_l5100_dereddened_fit``, ``log_agn_l5100_attenuated_fit``
+     - :math:`\lambda L_\lambda` of the AGN disk at rest 5100 Å, in log10(W)
+   * - ``log_agn_bol_luminosity_dereddened_fit``, ``log_agn_bol_luminosity_attenuated_fit``
+     - :math:`9.26\,\lambda L_{5100}`, in log10(W)
+   * - ``agn_transmission_5100_fit``
+     - Fraction of the AGN light at 5100 Å that passes both screens
+
+The attenuated value is the dereddened one times ``agn_transmission_5100_fit``.
+Luminosities are in W; add 7 to the logarithms for erg s\ :sup:`-1`.
+
+Compare with the version that matches the reference. The Chimera tutorial
+(:doc:`tutorials`) is an example: its quasar never passed through the host's dust and its
+reference luminosity is not dereddened, so the attenuated luminosity is the right
+comparison.
+
 Emission-line table
 -------------------
 

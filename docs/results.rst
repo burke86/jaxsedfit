@@ -28,6 +28,9 @@ Check the units in :doc:`outputs` before converting outputs. In particular,
 luminosities are in W, so ``log_agn_bol_luminosity_fit + 7`` is the
 base-10 logarithm in erg s\ :sup:`-1`, and most ``log_*`` parameters other than
 the stellar mass, SFR and luminosities use the natural logarithm.
+AGN luminosities come in ``dereddened`` and ``attenuated`` versions; compare a
+catalog luminosity that was not corrected for reddening with the attenuated one
+(see :doc:`agn`).
 
 To request additional NumPyro sample or deterministic sites:
 
