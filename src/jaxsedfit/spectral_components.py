@@ -26,6 +26,7 @@ from .spectral_model import (
 )
 from .spectral_reparameterization import (
     NORMAL_LOGNORMAL_STANDARDIZATION,
+    TruncatedLogNormal,
     standardized_prior_site,
 )
 from .spectral_custom_components import (
@@ -96,6 +97,11 @@ class SpectralComponentConfig:
     fixed_narrow_amp_scale: Any | None = None
     line_velocity_sigma_kms: float = 500.0
     feii_fwhm_kms_default: float = 3000.0
+    # Upper limit of the Fe II width prior; without it a smooth, very broad Fe II
+    # template can stand in for continuum misfit.
+    feii_fwhm_kms_max: float = 10000.0
+    # Fe II velocity shift limit (v/c); about 3000 km/s, as in PyQSOFit.
+    feii_shift_max: float = 0.01
     balmer_velocity_kms_default: float = 3000.0
     broadening_convolution: str = "fft"
     feii_fnu_pivot_rest: float | None = None
@@ -862,11 +868,11 @@ def evaluate_joint_spectral_components(
         feii_norm = feii_norm_observed / feature_amplitude_scale
         feii_fwhm = _sample_standardizable_feature_prior(
             f"{site_prefix}_feii_fwhm",
-            dist.LogNormal(jnp.log(max(cfg.feii_fwhm_kms_default, 1.0)), 0.4),
+            TruncatedLogNormal(jnp.log(max(cfg.feii_fwhm_kms_default, 1.0)), 0.4, cfg.feii_fwhm_kms_max),
         )
         feii_shift = _sample_standardizable_feature_prior(
             f"{site_prefix}_feii_shift",
-            dist.Normal(0.0, 0.01),
+            dist.TruncatedNormal(0.0, 0.01, low=-cfg.feii_shift_max, high=cfg.feii_shift_max),
         )
         # Fe II widths are FWHM; add the instrumental FWHM in quadrature.
         feii_flambda_shape = _broaden_per_instrument(

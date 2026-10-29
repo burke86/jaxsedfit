@@ -5,12 +5,48 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
+from jax.scipy.special import ndtr, ndtri
 from numpyro.infer.reparam import Reparam
 
 
 NORMAL_LOGNORMAL_STANDARDIZATION = (
     "spectral_normal_lognormal_standardization"
 )
+
+
+class TruncatedLogNormal(dist.TransformedDistribution):
+    """LogNormal truncated above at ``high``: ``log x ~ Normal(loc, scale)``, ``x <= high``.
+
+    Supports the same exact standard-Normal coordinate as ``LogNormal`` (through
+    the truncated inverse CDF), so bounded widths keep the NUTS reparameterization.
+    """
+
+    arg_constraints = {}
+
+    def __init__(self, loc, scale, high, *, validate_args=None):
+        self.loc = jnp.asarray(loc)
+        self.scale = jnp.asarray(scale)
+        self.high = jnp.asarray(high)
+        base = dist.TruncatedNormal(self.loc, self.scale, high=jnp.log(self.high))
+        super().__init__(base, dist.transforms.ExpTransform(), validate_args=validate_args)
+
+    @property
+    def support(self):
+        return dist.constraints.interval(0.0, self.high)
+
+    def tree_flatten(self):
+        return (self.loc, self.scale, self.high), None
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, params):
+        return cls(*params)
+
+    def _upper_cdf(self):
+        return ndtr((jnp.log(self.high) - self.loc) / self.scale)
+
+
+def _is_two_sided_truncated_normal(fn) -> bool:
+    return isinstance(fn, dist.TwoSidedTruncatedDistribution) and isinstance(fn.base_dist, dist.Normal)
 
 
 def standardized_prior_site(site_name: str) -> str:
@@ -62,10 +98,10 @@ class NormalLogNormalStandardizeReparam(Reparam):
                 "Normal/LogNormal standardization currently supports only "
                 "scalar sites."
             )
-        if not isinstance(fn, (dist.Normal, dist.LogNormal)):
+        if not (isinstance(fn, (dist.Normal, dist.LogNormal, TruncatedLogNormal)) or _is_two_sided_truncated_normal(fn)):
             raise ValueError(
-                "Normal/LogNormal standardization requires a scalar Normal "
-                f"or LogNormal prior, got {type(fn).__name__}."
+                "Normal/LogNormal standardization requires a scalar Normal, "
+                f"LogNormal, TruncatedLogNormal or two-sided TruncatedNormal prior, got {type(fn).__name__}."
             )
 
     def __call__(self, name, fn, obs):
@@ -74,7 +110,8 @@ class NormalLogNormalStandardizeReparam(Reparam):
                 "Normal/LogNormal standardization requires a latent site."
             )
         self._validate(fn)
-        dtype = jnp.result_type(fn.loc, fn.scale)
+        loc_scale = fn.base_dist if _is_two_sided_truncated_normal(fn) else fn
+        dtype = jnp.result_type(loc_scale.loc, loc_scale.scale)
         standardized = numpyro.sample(
             self.sampling_name,
             dist.Normal(
@@ -82,6 +119,16 @@ class NormalLogNormalStandardizeReparam(Reparam):
                 jnp.asarray(1.0, dtype=dtype),
             ),
         )
+        if _is_two_sided_truncated_normal(fn):
+            # Inverse-CDF map of the two-sided truncated Normal.
+            base = fn.base_dist
+            cdf_low = ndtr((fn.low - base.loc) / base.scale)
+            cdf_high = ndtr((fn.high - base.loc) / base.scale)
+            return None, base.loc + base.scale * ndtri(cdf_low + ndtr(standardized) * (cdf_high - cdf_low))
+        if isinstance(fn, TruncatedLogNormal):
+            # Inverse-CDF map of the truncated Normal in log space.
+            unconstrained = fn.loc + fn.scale * ndtri(ndtr(standardized) * fn._upper_cdf())
+            return None, jnp.exp(unconstrained)
         unconstrained = fn.loc + fn.scale * standardized
         value = (
             jnp.exp(unconstrained)
@@ -94,6 +141,13 @@ class NormalLogNormalStandardizeReparam(Reparam):
         """Map a physical initial value to its standard-Normal coordinate."""
         self._validate(fn)
         value = jnp.asarray(value)
+        if _is_two_sided_truncated_normal(fn):
+            base = fn.base_dist
+            cdf_low = ndtr((fn.low - base.loc) / base.scale)
+            cdf_high = ndtr((fn.high - base.loc) / base.scale)
+            return ndtri((ndtr((value - base.loc) / base.scale) - cdf_low) / (cdf_high - cdf_low))
+        if isinstance(fn, TruncatedLogNormal):
+            return ndtri(ndtr((jnp.log(value) - fn.loc) / fn.scale) / fn._upper_cdf())
         unconstrained = (
             jnp.log(value) if isinstance(fn, dist.LogNormal) else value
         )

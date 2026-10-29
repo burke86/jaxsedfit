@@ -33,6 +33,7 @@ import numpyro
 import numpyro.distributions as dist
 
 from .preload import ModelContext, spectral_coverage_rest, _build_fixed_igm_jax as _igm_transmission
+from .spectral_reparameterization import TruncatedLogNormal
 from .spectral_results import SpectralSites
 from .velocity import shift_and_broaden_lnlam as _fourier_shift_and_broaden_lnlam
 
@@ -47,6 +48,10 @@ DEFAULT_BROAD_LINE_WIDTH_KMS_MAX = 15000.0
 DEFAULT_NARROW_LINE_WIDTH_KMS_MIN = 100.0
 DEFAULT_NARROW_LINE_WIDTH_KMS_MAX = 1500.0
 DEFAULT_BROAD_LINE_WIDTH_KMS = 3000.0
+# Upper limit of the default Fe II width prior [km/s].
+FEII_FWHM_KMS_MAX = 10000.0
+# Fe II velocity shift limit (v/c), about 3000 km/s.
+FEII_SHIFT_MAX = 0.01
 DEFAULT_NARROW_LINE_WIDTH_KMS = 500.0
 DEFAULT_NARROW_LINES_STRENGTH = 1.0
 DEFAULT_BALMER_CONTINUUM_STRENGTH = 1.0e-3
@@ -3499,6 +3504,8 @@ def _evaluate_spectral_components(
         include_high_ionization_lines=bool(spectral_cfg.include_high_ionization_lines),
         broad_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
         feii_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
+        feii_fwhm_kms_max=FEII_FWHM_KMS_MAX,
+        feii_shift_max=FEII_SHIFT_MAX,
         feii_fnu_pivot_rest=4575.0,
         balmer_velocity_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
         broadening_convolution=spectral_cfg.broadening_convolution,
@@ -4252,10 +4259,16 @@ def evaluate_photometric_state(
                     prior_config,
                     value_key="feii_fwhm",
                     log_key="log_feii_fwhm",
-                    default_value_distribution=dist.LogNormal(np.log(DEFAULT_BROAD_LINE_WIDTH_KMS), 0.3),
-                    default_log_distribution=dist.Normal(np.log(DEFAULT_BROAD_LINE_WIDTH_KMS), 0.3),
+                    default_value_distribution=TruncatedLogNormal(
+                        np.log(DEFAULT_BROAD_LINE_WIDTH_KMS), 0.3, FEII_FWHM_KMS_MAX
+                    ),
+                    default_log_distribution=dist.TruncatedNormal(
+                        np.log(DEFAULT_BROAD_LINE_WIDTH_KMS), 0.3, high=np.log(FEII_FWHM_KMS_MAX)
+                    ),
                 )
-                feii_shift = _sample_prior(prior_config, "feii_shift", dist.Normal(0.0, 0.01))
+                feii_shift = _sample_prior(
+                    prior_config, "feii_shift", dist.TruncatedNormal(0.0, 0.01, low=-FEII_SHIFT_MAX, high=FEII_SHIFT_MAX)
+                )
                 feii_rest = _feii_component(rest_wave, feii_template_on_rest, l_feii, feii_fwhm, feii_shift)
             else:
                 feii_fwhm = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
