@@ -10,16 +10,32 @@ import numpy as np
 from .mplstyle import use_style
 
 
+# Shared by the SED and spectrum plots: observed data in black, the total model in red,
+# and each model component in the same color in both.
+PLOT_COLORS = {
+    "data": "#000000",
+    "model": "#c53030",
+    "host": "#2b6cb0",
+    "host_dust": "#b7791f",
+    "agn_disk": "#c05621",
+    "torus": "#805ad5",
+    "agn_lines": "#d53f8c",
+    "feii": "#38a169",
+    "balmer": "#dd6b20",
+    "agn_total": "#718096",
+    "nebular": "#319795",
+}
+
 _COMPONENT_STYLE = [
-    (("host_obs_sed",), "Host stellar", "#2b6cb0", 1.6),
-    (("dust_obs_sed",), "Host dust", "#b7791f", 1.5),
-    (("disk_obs_sed",), "AGN disk", "#c05621", 1.2),
-    (("torus_obs_sed",), "Torus", "#805ad5", 1.2),
-    (("line_bl_obs_sed", "line_nl_obs_sed", "line_liner_obs_sed"), "AGN lines", "#d53f8c", 1.0),
-    (("feii_obs_sed",), "Fe II", "#38a169", 1.0),
-    (("balmer_obs_sed",), "Balmer cont.", "#dd6b20", 1.0),
-    (("agn_obs_sed",), "AGN total", "#718096", 1.4),
-    (("total_obs_sed",), "Model total", "#000000", 2.0),
+    (("host_obs_sed",), "Host stellar", PLOT_COLORS["host"], 1.6),
+    (("dust_obs_sed",), "Host dust", PLOT_COLORS["host_dust"], 1.5),
+    (("disk_obs_sed",), "AGN disk", PLOT_COLORS["agn_disk"], 1.2),
+    (("torus_obs_sed",), "Torus", PLOT_COLORS["torus"], 1.2),
+    (("line_bl_obs_sed", "line_nl_obs_sed", "line_liner_obs_sed"), "AGN lines", PLOT_COLORS["agn_lines"], 1.0),
+    (("feii_obs_sed",), "Fe II", PLOT_COLORS["feii"], 1.0),
+    (("balmer_obs_sed",), "Balmer cont.", PLOT_COLORS["balmer"], 1.0),
+    (("agn_obs_sed",), "AGN total", PLOT_COLORS["agn_total"], 1.4),
+    (("total_obs_sed",), "Model total", PLOT_COLORS["model"], 2.0),
 ]
 
 _CORNER_SIGMA_LEVELS = tuple(1.0 - np.exp(-0.5 * np.asarray([1.0, 2.0, 3.0]) ** 2))
@@ -753,7 +769,7 @@ def plot_fit_sed(
                 legend_labels_seen.add(label)
             primary_key = keys[0]
             if primary_key == "total_obs_sed":
-                ax_sed.plot(plot_wave, component, color=color, lw=max(lw - 0.2, 1.4), alpha=0.65, label=plot_label, zorder=1)
+                ax_sed.plot(plot_wave, component, color=color, lw=max(lw - 0.2, 1.4), alpha=0.9, label=plot_label, zorder=1)
             elif primary_key == "host_obs_sed":
                 ax_sed.plot(plot_wave, component, color=color, lw=max(lw, 2.3), ls="--", alpha=0.95, label=plot_label, zorder=4)
             elif primary_key == "dust_obs_sed":
@@ -777,7 +793,7 @@ def plot_fit_sed(
                 ax_sed.plot(
                     np.where(np.isfinite(finite_wave), finite_wave, np.nan) * wavelength_factor,
                     np.where(finite, finite_lines, np.nan),
-                    color="#d53f8c",
+                    color=PLOT_COLORS["agn_lines"],
                     lw=1.4,
                     ls=":",
                     alpha=0.95,
@@ -797,7 +813,7 @@ def plot_fit_sed(
                 ax_sed.plot(
                     plot_wave,
                     continuum_component,
-                    color="#319795",
+                    color=PLOT_COLORS["nebular"],
                     lw=2.0,
                     ls=":",
                     alpha=0.95,
@@ -824,7 +840,7 @@ def plot_fit_sed(
                 ax_sed.plot(
                     local_wave_plot * wavelength_factor,
                     local_component_plot,
-                    color="#319795",
+                    color=PLOT_COLORS["nebular"],
                     lw=1.4,
                     ls=":",
                     alpha=0.95,
@@ -842,7 +858,7 @@ def plot_fit_sed(
                 ax_sed.plot(
                     plot_wave,
                     component,
-                    color="#319795",
+                    color=PLOT_COLORS["nebular"],
                     lw=2.0,
                     ls=":",
                     alpha=0.95,
@@ -863,7 +879,7 @@ def plot_fit_sed(
                 ax_sed.plot(
                     local_wave_plot * wavelength_factor,
                     local_total_plot,
-                    color="#000000",
+                    color=PLOT_COLORS["model"],
                     lw=1.5,
                     alpha=0.8,
                     label="_nolegend_",
@@ -884,7 +900,7 @@ def plot_fit_sed(
                 ax_sed.plot(
                     np.where(np.isfinite(finite_wave), finite_wave, np.nan) * wavelength_factor,
                     np.where(finite, finite_total, np.nan),
-                    color="#000000",
+                    color=PLOT_COLORS["model"],
                     lw=1.5,
                     alpha=0.8,
                     label="_nolegend_",
@@ -929,7 +945,7 @@ def plot_fit_sed(
                 ax_sed.plot(
                     spec_wave[selected][order] * wavelength_factor,
                     corrected_flux[order],
-                    color="#c53030",
+                    color=PLOT_COLORS["data"],
                     lw=0.8,
                     alpha=0.75,
                     label=spectrum_label,
@@ -942,13 +958,13 @@ def plot_fit_sed(
             obs_flux,
             yerr=obs_err,
             fmt="o",
-            color="#c53030",
+            color=PLOT_COLORS["data"],
             ms=5,
             capsize=2,
             label="Observed photometry",
             zorder=7,
         )
-        ax_sed.scatter(phot_wave, model_flux, color="#111111", marker="s", s=28, label="Model photometry", zorder=6)
+        ax_sed.scatter(phot_wave, model_flux, color=PLOT_COLORS["model"], marker="s", s=28, label="Model photometry", zorder=6)
         band_annotations = []
         if annotate_band_names:
             for index, (x, label) in enumerate(zip(phot_wave, labels)):
