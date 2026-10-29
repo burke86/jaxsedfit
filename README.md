@@ -4,344 +4,63 @@
 
 # JAXSEDFit
 
-`JAXSEDFit` is a Bayesian SED fitting code for AGN and galaxies. It is an experimental JAX-based implementation of `CIGALE` and `GRAHSP`. It ports `GRAHSP`/`pcigale` model components into JAX/NumPyro and combines them with a JAX-native galaxy models based on `Diffstar` + `DSPS`.
+`JAXSEDFit` is a Bayesian SED fitting code for AGN and galaxies, built with JAX and NumPyro. It is an experimental JAX-based implementation of `CIGALE`, `GRAHSP` and `PyQSOFit`: it ports `GRAHSP`/`pcigale` model components and the `PyQSOFit` quasar spectral model into JAX/NumPyro and combines them with JAX-native galaxy models based on `Diffstar` + `DSPS`. It fits broadband photometry, spectra, or both together: in a joint fit, one physical model of the host galaxy and the AGN describes the photometry and the spectrum at once.
 
-JAXSEDFit also owns the shared differentiable quasar spectral engine used by
-joint and standalone spectrum fits: tied emission lines, Fe II, Balmer
-continuum, spectral priors, custom spectral components, and NumPyro geometry.
-The `jaxqsofit` package provides the spectrum-focused interface on top of this
-engine; JAXSEDFit itself does not depend on `jaxqsofit`.
+**Documentation: [https://jaxsedfit.readthedocs.io/](https://jaxsedfit.readthedocs.io/)**
 
-Reusable spectral integrations should import the supported
-`jaxsedfit.spectroscopy` API rather than private helpers from the underlying
-`spectral_*` implementation modules.
+`jaxsedfit` includes:
 
-Documentation: [https://jaxsedfit.readthedocs.io/](https://jaxsedfit.readthedocs.io/)
-
-At a high level, `jaxsedfit` currently includes:
-
-- a JAX/NumPyro fitting engine
+- a JAX/NumPyro fitting engine with MAP, Laplace, variational, NUTS and nested-sampling inference, and batched fitting of whole catalogs
 - `Diffstar` + `DSPS` host-galaxy modeling
-- JAX ports of selected `GRAHSP` AGN, attenuation, redshifting, and dust-emission components
-- `pcigale`-style SED plotting
-- a Chimera benchmark for stellar-mass recovery
+- JAX ports of selected `GRAHSP` AGN, attenuation, redshifting and dust-emission components
+- a differentiable quasar spectral model (tied emission lines, Fe II, Balmer continuum, custom components) shared by joint and spectrum-only fits
+- an aperture-aware likelihood for photometry and spectra measured in different apertures
+- `pcigale`-style SED plots
+
+The [`jaxqsofit`](https://github.com/burke86/jaxqsofit) package provides a spectrum-focused interface to the same spectral model; `jaxsedfit` does not depend on it. Reusable spectral integrations should import the public `jaxsedfit.spectroscopy` API rather than the private `spectral_*` modules.
 
 ## Install
 
-`jaxsedfit` requires Python 3.10 or newer. First, clone this repository. Then:
+`jaxsedfit` requires Python 3.10 or newer. Clone this repository, then:
 
 ```bash
 python -m pip install .
 curl -L -o tempdata.h5 https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_continuum_fsps_v3.2_lgmet_age.h5
 ```
-You will also need a continuum-only DSPS SSP template file such as `ssp_data_continuum_fsps_v3.2_lgmet_age.h5`, downloaded above, and then referenced from your configuration via `cfg.galaxy.dsps_ssp_fn`. The continuum-only template is preferred because `jaxsedfit` models nebular emission lines separately.
 
-This repo assumes `dustmaps` is already configured and SFD maps are available.
+The second command downloads a continuum-only DSPS SSP template file, which you pass as `cfg.galaxy.dsps_ssp_fn`. Milky Way dereddening also needs the SFD dust maps; see the [installation page](https://jaxsedfit.readthedocs.io/en/latest/installation.html).
 
-Typical one-time setup:
-
-```
-python setup.py fetch --map-name=sfd
-```
-
-After fetching, make sure `dustmaps` is configured to use the directory containing the SFD maps.
-
-## Example notebook
-
-A worked single-object tutorial is available in:
-
-- [notebooks/01_example.ipynb](notebooks/01_example.ipynb)
-- [notebooks/02_vizier_fairall9.ipynb](notebooks/02_vizier_fairall9.ipynb)
-
-It shows how to:
-
-- load one Chimera example SED
-- build a fit configuration
-- run `JAXSEDFit.fit(...)`
-- inspect summary outputs
-- make the component SED plot
-
-The Fairall 9 notebook shows how to:
-
-- query broadband photometry from the VizieR SED service
-- map supported survey filters into `jaxsedfit`
-- build a manual `FitConfig`
-- fit and plot the resulting AGN SED
-
-
-## Usage
-
-`jaxsedfit` includes a `pcigale`-style component SED plot that overlays:
-
-- observed photometry with uncertainties
-- model photometry
-- host galaxy spectrum
-- AGN disk
-- torus
-- Fe II
-- emission lines
-- Balmer continuum
-- total AGN
-- total model
-
-From Python:
+## Example
 
 ```python
-from jaxsedfit.core import JAXSEDFit
-
-cfg.inference.method = "optax+nuts"
-cfg.inference.map_steps = 600
-cfg.inference.learning_rate = 1e-2
-cfg.inference.num_warmup = 50
-cfg.inference.num_samples = 50
-cfg.inference.num_chains = 1
-cfg.inference.dense_mass = "blocks"
-cfg.inference.max_tree_depth = 8
-cfg.output.plot_fig = False
-cfg.output.save_fig = True
-cfg.output.save_result = True
-cfg.output.output_dir = "fit_outputs"
-
-fitter = JAXSEDFit(cfg)
-fitter.fit()
-```
-
-Nested sampling is also available through NumPyro's `jaxns` wrapper:
-
-```python
-cfg.inference.method = "ns"
-cfg.inference.ns_num_live_points = 200
-cfg.inference.ns_dlogz = 0.1
-
-fitter = JAXSEDFit(cfg)
-fitter.fit()
-```
-
-Faster, approximate options are `"map"` (MAP only), `"laplace"` (Gaussian at the
-MAP) and `"svi"` (Gaussian variational fit); the "Inference methods" docs page
-explains when each is appropriate. To fit a whole catalog that shares one model
-configuration, `jaxsedfit.fit_batch(configs, method="laplace")` fits many objects
-with one compiled program, for photometric, joint and spectrum-only fits (see
-"Fitting many objects" in the docs).
-
-The public API keeps run settings on `FitConfig`, especially under
-`cfg.inference` and `cfg.output`.
-
-or with the standalone helper:
-
-```python
-from jaxsedfit.plotting import plot_fit_sed
-
-plot_fit_sed(fitter, output_path="sed_fit.png")
-```
-
-This uses the lazy predictive path, so the component spectra are generated when you first call `plot_sed()` or `plot_fit_sed(...)`.
-
-### Custom spectral components
-
-One custom-component definition is shared by standalone spectral fits and
-joint spectrum+photometry fits. Evaluators must be JAX-compatible and return
-observed flux density in mJy on the wavelength grid they receive. Use
-`frame="rest"` (the default) or `frame="observed"` explicitly.
-
-```python
-import jax.numpy as jnp
-import numpyro.distributions as dist
-
-from jaxsedfit import make_custom_component
-
-
-def extra_continuum(wave, params, metadata):
-    pivot = metadata["pivot"]
-    return params["amplitude"] * (wave / pivot) ** params["slope"]
-
-
-component = make_custom_component(
-    "extra_continuum",
-    {
-        "amplitude": dist.LogNormal(jnp.log(0.1), 0.5),
-        "slope": dist.Normal(0.0, 1.0),
-    },
-    extra_continuum,
-    metadata={"pivot": 5100.0},
-    frame="rest",
-)
-
-cfg.agn.custom_components = (component,)
-```
-
-The parameters are sampled once and the same realization is rendered on the
-spectral pixels, native photometric filter grids, and posterior SED grid.
-Use `make_custom_line_component(..., line_kind="broad" | "narrow")` for an
-additive line profile. Narrow custom lines receive the same host-aperture
-capture treatment as built-in narrow lines.
-
-Custom components with `metadata["component_type"] == "bal_absorption"`
-return optical depth and are treated as partial-covering multiplicative
-absorption, not additive flux. Their shared transmission attenuates the compact
-AGN disk, additive AGN custom continuum, Fe II, Balmer continuum, and broad
-emission lines consistently in the spectrum, native-filter photometry, and
-rendered SED. Host, torus, and narrow-line emission remain unattenuated. BAL
-diagnostic curves in spectrum plots are negative and show removed flux; the
-logarithmic SED plot shows BAL absorption through the attenuated AGN and total
-curves.
-
-> **BAL posterior compatibility warning:** posterior bundles produced before
-> the multiplicative joint-BAL correction encoded BAL optical depth as positive
-> additive flux and are scientifically invalid, even though they remain
-> loadable. They must be refitted. This includes all `aug31_def_bal` bundles.
-
-Spectroscopy is enabled by supplying one or more `SpectroscopyData` objects;
-there is no separate backend or enabled switch. Photometry is optional, so a
-spectrum-only fit can be configured directly:
-
-```python
-from jaxsedfit import FitConfig, SpectroscopyData
+from jaxsedfit import FitConfig, GalaxyConfig, JAXSEDFit, Observation, PhotometryData
 
 cfg = FitConfig(
-    observation=observation,
-    spectroscopy=SpectroscopyData(
-        wave_obs=wave,
-        fluxes=flux,
-        errors=error,
-        resolving_power=2000,
+    observation=Observation(object_id="demo", redshift=0.1),
+    photometry=PhotometryData(
+        filter_names=["u_sdss", "g_sdss", "r_sdss", "i_sdss", "z_sdss"],
+        fluxes=[0.22, 0.48, 0.73, 0.86, 0.91],  # mJy
+        errors=[0.03, 0.04, 0.05, 0.06, 0.07],
     ),
+    galaxy=GalaxyConfig(dsps_ssp_fn="tempdata.h5"),
 )
+
+fitter = JAXSEDFit(cfg)
+result = fitter.fit()
+fitter.plot_sed(output_path="sed_fit.png")
 ```
-## Fit-quality chi-square diagnostics
 
-Joint fits expose scalar posterior sites for the photometric SED, spectrum, and
-combined data:
+The [quickstart](https://jaxsedfit.readthedocs.io/en/latest/quickstart.html) continues from here, and the [tutorials](https://jaxsedfit.readthedocs.io/en/latest/tutorials.html) work through real examples, including joint fits of photometry and spectra. The notebooks are in [notebooks/](notebooks/).
 
-- `sed_chi2`, `sed_n_eff`, and `sed_reduced_chi2`
-- `spectroscopy_chi2`, `spectroscopy_n_eff`, and `spectroscopy_reduced_chi2`
-- `joint_chi2`, `joint_n_eff`, and `joint_reduced_chi2`
+## Validation
 
-For each posterior draw, the SED diagnostic sums squared standardized residuals
-over detected photometric bands. Censored upper limits remain part of the
-likelihood but are excluded from chi-square. The spectral diagnostic uses valid
-masked pixels and the same measurement-plus-systematics variance as the
-spectral likelihood. When the spectral likelihood is weighted by resolution
-elements, both its chi-square and effective count receive the same weight. The
-joint values are the sums of the available SED and spectral contributions.
-
-Here `reduced_chi2 = chi2 / n_eff`. JAXSEDFit deliberately does not subtract
-the number of sampled parameters: the parameters are shared by the Bayesian
-SED and spectral model, and the usual `N - p` count is not meaningful for the
-sparse photometry. These values are standardized-residual goodness-of-fit
-diagnostics, not `-2 log(likelihood)`; the configured likelihood can be
-Student-t and can include censored observations.
-
+Every pull request that changes the model runs the Chimera validation (`.github/workflows/chimera-validation.yml`): stellar-mass, AGN-luminosity and SFR recovery for Chimeras, real COSMOS galaxies with an added SDSS quasar of known luminosity, with photometry alone and with photometry and spectra. The validation is a regression and calibration tool for this experimental port, not a demonstration of full `GRAHSP`/`CIGALE` parity. The older single-run benchmark is still available as `jaxsedfit-benchmark --output-dir benchmark_outputs --dsps-ssp-fn tempdata.h5`.
 
 ## License and provenance
 
-`jaxsedfit` is an experimental port of parts of `CIGALE` and `GRAHSP`.
-
-Some model logic and several bundled resource files are derived from or closely based on `GRAHSP` / `pcigale`, which is distributed under the `CeCILL v2` license.
-
-See:
+`jaxsedfit` is an experimental port of parts of `CIGALE`, `GRAHSP` and `PyQSOFit`. Some model logic and several bundled resource files are derived from or closely based on `GRAHSP` / `pcigale`, which is distributed under the `CeCILL v2` license. See:
 
 - [LICENSES/CeCILL-v2.txt](LICENSES/CeCILL-v2.txt)
 - [LICENSES/THIRD_PARTY_NOTICES.md](LICENSES/THIRD_PARTY_NOTICES.md)
 
-Bundled third-party resources under [src/jaxsedfit/resources](src/jaxsedfit/resources) include per-directory provenance notes.
-
-## Filters
-
-`jaxsedfit` uses vendored GRAHSP/pcigale-style filter curves for synthetic photometry.
-
-- Built-in aliases cover common legacy names such as `u_sdss -> sloan.sdss.u`, `J_2mass -> 2mass.J`, and `W1 -> wise.W1`
-- Vendored photon-response filters are converted to the internal energy-response convention before projection
-- Filters must be available inline or in the vendored package resources
-- Inline curves are used directly as internal filter curves before synthetic photometry is computed
-
-## Survey PSF Sizes In The Likelihood
-
-Broad-band catalogs do not all measure the same physical light profile. A
-GALEX, SDSS, 2MASS, WISE, or IRAC point has a different effective angular
-resolution, and aperture photometry can capture a different fraction of extended
-host-galaxy light than PSF-like photometry. `jaxsedfit` can account for this with
-the optional host-capture likelihood model.
-
-Pass one value per photometric point through `PhotometryData.psf_fwhm_arcsec`.
-If an aperture diameter is known, pass `PhotometryData.aperture_diameter_arcsec`
-as well. During context construction, `jaxsedfit` defines the effective spatial
-scale for each band as:
-
-```python
-effective_scale = aperture_diameter_arcsec if finite else psf_fwhm_arcsec
-```
-
-When `LikelihoodConfig(use_host_capture_model=True)` and host fitting are both
-enabled, the model fits a smooth capture fraction for the host component as a
-function of that effective scale. Internally this is a sigmoid in
-`log(effective_scale)` with two sampled parameters:
-
-- `log_host_capture_scale_arcsec`, the turnover scale, default prior centered near `log(3 arcsec)`
-- `host_capture_slope`, the transition sharpness, default prior centered near `2`
-
-The AGN point-source component is not scaled by this factor. The raw model is
-first projected through each filter; then only the host contribution is adjusted:
-
-```python
-model_flux = total_flux - host_flux + host_capture_fraction * host_flux
-```
-
-The likelihood then compares this PSF-aware model flux to the observed fluxes
-using the usual Student-t photometric likelihood, including measurement errors,
-fractional model systematics, optional intrinsic scatter, and optional AGN
-variability variance. If no finite PSF/aperture sizes are provided, or
-`use_host_capture_model=False`, every band uses `host_capture_fraction = 1` and
-the fit reduces to the standard integrated-flux likelihood.
-
-## Chimera benchmark
-
-The Chimera benchmark is intended as a regression and calibration tool for this experimental port, not as a finalized scientific validation of full `GRAHSP`/`CIGALE` parity.
-
-`dsps_ssp_fn` must point to a valid DSPS SSP HDF5 file. Additional SPS template files, including variants with nebular grids, are available at `https://halos.as.arizona.edu/suchethacooray/dsps_ssp/`. At present, `jaxsedfit` cannot vary nebular parameters independently beyond whatever is baked into the selected DSPS template, but this is expected to be sufficient for most broad-band fitting use cases.
-
-### Run from the CLI
-
-```bash
-jaxsedfit-benchmark --output-dir benchmark_outputs --dsps-ssp-fn tempdata.h5
-```
-
-You can also run it without installing the script entry point:
-
-```bash
-python -m jaxsedfit.benchmark --output-dir benchmark_outputs --dsps-ssp-fn tempdata.h5
-```
-
-Optional thresholds:
-
-```bash
-jaxsedfit-benchmark \
-  --output-dir benchmark_outputs \
-  --dsps-ssp-fn tempdata.h5 \
-  --max-weighted-mae 3.0 \
-  --max-abs-weighted-bias 2.0 \
-  --min-finite-fraction 0.95
-```
-
-To run only a small deterministic prefix of the benchmark subset:
-
-```bash
-jaxsedfit-benchmark \
-  --output-dir benchmark_outputs_small \
-  --dsps-ssp-fn tempdata.h5 \
-  --limit 5
-```
-
-### Run from Python
-
-```python
-from jaxsedfit.benchmark import run_chimera_mass_benchmark
-
-result = run_chimera_mass_benchmark(
-    output_dir="benchmark_outputs",
-    dsps_ssp_fn="tempdata.h5",
-    limit=5,
-)
-print(result["passed"])
-print(result["metrics"])
-```
+Bundled third-party resources under [src/jaxsedfit/resources](src/jaxsedfit/resources) include per-directory provenance notes. If you use `jaxsedfit` in scientific work, cite `CIGALE` (Boquien et al. 2019), `GRAHSP` (Buchner et al. 2024) and `PyQSOFit` (Guo, Shen & Wang 2018; Shen et al. 2019); see the [documentation](https://jaxsedfit.readthedocs.io/) for the references.

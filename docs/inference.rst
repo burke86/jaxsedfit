@@ -139,14 +139,36 @@ posterior with no Gaussian assumption. ``"map+nuts"`` runs the MAP first and sta
 the chains there, which shortens warmup. With ``"nuts"``, the chains also start from
 the MAP while ``use_map_init=True`` (the default). See the NUTS settings in
 :class:`jaxsedfit.InferenceConfig` (``num_warmup``, ``num_samples``,
-``num_chains``, ``target_accept_prob``, ``dense_mass``, ``max_tree_depth``) and the
-troubleshooting notes in :doc:`quickstart`.
+``num_chains``, ``target_accept_prob``, ``dense_mass``, ``max_tree_depth``).
 
 .. code-block:: python
 
    cfg.inference.method = "map+nuts"
    cfg.inference.num_warmup = 200
    cfg.inference.num_samples = 200
+   cfg.inference.target_accept_prob = 0.85
+   cfg.inference.dense_mass = "blocks"
+   cfg.inference.max_tree_depth = 8
+
+Fewer warmup and posterior draws are fine for notebooks and tests; increase them
+for published results.
+
+``dense_mass="blocks"`` (the default) learns the covariance only within groups of
+related parameters (host, AGN continuum, torus, spectral lines). By default the
+model is also sampled in better-conditioned coordinates that leave the posterior
+unchanged: an exact normalization coordinate
+(``reparameterize_normalizations=True``) and, in joint fits, standard-normal
+coordinates for the Fe II and Balmer-continuum priors
+(``reparameterize_spectral_features=True``). Set either to ``False`` for a
+controlled comparison.
+
+If NUTS keeps reaching the maximum tree depth:
+
+1. check the MAP with a ``"map"`` fit, and inspect the printed NumPyro diagnostics;
+2. fix ``cfg.likelihood.systematics_width`` at a reasonable value, which removes a
+   common model-error degeneracy;
+3. only then increase ``max_tree_depth``, which can multiply the run time without
+   improving the geometry.
 
 Nested sampling (``"ns"``)
 --------------------------
