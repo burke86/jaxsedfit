@@ -1,42 +1,110 @@
 Likelihood and priors
 =====================
 
+Calibration and error-model terms
+---------------------------------
+
+Besides the physical model, a fit includes terms for flux calibration, apertures and
+model error. This table lists them all; the sections below and the linked pages
+describe each one.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 30 22 24
+
+   * - Term
+     - What it does
+     - Default
+     - Where
+   * - ``systematics_width``
+     - Fractional model error on every photometric point
+     - fitted, about 10%
+     - below
+   * - ``agn_systematics_width``
+     - Fractional error on the AGN part of each photometric point
+     - fitted, about 20%
+     - below
+   * - AGN variability
+     - Variance from non-simultaneous photometry of a variable AGN
+     - on
+     - below
+   * - Spectral jitter
+     - Extra spectral error: a fraction of the model and of Fe II, plus a constant
+     - fitted fraction
+     - below
+   * - Host capture
+     - Fraction of the extended host seen by each aperture, PSF or fiber
+     - off
+     - :doc:`photometry`
+   * - Spectrum scale
+     - Gray scale factor per spectrum
+     - on with photometry
+     - :doc:`spectroscopy`
+   * - Continuum tilt
+     - Power-law correction to the spectral continuum's slope
+     - off
+     - :doc:`spectroscopy`
+   * - Instrumental resolution
+     - Line-spread function of each spectrum
+     - from ``resolving_power``
+     - :doc:`spectroscopy`
+   * - Milky Way extinction
+     - Dereddening with the SFD maps (``Observation.apply_mw_deredden``)
+     - off
+     - :doc:`installation`
+
 Photometric likelihood
 ----------------------
 
 .. code-block:: python
 
-   cfg.likelihood.likelihood_family = "student_t"
+   cfg.likelihood.likelihood_family = "student_t"   # or "gaussian"
    cfg.likelihood.student_t_df = 5.0
-   cfg.likelihood.systematics_width = 0.10
-   cfg.likelihood.fit_systematics_width = True
 
-``likelihood_family``
-   The default is the heavier-tailed ``"student_t"`` likelihood with
-   ``student_t_df=5``. ``"gaussian"`` uses a normal likelihood.
+The default Student-t likelihood (5 degrees of freedom) is more tolerant of outlying
+catalog points than a Gaussian. Upper limits (``is_upper_limit``) use a one-sided
+likelihood. With the host-capture model, the data are compared with the
+aperture-captured model flux (see :doc:`photometry`).
 
-``systematics_width``
-   A fractional model-error floor, added in quadrature as ``systematics_width``
-   times the model flux in each band (as in GRAHSP), so that broadband photometry
-   does not constrain the model more tightly than the templates justify. Fix it for
-   simpler sampling, or fit it with ``fit_systematics_width=True``.
+For band :math:`b` with model flux :math:`F_b` and AGN flux :math:`F_b^{\rm AGN}`,
+the variance adds these terms to the catalog error :math:`\sigma_b`:
+
+.. math::
+
+   \sigma_{{\rm eff},b}^2 = \sigma_b^2
+   + (w_{\rm sys} F_b)^2
+   + (w_{\rm AGN} F_b^{\rm AGN})^2
+   + {\rm NEV}(L_{\rm bol}) \, (F_b^{\rm AGN})^2 .
+
+``systematics_width`` (:math:`w_{\rm sys}`)
+   Model error, proportional to the model flux as in GRAHSP, so that broadband
+   photometry does not constrain the model more tightly than the templates justify.
+   With ``fit_systematics_width=True`` (default) it is fitted with a prior near 10%,
+   between 7% and 15%; otherwise it is fixed at ``systematics_width`` (0.10).
+
+``agn_systematics_width`` (:math:`w_{\rm AGN}`)
+   Extra error on the AGN contribution, for mismatch of the AGN templates. With
+   ``fit_agn_systematics_width=True`` (default) it is fitted with a log-normal prior
+   around ``agn_systematics_width_prior_scale`` (0.20).
 
 ``variability_uncertainty``
-   Adds an AGN-variability term to the photometric uncertainty when AGN emission is
-   present.
-
-Upper limits (``is_upper_limit``) use a one-sided likelihood. With
-``use_host_capture_model``, the likelihood compares the data with the
-aperture-captured model flux described in :doc:`photometry`.
+   For AGN variability between photometric epochs: the normalized excess variance
+   of Simm et al. (2016), :math:`{\rm NEV} = 10^{-1.43 - 0.74\,(\log L_{\rm bol} -
+   45)}` with :math:`L_{\rm bol}` in erg s\ :sup:`-1`, smoothly capped at
+   ``agn_nev`` (0.1). On by default.
 
 Spectral likelihood
 -------------------
 
 Spectra use a Student-t likelihood with ``spectrum_student_t_df`` degrees of
 freedom (5 by default). The quoted spectral errors are not assumed correct: as in
-``jaxqsofit``, three terms are added in quadrature, a fitted fraction of the model
-(``frac_jitter``, prior HalfNormal(0.02)), a fixed fraction of the Fe II model
-(``frac_fe_jitter``, 0.20) and a constant (``add_jitter``, 0 by default).
+``jaxqsofit``, three terms are added to them in quadrature,
+
+* ``frac_jitter`` times the model, fitted (prior HalfNormal(0.02));
+* ``frac_fe_jitter`` times the Fe II model, fixed at 0.20, for Fe II template
+  mismatch;
+* ``add_jitter``, a constant, 0 by default.
+
 ``spectroscopy_chi2`` and the related outputs use the same variance (see
 :doc:`outputs`).
 
