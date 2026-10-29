@@ -391,17 +391,20 @@ def _detail_tables(metrics, thresholds, image_base_url) -> list[str]:
 
 
 def render_report(runs, thresholds, *, sha, baseline=None, baseline_sha=None,
-                  image_base_urls=None) -> tuple[str, list[str]]:
+                  image_base_urls=None, missing=()) -> tuple[str, list[str]]:
     """Markdown report for the photometry-only and (optionally) joint runs.
 
     ``runs`` and ``baseline`` map a run name (``photometry``, ``joint``) to its
     ``metrics.json`` contents; ``thresholds`` maps a run name to its limits.
+    ``missing`` names expected runs that produced no metrics; each is a failure.
     """
-    failures = [f"{RUN_TITLES[name]}: {f}" for name, m in runs.items()
-                for f in check_metrics(_quantity_metrics(m), thresholds.get(name, {}))]
+    failures = [f"{RUN_TITLES[name]}: no results (the fit did not finish; see the workflow run)" for name in missing]
+    failures += [f"{RUN_TITLES[name]}: {f}" for name, m in runs.items()
+                 for f in check_metrics(_quantity_metrics(m), thresholds.get(name, {}))]
     status = "✅ passed" if not failures else "❌ failed"
     sizes = " · ".join(f"{RUN_TITLES[name].lower()}: {sum(b['n'] for b in m['log_stellar_mass'])} Chimeras "
                        f"in {m['elapsed_s'] / 60:.0f} min" for name, m in runs.items())
+    sizes = " · ".join([sizes] * bool(sizes) + [f"{RUN_TITLES[name].lower()}: ❌ no results" for name in missing])
     versus = f" vs main `{baseline_sha}`" if baseline else ""
     lines = [
         f"## {COMMENT_MARKER}: {status}",
@@ -474,18 +477,17 @@ def report(args) -> int:
         path = Path(path) / "metrics.json" if path else None
         return json.loads(path.read_text()) if path and path.is_file() else None
 
-    runs = {name: read(path) for name, path in (("photometry", args.photometry), ("joint", args.joint))}
+    expected = {name: path for name, path in (("photometry", args.photometry), ("joint", args.joint)) if path}
+    runs = {name: read(path) for name, path in expected.items()}
+    missing = [name for name, m in runs.items() if m is None]
     runs = {name: m for name, m in runs.items() if m is not None}
-    if not runs:
-        print("No metrics.json found.")
-        return 1
     baseline = {name: read(Path(args.baseline) / name) for name in runs} if args.baseline else None
     baseline = {name: m for name, m in (baseline or {}).items() if m is not None} or None
     baseline_sha = next((m.get("sha", "?") for m in (baseline or {}).values()), None)
     thresholds = {k: v for k, v in json.loads(Path(args.thresholds).read_text()).items() if not k.startswith("_")}
     image_base_urls = {name: f"{args.image_base_url}/{name}" for name in runs} if args.image_base_url else None
     text, failures = render_report(runs, thresholds, sha=args.sha, baseline=baseline, baseline_sha=baseline_sha,
-                                   image_base_urls=image_base_urls)
+                                   image_base_urls=image_base_urls, missing=missing)
     Path(args.output).write_text(text, encoding="utf-8")
     print(text)
     return 1 if failures else 0
