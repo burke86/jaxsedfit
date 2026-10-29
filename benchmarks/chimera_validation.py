@@ -193,10 +193,10 @@ def _configs(rows, dsps_ssp_fn, steps, learning_rate, spectra=None):
             cfg.agn.fit_lines = True
             cfg.agn.fit_feii = True
             cfg.likelihood.fit_spectrum_scale = False
-            # The spectra resolve the host's absorption lines and continuum shape; without the
-            # velocity dispersion and a recent burst, the AGN continuum absorbs the host misfit.
+            # The spectra resolve the host's absorption lines; without the velocity dispersion,
+            # the AGN continuum absorbs the host misfit. A recent burst (delayed_burst) also
+            # helped M* and L_bol but biased the SFR about 1 dex low, so it is left off.
             cfg.galaxy.fit_host_kinematics = True
-            cfg.galaxy.host_sfh_model = "delayed_burst"
         configs.append(cfg)
     return configs
 
