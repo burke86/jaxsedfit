@@ -106,7 +106,7 @@ def test_fit_batch_groups_objects_with_different_priors(tmp_path, monkeypatch):
 
 def test_fit_batch_derived_sites(tmp_path, monkeypatch):
     configs = _chimera_configs(tmp_path, monkeypatch, n=3)
-    sites = ["log_sfr_fit", "log_agn_bol_luminosity_fit"]
+    sites = ["log_sfr_fit", "log_agn_bol_luminosity_fit", "log_agn_bol_luminosity_attenuated_fit"]
     result = fit_batch(configs, method="laplace", chunk_size=2, progress_bar=False, derived_sites=sites)
     for i, (samples, map_values) in enumerate(zip(result.samples, result.map_values)):
         for site in sites:
@@ -119,6 +119,15 @@ def test_fit_batch_derived_sites(tmp_path, monkeypatch):
         sub = trace(substitute(model, data=params)).get_trace()
         for site in sites:
             np.testing.assert_allclose(map_values[site], sub[site]["value"], rtol=1e-6, atol=1e-8)
+        # The attenuated luminosities are the dereddened ones times the AGN transmission at 5100 A.
+        transmission = float(sub["agn_transmission_5100_fit"]["value"])
+        assert 0.0 < transmission <= 1.0
+        np.testing.assert_allclose(sub["log_agn_bol_luminosity_dereddened_fit"]["value"],
+                                   sub["log_agn_bol_luminosity_fit"]["value"])
+        for kind in ("l5100", "bol_luminosity"):
+            np.testing.assert_allclose(
+                sub[f"log_agn_{kind}_attenuated_fit"]["value"],
+                sub[f"log_agn_{kind}_dereddened_fit"]["value"] + np.log10(transmission), rtol=1e-10)
     assert "log_sfr_fit_p50" in result.summary_table().colnames
 
 

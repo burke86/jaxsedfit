@@ -44,7 +44,10 @@ LUMINOSITY_BIN_EDGES = [-np.inf, 42.0, 43.0, 44.0, 45.0]
 OUTLIER_DEX = 0.5
 # Recovered quantities: fitted site, truth column, offset from the site's units to the
 # truth's, and plot. The AGN truth is the injected (QSO-weighted) SDSS DR7 bolometric
-# luminosity; the host truths are COSMOS2015 LePhare medians.
+# luminosity; the host truths are COSMOS2015 LePhare medians. The SDSS luminosities are not
+# corrected for reddening, and the Chimera quasar never passed through the host's dust, so the
+# attenuated AGN luminosity is the like-for-like comparison; the dereddened one also corrects
+# for the fitted host and nuclear screens.
 QUANTITIES = {
     "log_stellar_mass": dict(
         site="log_stellar_mass", truth="log_stellar_mass_truth", offset=0.0, title="Stellar mass",
@@ -52,8 +55,13 @@ QUANTITIES = {
     ),
     "log_lbol_agn": dict(
         site="log_agn_bol_luminosity_fit", truth="log_lbol_chimera_truth", offset=7.0,  # W -> erg/s
-        title="AGN bolometric luminosity", label=r"\log_{10}(L_{\rm bol,AGN}/{\rm erg\,s^{-1}})",
+        title="AGN bolometric luminosity (dereddened)", label=r"\log_{10}(L_{\rm bol,AGN}/{\rm erg\,s^{-1}})",
         delta=r"$\Delta\log L_{\rm bol,AGN}$ [dex]", plot="chimera_dlbol_vs_lbol.png",
+    ),
+    "log_lbol_agn_attenuated": dict(
+        site="log_agn_bol_luminosity_attenuated_fit", truth="log_lbol_chimera_truth", offset=7.0,
+        title="AGN bolometric luminosity (attenuated)", label=r"\log_{10}(L_{\rm bol,AGN}/{\rm erg\,s^{-1}})",
+        delta=r"$\Delta\log L_{\rm bol,AGN}^{\rm att}$ [dex]", plot="chimera_dlbol_attenuated_vs_lbol.png",
     ),
     "log_sfr": dict(
         site="log_sfr_fit", truth="log_sfr_truth", offset=0.0, title="Star formation rate",
@@ -65,7 +73,8 @@ QUANTITIES = {
 SFR_MIN_LOG_SSFR = -11.0
 COMMENT_MARKER = "jaxsedfit Chimera validation"
 RUN_TITLES = {"photometry": "Photometry only", "joint": "Photometry + spectra"}
-SHORT_TITLES = {"log_stellar_mass": "M★", "log_lbol_agn": "L<sub>bol</sub>", "log_sfr": "SFR"}
+SHORT_TITLES = {"log_stellar_mass": "M★", "log_lbol_agn": "L<sub>bol</sub> dered.",
+                "log_lbol_agn_attenuated": "L<sub>bol</sub> att.", "log_sfr": "SFR"}
 
 
 def _bin_label(lo: float, hi: float) -> str:
@@ -364,7 +373,7 @@ def _cell(m, base, limit) -> str:
 def _summary_table(metrics, baseline, thresholds) -> list[str]:
     labels = [m["label"] for m in metrics["log_stellar_mass"]]
     lines = ["| | " + " | ".join(labels) + " |", "|---|" + "---:|" * len(labels)]
-    for name in QUANTITIES:
+    for name in metrics:
         base = (baseline or {}).get(name)
         cells = [_cell(m, base[i] if base else None, thresholds.get(name, {}).get(str(m["bin"])))
                  for i, m in enumerate(metrics[name])]
@@ -435,7 +444,8 @@ def render_report(runs, thresholds, *, sha, baseline=None, baseline_sha=None,
 
 
 def _quantity_metrics(metrics):
-    return {name: metrics[name] for name in QUANTITIES}
+    # Metrics from before a quantity was added (e.g. main's baseline) simply lack it.
+    return {name: metrics[name] for name in QUANTITIES if name in metrics}
 
 
 def run(args) -> int:

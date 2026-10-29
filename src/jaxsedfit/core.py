@@ -866,6 +866,11 @@ class JAXSEDFit:
             "fracAGN_5100_fit",
             "log_agn_bol_luminosity_fit",
             "log_disk_luminosity_fit",
+            "agn_transmission_5100_fit",
+            "log_agn_l5100_dereddened_fit",
+            "log_agn_l5100_attenuated_fit",
+            "log_agn_bol_luminosity_dereddened_fit",
+            "log_agn_bol_luminosity_attenuated_fit",
             "agn_variability_nev",
             "agn_systematics_width",
             "host_total_fluxes",
@@ -2119,6 +2124,9 @@ class JAXSEDFit:
                 out["log_agn_bol_luminosity_fit"] = float(np.median(np.asarray(state.predictive["log_agn_bol_luminosity_fit"], dtype=float)))
             if "log_disk_luminosity_fit" in state.predictive:
                 out["log_disk_luminosity_fit"] = float(np.median(np.asarray(state.predictive["log_disk_luminosity_fit"], dtype=float)))
+            for key in ("log_agn_l5100_attenuated_fit", "log_agn_bol_luminosity_attenuated_fit"):
+                if key in state.predictive:
+                    out[key] = float(np.median(np.asarray(state.predictive[key], dtype=float)))
         state.summary = out
         return out
 

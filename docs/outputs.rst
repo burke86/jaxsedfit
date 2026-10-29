@@ -159,7 +159,19 @@ and joint spectral amplitudes have different normalizations.
      - log10(A / 5100). Despite its name this is L_lambda at the disk normalization wavelength, not lambda L_lambda or an integrated disk luminosity.
    * - ``log_agn_bol_luminosity_fit``
      - log10(W)
-     - A times the fixed AGN_BOLOMETRIC_CORRECTION_5100; a bolometric proxy, not an integral of the fitted SED.
+     - A times the fixed AGN_BOLOMETRIC_CORRECTION_5100; a bolometric proxy, not an integral of the fitted SED. Dereddened (corrected for the host and nuclear screens); same as ``log_agn_bol_luminosity_dereddened_fit``.
+   * - ``log_agn_l5100_dereddened_fit``
+     - log10(W)
+     - AGN :math:`\lambda L_\lambda` at rest 5100 Å, A, corrected for the host and nuclear dust screens.
+   * - ``log_agn_l5100_attenuated_fit``
+     - log10(W)
+     - The same, attenuated by both screens: the AGN 5100 Å luminosity an observer would measure. See :doc:`agn`.
+   * - ``log_agn_bol_luminosity_dereddened_fit``, ``log_agn_bol_luminosity_attenuated_fit``
+     - log10(W)
+     - The bolometric proxy from the dereddened or attenuated 5100 Å luminosity.
+   * - ``agn_transmission_5100_fit``
+     - fraction
+     - Transmission of the host plus nuclear screens at rest 5100 Å; attenuated = dereddened × transmission.
    * - ``fracAGN_5100_fit``
      - fraction
      - Intrinsic AGN fraction from A / 5100 and host L_lambda(5100 Å), clipped to [0.0001, 0.999].

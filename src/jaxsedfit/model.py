@@ -5453,6 +5453,17 @@ def evaluate_photometric_state(
     numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
     numpyro.deterministic("log_disk_luminosity_fit", _safe_log10(l_agn_lambda_5100))
     numpyro.deterministic("log_agn_bol_luminosity_fit", _safe_log10(agn_bol_luminosity))
+    # "Dereddened" luminosities correct the AGN for the host and nuclear screens; "attenuated"
+    # ones are what an observer would measure from the AGN continuum without that correction.
+    agn_transmission_5100 = jnp.interp(5100.0, rest_wave, agn_att_factor)
+    agn_l5100 = agn_bol_luminosity / AGN_BOLOMETRIC_CORRECTION_5100
+    numpyro.deterministic("agn_transmission_5100_fit", agn_transmission_5100)
+    numpyro.deterministic("log_agn_l5100_dereddened_fit", _safe_log10(agn_l5100))
+    numpyro.deterministic("log_agn_l5100_attenuated_fit", _safe_log10(agn_l5100 * agn_transmission_5100))
+    numpyro.deterministic("log_agn_bol_luminosity_dereddened_fit", _safe_log10(agn_bol_luminosity))
+    numpyro.deterministic(
+        "log_agn_bol_luminosity_attenuated_fit", _safe_log10(agn_bol_luminosity * agn_transmission_5100)
+    )
     numpyro.deterministic("agn_variability_nev", _agn_variability_nev(agn_bol_luminosity, cfg.likelihood.agn_nev))
     numpyro.deterministic("transmitted_fraction_fluxes", trans_fluxes)
     numpyro.deterministic("host_total_fluxes", host_fluxes_total)
