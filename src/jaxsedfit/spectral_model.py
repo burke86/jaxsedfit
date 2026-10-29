@@ -1114,8 +1114,11 @@ def _sample_line_widths(tied_line_meta, prior_config, *, site_prefix: str = ""):
             group_ids = _line_indices(group_ids_value)
             if not group_ids.size:
                 continue
-            family_low = float(np.max(log_fwhm_min[group_ids]))
-            family_high = float(np.min(log_fwhm_max[group_ids]))
+            # One width is shared by the whole family, so its bounds span every
+            # member's range; intersecting them would impose the strictest member's
+            # floor (e.g. the relaxed narrow H-alpha minimum) on every narrow line.
+            family_low = float(np.min(log_fwhm_min[group_ids]))
+            family_high = float(np.max(log_fwhm_max[group_ids]))
             family_init = float(
                 np.clip(np.median(log_fwhm_init[group_ids]), family_low, family_high)
             )
