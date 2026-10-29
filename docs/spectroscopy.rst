@@ -56,29 +56,46 @@ luminosity), the AGN luminosity came out too high and the stellar mass too low.
 Spectrum calibration and apertures
 ----------------------------------
 
-A fiber or slit spectrum sees only part of an extended host, and its absolute
-calibration can differ from the photometry. Two settings handle this:
+A fiber or slit spectrum sees only part of an extended host, and its flux
+calibration can differ from the photometry's in both level and shape. Three terms
+handle this; :doc:`likelihood` summarizes them with the other error-model terms.
 
-.. code-block:: python
+**Gray scale.** Each spectrum gets a free scale factor :math:`s_{\rm spec}` that
+multiplies its whole model, with prior
+:math:`\log_{10} s_{\rm spec} \sim \mathcal{N}(0, \sigma)`, where
+:math:`\sigma` is ``cfg.likelihood.spectrum_scale_prior_sigma_dex`` (0.1 dex by
+default). It is fitted by default whenever the fit has photometry
+(``fit_spectrum_scale=None``); a spectrum-only fit has nothing to scale against.
+Set ``fit_spectrum_scale=False`` only when the spectrum is calibrated to the same
+total flux as the photometry, as for simulated data. The outputs are
+``log_spectrum_scale`` (natural log) and ``spectrum_scale_fit``.
 
-   cfg.likelihood.fit_spectrum_scale = True
-   cfg.likelihood.use_host_capture_model = True
-
-``fit_spectrum_scale`` fits a gray scale factor between the spectrum and the
-photometry, with a prior width of ``spectrum_scale_prior_sigma_dex``.
-``use_host_capture_model`` gives the spectrum its own captured fraction of the
-extended host, from its ``aperture_diameter_arcsec`` or ``psf_fwhm_arcsec``, as
-described in :doc:`photometry`. At each pixel the model is
+**Aperture capture.** With ``cfg.likelihood.use_host_capture_model = True``, the
+spectrum captures a fraction :math:`\eta_{\rm spec}` of the extended host, set by
+its ``aperture_diameter_arcsec`` or ``psf_fwhm_arcsec`` through the same capture
+model as the photometry (see :doc:`photometry`). At each pixel the model is
 
 .. math::
 
    f^{\rm spec} = s_{\rm spec}
-   \left[ f^{\rm compact} + \eta_{\rm spec} f^{\rm extended} \right],
+   \left[ f^{\rm compact} + \eta_{\rm spec} f^{\rm extended} \right].
 
-where :math:`s_{\rm spec}` is the gray scale and :math:`\eta_{\rm spec}` the
-captured host fraction. Turn ``fit_spectrum_scale`` off only when the spectrum is
-known to be calibrated to the same total flux as the photometry, as for simulated
-data.
+**Continuum tilt.** ``cfg.agn.fit_spectrum_tilt = True`` (off by default; also set
+by ``SpectrumConfig(polynomial_tilt_enabled=True)``) multiplies the stellar and AGN
+continuum of the spectra by a power law in wavelength,
+
+.. math::
+
+   \left( \lambda / \lambda_{\rm pivot} \right)^{\tau},
+   \qquad \tau \sim \mathcal{N}(0, 0.1),
+
+where :math:`\lambda_{\rm pivot}` is the median observed wavelength of the spectra.
+It absorbs a smooth error in the spectrum's flux-calibration slope, such as from
+differential slit losses, without changing the photometry. One tilt is shared by all
+spectra; the emission lines, Fe II and the Balmer continuum are not tilted. The
+output is ``spectral_continuum_tilt``. Leave it off unless the spectrum's shape is
+known to be unreliable: it is partly degenerate with the dust attenuation and the
+AGN continuum slope.
 
 Faint AGN
 ---------
