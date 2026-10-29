@@ -1,0 +1,27 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: filter_name, datatype: string}
+# - {name: flux_mjy, datatype: float64}
+# - {name: flux_err_mjy, datatype: float64}
+# meta: !!omap
+# - {object_id: 143317.88+173537.6_891438_0.03}
+# - {cosmos_id: '891438'}
+# - {redshift: 0.4821000099182129}
+# - {log_stellar_mass_truth: 11.2506}
+# - {log_sfr_truth: -0.488386}
+# - {log_lbol_agn_truth: 43.93912305525677}
+# - {chimera_qso_weight: 0.03}
+# - {description: 'Chimera SED (COSMOS host + scaled SDSS quasar) from the jaxsedfit benchmark sample; fluxes in mJy. log_lbol_agn_truth
+#     is the injected quasar luminosity times chimera_qso_weight [erg/s].'}
+# schema: astropy-2.0
+filter_name flux_mjy flux_err_mjy
+u_sdss 0.002428875467062975 7.875510654827021e-05
+r_sdss 0.020759131063412796 0.0001537205761746448
+i_sdss 0.042086479363879346 0.00018299706546085186
+z_sdss 0.07049012348881123 0.00015239443981619063
+J_2mass 0.11698025751531799 0.002088530278924525
+H_2mass 0.17536422611417388 0.003318990959764527
+Ks_2mass 0.20772608733692993 0.0029728648562782037
+spitzer.irac.I1 0.18406519832562063 0.0007248001823870625
+spitzer.irac.I2 0.15033218495048817 0.001138036898851082

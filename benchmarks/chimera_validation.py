@@ -120,8 +120,7 @@ def make_sample(args) -> int:
             raise SystemExit("--max-qso-host-contamination needs chimeras built with add_host_contamination.py")
         rows = [r for r in rows if r["qso_host_contamination_dex"] < args.max_qso_host_contamination]
 
-    # Same selection as notebooks/03_chimera_benchmarks.ipynb: up to N objects per bin of
-    # true injected AGN luminosity, drawn without selecting on the QSO weight.
+    # Up to N objects per bin of true injected AGN luminosity, drawn without selecting on the QSO weight.
     rng = np.random.default_rng(args.seed)
     selected = []
     for b, (lo, hi) in enumerate(zip(LUMINOSITY_BIN_EDGES[:-1], LUMINOSITY_BIN_EDGES[1:])):

@@ -2775,16 +2775,13 @@ class JAXSEDFit:
             np.asarray(self.context.spec_errors, dtype=float)[selected],
             z,
         )
-        spectrum_scale = self._posterior_median_array(pred.get("spectrum_scale_fit", 1.0))
-        if np.ndim(spectrum_scale) > 0 and np.size(spectrum_scale) > 1:
-            scale_factor = float(np.asarray(spectrum_scale, dtype=float)[int(spectrum_index)])
-        else:
-            scale_factor = float(np.asarray(spectrum_scale, dtype=float))
-        capture_fraction = self._posterior_median_array(pred.get("spectrum_host_capture_fraction", 1.0))
-        if np.ndim(capture_fraction) > 0 and np.size(capture_fraction) > 1:
-            host_capture = float(np.asarray(capture_fraction, dtype=float)[int(spectrum_index)])
-        else:
-            host_capture = float(np.asarray(capture_fraction, dtype=float))
+        # One value per spectrum, or a single value (possibly a length-1 array) shared by all.
+        spectrum_scale = np.ravel(np.asarray(self._posterior_median_array(pred.get("spectrum_scale_fit", 1.0)), dtype=float))
+        scale_factor = float(spectrum_scale[int(spectrum_index)] if spectrum_scale.size > 1 else spectrum_scale[0])
+        capture_fraction = np.ravel(
+            np.asarray(self._posterior_median_array(pred.get("spectrum_host_capture_fraction", 1.0)), dtype=float)
+        )
+        host_capture = float(capture_fraction[int(spectrum_index)] if capture_fraction.size > 1 else capture_fraction[0])
 
         def component(name: str, apply_scale: bool = True) -> np.ndarray:
             """Return one posterior-median spectral component on the rest grid.

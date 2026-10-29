@@ -2673,6 +2673,15 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
     assert np.nanmax(captured["custom_components"]["jaxsedfit_nebular_lines"]) > 0.0
     assert "jaxsedfit_nebular_lines" in captured["pred_bands"]
 
+    # One capture fraction per spectrum, as the predictive returns it: shape (draws, 1).
+    host_before = captured["host"]
+    fitter.predict = lambda posterior="latest", *, extra_return_sites=(): {
+        **_fake_predict(posterior, extra_return_sites=extra_return_sites),
+        "spectrum_host_capture_fraction": np.asarray([[0.5], [0.5]]),
+    }
+    assert fitter.plot_spectrum(show_plot=False, plot_residual=False) == "fig"
+    np.testing.assert_allclose(captured["host"], host_before)
+
 
 def test_spectral_plot_psf_photometry_rejects_duplicate_band():
     fitter = JAXSEDFit.__new__(JAXSEDFit)
