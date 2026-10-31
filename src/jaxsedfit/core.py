@@ -1,3 +1,10 @@
+"""The single-object fitter :class:`JAXSEDFit`.
+
+It builds the model context from a :class:`~jaxsedfit.config.FitConfig`, runs MAP,
+Laplace, SVI, NUTS or nested-sampling inference, computes posterior predictive
+products, and saves, loads and plots fits.
+"""
+
 from __future__ import annotations
 
 import gc

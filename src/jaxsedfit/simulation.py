@@ -106,6 +106,9 @@ def simulation_config(
         If given, redshift becomes a sampled parameter with a flat prior over this range,
         and the filter projection is cached on ``n_redshift_grid`` points across it. Pass
         explicit ``redshift`` values to :func:`simulate` to impose another distribution.
+    n_redshift_grid : int
+        Number of redshift grid points for the cached filter projection when
+        ``redshift_range`` is given.
     dsps_ssp_fn : str, optional
         DSPS SSP template file (``GalaxyConfig.dsps_ssp_fn``).
     **fit_config_kwargs

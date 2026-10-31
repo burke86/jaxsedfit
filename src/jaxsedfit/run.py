@@ -1,3 +1,7 @@
+"""The ``jaxsedfit`` command-line entry point: fit one object from a Python or JSON
+config file.
+"""
+
 from __future__ import annotations
 
 import argparse

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Configuration types for the reusable quasar spectral model."""
+
+from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Mapping, Sequence

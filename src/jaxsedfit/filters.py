@@ -1,3 +1,7 @@
+"""Filter-curve registry: name aliases, loading of the vendored filter curves and
+normalization of user-supplied curves.
+"""
+
 from __future__ import annotations
 
 from functools import lru_cache

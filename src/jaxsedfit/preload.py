@@ -1,3 +1,10 @@
+"""Build the static :class:`ModelContext` before a fit.
+
+Loads and packs the filters, AGN and nebular templates and the DSPS SSP basis,
+precomputes the redshift and IGM caches, and converts the data and configuration
+into the JAX arrays the model reads during inference.
+"""
+
 from __future__ import annotations
 
 # This module loads vendored resources and model assets used by jaxsedfit.
@@ -1358,6 +1365,8 @@ def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData, ssp_imf: str = "
         Rest-frame wavelength grid in Angstrom, shape (n_wave,).
     ssp_data : SSPData
         DSPS SSP grids (L_nu in Lsun/Hz per Msun).
+    ssp_imf : str
+        IMF of the SSP library; selects the surviving stellar-mass fractions.
     """
     cache_key = (
         str(ssp_data.ssp_flux.__array_interface__["data"][0]),

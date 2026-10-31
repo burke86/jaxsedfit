@@ -1,3 +1,7 @@
+"""Public wrappers for building the host-galaxy SSP basis and evaluating host states
+outside a fit.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

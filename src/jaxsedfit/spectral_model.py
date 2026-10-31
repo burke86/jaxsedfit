@@ -1,3 +1,11 @@
+"""The standalone quasar spectral model (the engine behind jaxqsofit).
+
+Continuum, host SSP templates, tied emission lines, Fe II, Balmer continuum,
+reddening and calibration polynomials, with the posterior component reconstruction.
+Joint SED fits reuse its line and template helpers through
+:mod:`jaxsedfit.spectral_components`.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -191,13 +199,13 @@ def host_kernel_sigma_kms(gal_sigma_kms, sigma_inst_kms, template_fwhm_angstrom,
 
     Parameters
     ----------
-    gal_sigma_kms : object
+    gal_sigma_kms : float or jax.Array
         Intrinsic stellar velocity dispersion in km/s.
-    sigma_inst_kms : object
+    sigma_inst_kms : float or jax.Array
         Instrumental Gaussian sigma in km/s; zero when the resolving power is unknown.
     template_fwhm_angstrom : float or None
         SSP template FWHM resolution in rest-frame Angstrom; None disables the correction.
-    rest_wave_ref : object
+    rest_wave_ref : float
         Rest wavelength in Angstrom at which the template resolution is converted to km/s.
     """
     combined = combine_gaussian_sigma(gal_sigma_kms, sigma_inst_kms)
@@ -540,7 +548,7 @@ def _smc_like_reddening_jax(wave, ebv, uv_ref=2500.0, alpha=1.2):
     ----------
     wave : jax.Array
         Rest-frame wavelengths in Angstrom.
-    ebv : object
+    ebv : float or jax.Array
         Rest-frame E(B-V).
     uv_ref : float
         Reference wavelength in Angstrom of the k(lambda) power law.
@@ -2248,11 +2256,11 @@ def _custom_component_eval_wave(wave_rest, comp, z_qso):
 
     Parameters
     ----------
-    wave_rest : object
+    wave_rest : jax.Array
         Rest-frame model wavelength grid in Angstrom.
-    comp : object
+    comp : CustomComponentSpec or CustomLineComponentSpec
         Custom component spec with a ``frame`` attribute.
-    z_qso : object
+    z_qso : float or jax.Array
         Source redshift.
     """
     if getattr(comp, "frame", "rest") == "observed":
@@ -2268,11 +2276,11 @@ def _custom_fnu_mjy_to_rest_flambda_1e17(wave_rest, fnu_mjy, z_qso):
 
     Parameters
     ----------
-    wave_rest : object
+    wave_rest : jax.Array
         Rest-frame model wavelength grid in Angstrom.
-    fnu_mjy : object
+    fnu_mjy : jax.Array
         Component flux density in observed-frame mJy.
-    z_qso : object
+    z_qso : float or jax.Array
         Source redshift.
     """
     wave_obs = wave_rest * (1.0 + z_qso)
@@ -2538,6 +2546,11 @@ def reconstruct_posterior_components(
         Optical Fe II template flux (normalized units).
     custom_components : Sequence[CustomComponentSpec] or None
         Custom continuum/BAL components used in the fit.
+    custom_line_components : Sequence[CustomLineComponentSpec] or None
+        Custom line components used in the fit.
+    tied_line_meta : Mapping[str, Any] or None
+        Tied-line metadata from :func:`build_tied_line_meta_from_linelist`; when given,
+        the Gaussian lines are rebuilt from the per-component draws in ``pred_out``.
     template_norms : Sequence[float] or None
         Host template normalizations used in the fit.
     n_draws : int or None

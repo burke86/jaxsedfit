@@ -1,3 +1,7 @@
+"""Result containers: :class:`FitResult` for a finished fit and
+:class:`PredictionResult` for posterior predictive draws.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping

@@ -1,3 +1,7 @@
+"""User-defined additive spectral components and line components, including BAL
+absorption, with their priors and serialization.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -463,6 +467,13 @@ def make_custom_component(
     metadata : Mapping[str, Any] or None, optional
         Static data passed to ``evaluate`` (e.g. template arrays,
         ``shared_parameter_sites``).
+    frame : str, optional
+        ``"rest"`` or ``"observed"``: the frame of the ``wave`` grid passed to
+        ``evaluate``.
+    flux_unit : str, optional
+        Unit of the returned flux; only ``"fnu_mjy"`` is supported.
+    attenuation : str, optional
+        Dust attenuation applied to the component; only ``"none"`` is supported.
     """
     return CustomComponentSpec(
         name=name,
@@ -501,6 +512,11 @@ def make_custom_line_component(
         ``"broad"`` or ``"narrow"``; selects which line total the component is added to.
     metadata : Mapping[str, Any] or None, optional
         Static data passed to ``evaluate``.
+    frame : str, optional
+        ``"rest"`` or ``"observed"``: the frame of the ``wave`` grid passed to
+        ``evaluate``.
+    flux_unit : str, optional
+        Unit of the returned flux; only ``"fnu_mjy"`` is supported.
     """
     return CustomLineComponentSpec(
         name=name,

@@ -1,3 +1,9 @@
+"""Chimera stellar-mass benchmark: fit Chimeras (real galaxies with an injected quasar
+of known luminosity) and score the recovered stellar mass.
+
+Also the ``jaxsedfit-benchmark`` command-line entry point.
+"""
+
 from __future__ import annotations
 
 # The Chimera benchmark path vendors selected filter and template files that
