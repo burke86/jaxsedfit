@@ -27,7 +27,7 @@ the ``wave_obs`` grid (observed-frame vacuum wavelengths in Å):
    )
 
 ``resolving_power`` sets the instrumental broadening of the model. Several spectra
-can be passed as a list; each gets its own calibration and aperture.
+can be passed as a list (see `Multiple spectra`_).
 
 Enable the AGN emission lines, Fe II and Balmer continuum that the spectrum
 resolves on the AGN configuration (see :doc:`agn`):
@@ -96,6 +96,38 @@ spectra; the emission lines, Fe II and the Balmer continuum are not tilted. The
 output is ``spectral_continuum_tilt``. Leave it off unless the spectrum's shape is
 known to be unreliable: it is partly degenerate with the dust attenuation and the
 AGN continuum slope.
+
+Multiple spectra
+----------------
+
+Pass a list to fit several spectra together, for example from different
+instruments or epochs:
+
+.. code-block:: python
+
+   cfg.spectroscopy = [
+       SpectroscopyData(wave_obs=w_sdss, fluxes=f_sdss, errors=e_sdss,
+                        instrument="sdss", aperture_diameter_arcsec=3.0,
+                        resolving_power=2000.0),
+       SpectroscopyData(wave_obs=w_desi, fluxes=f_desi, errors=e_desi,
+                        instrument="desi", aperture_diameter_arcsec=1.5,
+                        resolving_power=4000.0),
+   ]
+
+Each spectrum gets its own line-spread function (from its ``resolving_power``), gray
+scale factor :math:`s_{\rm spec}` and, with the capture model, host capture fraction
+:math:`\eta_{\rm spec}` (from its aperture). Everything else is shared: one host and
+one AGN, the spectral jitter ``frac_jitter`` and, when enabled, the continuum tilt.
+
+The AGN is therefore assumed to be the same in every spectrum. The
+``variability_uncertainty`` term applies only to photometry (see :doc:`likelihood`),
+and the scale factors absorb only a gray change. If the AGN changed between epochs
+in shape or line strength, fit the spectra separately.
+
+``result.spectrum.observations[i]`` returns spectrum ``i``'s data, model and
+residuals (see `Reading spectral results`_), and
+``fitter.plot_spectrum(spectrum_index=i)`` plots it. Indices follow the order of
+the list.
 
 Faint AGN
 ---------
