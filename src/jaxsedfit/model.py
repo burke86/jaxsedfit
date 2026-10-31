@@ -1,3 +1,14 @@
+"""The NumPyro forward model and likelihood.
+
+The host (DSPS SSPs with a delayed, delayed-plus-burst or Diffstar SFH, nebular
+emission and energy-balance dust), the AGN (disk power law, torus, emission lines,
+Fe II and Balmer continuum) and their attenuation are built on a rest-frame grid,
+redshifted, projected through the filters and, for spectra, onto the spectral pixels.
+:func:`evaluate_photometric_state` evaluates one model state and its photometric and
+spectroscopic likelihoods; :func:`grahsp_photometric_model` wraps it as the NumPyro
+model the fitters run.
+"""
+
 from __future__ import annotations
 
 # Portions of this file are derived from or closely based on CIGALE and
@@ -480,6 +491,11 @@ def _ssp_lgmet_solar_offset(
     ----------
     ssp_lgmet : jax.Array
         SSP metallicity grid, shape (n_met,); unused, kept for API compatibility.
+    metallicity_coordinate : str
+        Metallicity coordinate of the SSP grid: ``"absolute_log10_z"`` or
+        ``"log10_z_over_zsun"``.
+    solar_metallicity : float
+        Absolute solar metallicity Z of the SSP library.
     """
     del ssp_lgmet
     coordinate = str(metallicity_coordinate).strip().lower()
@@ -504,6 +520,11 @@ def _gal_lgmet_to_absolute_z(
         Galaxy log10 metallicity in the SSP-grid coordinate.
     ssp_lgmet : jax.Array
         SSP metallicity grid, shape (n_met,); unused, kept for API compatibility.
+    metallicity_coordinate : str
+        Metallicity coordinate of the SSP grid: ``"absolute_log10_z"`` or
+        ``"log10_z_over_zsun"``.
+    solar_metallicity : float
+        Absolute solar metallicity Z of the SSP library.
     """
     gal_lgmet = jnp.asarray(gal_lgmet, dtype=jnp.float64)
     del ssp_lgmet
@@ -603,6 +624,11 @@ def _default_gal_lgmet_loc(
     ----------
     ssp_lgmet : jax.Array
         SSP log10 metallicity grid, shape (n_met,); bounds the result.
+    metallicity_coordinate : str
+        Metallicity coordinate of the SSP grid: ``"absolute_log10_z"`` or
+        ``"log10_z_over_zsun"``.
+    solar_metallicity : float
+        Absolute solar metallicity Z of the SSP library.
     """
     ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
     loc = _ssp_lgmet_solar_offset(ssp_lgmet, metallicity_coordinate, solar_metallicity) - 0.3
@@ -622,11 +648,11 @@ def _cigale_delayed_sfh_shape(elapsed_gyr, tau_gyr, age_gyr):
 
     Parameters
     ----------
-    elapsed_gyr : object
+    elapsed_gyr : float or jax.Array
         Time since the onset of star formation in Gyr.
-    tau_gyr : object
+    tau_gyr : float or jax.Array
         Delayed-SFH e-folding time in Gyr.
-    age_gyr : object
+    age_gyr : float or jax.Array
         Maximum elapsed time supported by the model in Gyr.
     """
     elapsed_gyr = jnp.asarray(elapsed_gyr, dtype=jnp.float64)
@@ -913,7 +939,7 @@ def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, h
         Rest-frame wavelengths in Angstrom, shape (n_wave,).
     fcov : float or jax.Array
         Torus covering-factor proxy scaling the torus luminosity.
-    si : object
+    si : float or jax.Array
         Signed latent controlling the silicate modulation. Positive values
         produce emission near ``si_em_lam`` and negative values produce
         absorption; a hyperbolic-tangent transform bounds the fractional
@@ -1294,6 +1320,9 @@ def _apply_biattenuation(
         Broken power-law curve value at ``lam_break``.
     lam_break : float
         Break wavelength in Angstrom.
+    noll_delta : float or jax.Array, optional
+        Noll et al. (2009) slope ``delta`` for the host screen; None uses the broken
+        power law for both screens.
     """
     curve = _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break)
     if noll_delta is None:
@@ -1671,6 +1700,11 @@ def _project_integrated_local_line_filters(
         Luminosity distance in meters.
     igm : jax.Array
         IGM transmission on ``context.rest_wave_jax``, shape (n_wave,).
+    spectral_state : dict[str, Any], optional
+        Sampled joint spectral-feature state. With ``spectral_component_cfg``, applies
+        the BAL absorption transmission to the lines.
+    spectral_component_cfg : SpectralComponentConfig, optional
+        Spectral-feature configuration used to render the BAL transmission.
     """
     rest_line_wave, rest_lumin = _local_flux_conserving_line_grid(line_wave, line_lumin, width_kms)
     redshift = jnp.asarray(redshift, dtype=jnp.float64)
@@ -1733,6 +1767,11 @@ def _local_integrated_line_obs_sed(
         Luminosity distance in meters.
     igm : jax.Array
         IGM transmission on ``context.rest_wave_jax``, shape (n_wave,).
+    spectral_state : dict[str, Any], optional
+        Sampled joint spectral-feature state. With ``spectral_component_cfg``, applies
+        the BAL absorption transmission to the lines.
+    spectral_component_cfg : SpectralComponentConfig, optional
+        Spectral-feature configuration used to render the BAL transmission.
     """
     rest_line_wave, rest_lumin = _local_flux_conserving_line_grid(line_wave, line_lumin, width_kms)
     redshift = jnp.asarray(redshift, dtype=jnp.float64)
@@ -2015,6 +2054,12 @@ def _build_diffstar_host(
         Flat prior mapping keyed by NumPyro site name.
     full_output : bool
         If True, also return SSP weights and the scaled SFR/stellar-mass history tables.
+    shared_gal_lgmet : float or jax.Array, optional
+        Host metallicity in the SSP-grid coordinate, tied to the nebular gas
+        metallicity (see ``_resolve_tied_metallicity``); None samples or fixes it
+        independently.
+    redshift : float or jax.Array, optional
+        Source redshift; None uses ``context.fit_config.observation.redshift``.
     """
     ssp_lgmet = context.host_basis_jax.ssp_lgmet
     ssp_lg_age_gyr = context.host_basis_jax.ssp_lg_age_gyr
@@ -2252,6 +2297,12 @@ def _build_delayed_host(
         Flat prior mapping keyed by NumPyro site name.
     full_output : bool
         If True, also return SSP weights and the scaled SFR/stellar-mass history tables.
+    shared_gal_lgmet : float or jax.Array, optional
+        Host metallicity in the SSP-grid coordinate, tied to the nebular gas
+        metallicity (see ``_resolve_tied_metallicity``); None samples or fixes it
+        independently.
+    redshift : float or jax.Array, optional
+        Source redshift; None uses ``context.fit_config.observation.redshift``.
     """
     ssp_lgmet = context.host_basis_jax.ssp_lgmet
     ssp_lg_age_gyr = context.host_basis_jax.ssp_lg_age_gyr
@@ -2463,6 +2514,12 @@ def _build_host_state(
         Flat prior mapping keyed by NumPyro site name.
     full_output : bool
         If True, also return SSP weights and the scaled SFR/stellar-mass history tables.
+    shared_gal_lgmet : float or jax.Array, optional
+        Host metallicity in the SSP-grid coordinate, tied to the nebular gas
+        metallicity (see ``_resolve_tied_metallicity``); None samples or fixes it
+        independently.
+    redshift : float or jax.Array, optional
+        Source redshift; None uses ``context.fit_config.observation.redshift``.
     """
     model_name = str(context.fit_config.galaxy.host_sfh_model).lower()
     if model_name in {
@@ -2564,6 +2621,12 @@ def _build_nebular_components(
         Intrinsic stellar host L_lambda in W/Angstrom, shape (n_wave,).
     prior_config : dict[str, Any]
         Flat prior mapping keyed by NumPyro site name.
+    build_line_sed : bool
+        If False, skip the nebular line SED (``lines_rest`` is zero); the line
+        luminosities are still returned.
+    shared_zgas : float or jax.Array, optional
+        Absolute gas metallicity Z tied to the host metallicity; None uses the
+        configured or sampled ``zgas``.
     """
     rest_wave = context.rest_wave_jax
     cfg = context.fit_config.nebular
@@ -2878,9 +2941,9 @@ def _host_capture_fraction(effective_radius_arcsec, host_size_arcsec):
 
     Parameters
     ----------
-    effective_radius_arcsec : object
+    effective_radius_arcsec : float or jax.Array
         Effective measurement radius in arcseconds.
-    host_size_arcsec : object
+    host_size_arcsec : float or jax.Array
         Host turnover radius in arcseconds (the 50-percent capture radius).
     """
     effective_radius_arcsec = jnp.asarray(effective_radius_arcsec, dtype=jnp.float64)
@@ -2957,7 +3020,7 @@ def photometric_loglike(
         Local nebular-line band fluxes in mJy, or None to skip that term.
     local_nebular_line_uncertainty_dex : float
         Fractional nebular-line flux uncertainty in dex.
-    agn_systematics_width : object
+    agn_systematics_width : float or jax.Array
         Fractional AGN model-mismatch coefficient in the GRAHSP systematic
         error term.
     return_diagnostics : bool, optional
@@ -3446,24 +3509,27 @@ def _evaluate_spectral_components(
         If set, fixed FWHM in km/s for all narrow lines.
     fixed_narrow_amp_scale : float or None
         If set, multiplicative scale applied to narrow-line amplitudes.
-    feature_amplitude_scale : object
+    feature_amplitude_scale : float or jax.Array
         Calibration scale defining the observed-spectrum coordinate system for
         sampled line, Fe II, and Balmer amplitudes.
-    instrumental_sigma_ln : object
+    include_lines : bool
+        Whether the broad and narrow emission lines are evaluated.
+    instrumental_sigma_ln : jax.Array, optional
         Optional static per-pixel instrumental sigma in ln(wavelength).
-    bal_continuum_mjy : object, optional
+    bal_continuum_mjy : jax.Array, optional
         Compact AGN disk continuum subject to BAL absorption.
     include_bal_components : bool, optional
         Whether BAL absorption custom components are active. Other custom
         continuum and line components are unaffected.
-    line_mask_coverage_rest : object, optional
+    line_mask_coverage_rest : tuple[float, float], optional
         Rest-frame (min, max) data coverage that masks lines of the table built
         from ``line_coverage_rest`` (see ``AGNConfig.line_activation_rest``).
-    instrument_index, pixel_padding : object, optional
+    instrument_index, pixel_padding : array_like, optional
         Per-pixel spectrum index and padding flags, passed to
         :func:`jaxsedfit.spectroscopy.evaluate_joint_spectral_components`.
-    line_amp_groups : object, optional
-        Per-group (init, min, max) line amplitudes replacing the line table's.
+    line_amp_groups : numpy.ndarray, optional
+        Per-group (init, min, max) line amplitudes, shape (3, n_groups), replacing the
+        line table's.
     """
     try:
         from .spectral_custom_components import is_bal_absorption_component
@@ -3820,7 +3886,7 @@ def evaluate_photometric_state(
     include_spectral_features : bool
         Whether detailed spectral-engine features (Fe II, Balmer continuum, custom
         components) are evaluated.
-    include_spectral_lines : object
+    include_spectral_lines : bool
         Whether detailed broad and narrow emission lines are active. Smooth
         spectral features such as Fe II and Balmer continuum remain controlled
         by ``include_spectral_features``.
@@ -3835,6 +3901,7 @@ def evaluate_photometric_state(
     force_component_fluxes : bool
         Compute component band fluxes even when the likelihood does not need them.
     """
+    # Unpack the static context: grids, templates, data and the enabled components.
     cfg = context.fit_config
     prior_config = cfg.prior_config.to_mapping()
     rest_wave = context.rest_wave_jax
@@ -3941,6 +4008,7 @@ def evaluate_photometric_state(
         and not spectroscopy_enabled
         and not cfg.likelihood.attenuation_model_uncertainty
     )
+    # Redshift and luminosity distance.
     if cfg.observation.fits_redshift:
         redshift = _sample_redshift(context, prior_config, cfg)
         luminosity_distance_m = _luminosity_distance_m_jax(
@@ -3953,6 +4021,8 @@ def evaluate_photometric_state(
         redshift = context.fixed_redshift_jax
         luminosity_distance_m = context.fixed_luminosity_distance_m_jax
         igm = context.fixed_igm_jax
+    # Host galaxy: stellar populations from the SFH, plus the stellar kinematics when a
+    # spectrum is fitted.
     needs_spec_host_basis = bool(
         spectroscopy_enabled
         and context.spec_host_basis_jax is not None
@@ -3992,6 +4062,7 @@ def evaluate_photometric_state(
         gal_sigma_kms = jnp.asarray(0.0, dtype=jnp.float64)
 
     host_llambda_5100 = jnp.interp(5100.0, rest_wave, host_rest, left=0.0, right=0.0) if fit_host else jnp.asarray(0.0, dtype=jnp.float64)
+    # AGN normalization (the disk luminosity at 5100 A).
     if fit_agn:
         # Infer the AGN normalization directly from the photometry rather than
         # forcing the host 5100 A continuum to set the AGN amplitude.
@@ -4016,6 +4087,7 @@ def evaluate_photometric_state(
 
     agn_type = int(cfg.agn.agn_type)
     if fit_agn:
+        # Accretion disk: GRAHSP bent power law.
         pl_slope = _sample_prior(
             prior_config,
             "pl_slope",
@@ -4060,6 +4132,7 @@ def evaluate_photometric_state(
         numpyro.deterministic("pl_cutoff", pl_cutoff)
         disk_rest = _powerlaw_jax(rest_wave, agn_amp / 5100.0, uv_slope, pl_slope, 5100.0, pl_bend_loc, pl_bend_width, pl_cutoff)
 
+        # Torus: GRAHSP cool and hot dust components.
         fcov = _sample_positive_distribution(
             prior_config,
             value_key="fcov",
@@ -4133,6 +4206,7 @@ def evaluate_photometric_state(
             agn_amp,
         )
 
+        # AGN emission lines on the SED grid, then Fe II and the Balmer continuum.
         if include_sed_agn_features:
             if shared_spectral_lines or (
                 configured_spectral_lines and not active_spectral_lines
@@ -4324,6 +4398,7 @@ def evaluate_photometric_state(
         feii_rest = jnp.zeros_like(rest_wave)
         balmer_rest = jnp.zeros_like(rest_wave)
 
+    # Dust: host and nuclear attenuation screens, and host dust emission.
     ebv_gal = (
         _sample_positive_distribution(
             prior_config,
@@ -4404,6 +4479,7 @@ def evaluate_photometric_state(
             dust_umin = numpyro.sample("dust_umin", dist.Uniform(0.1, 25.0))
     else:
         dust_umin = jnp.asarray(float(cfg.galaxy.dust_umin), dtype=jnp.float64)
+    # Photometric model-error terms.
     if cfg.likelihood.fit_systematics_width:
         if "systematics_width" in prior_config or "log_systematics_width" in prior_config:
             systematics_width = _sample_positive(
@@ -4439,6 +4515,7 @@ def evaluate_photometric_state(
         )
     else:
         agn_systematics_width = jnp.asarray(float(cfg.likelihood.agn_systematics_width), dtype=jnp.float64)
+    # Nebular emission, then the attenuation of host and AGN light.
     nebular = _build_nebular_components(
         context,
         host_state,
@@ -4505,6 +4582,7 @@ def evaluate_photometric_state(
     total_rest = gal_att_rest + dust_rest + agn_rest
     direct_intrinsic_rest = host_with_nebular_rest + agn_attenuated_input_rest
     direct_attenuated_rest = gal_att_rest + agn_attenuated_rest
+    # Project the rest-frame SED through the filters.
     fast_projection_enabled = _can_use_fixed_filter_projection(context, cfg)
     redshift_projection_enabled = (
         _can_use_redshift_filter_projection(context, cfg)
@@ -4531,6 +4609,8 @@ def evaluate_photometric_state(
     else:
         total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
         pred_fluxes_raw = _project_filters(total_obs, context.packed_filters_jax)
+    # Replace the coarse-grid emission-line photometry with lines integrated on local
+    # fine grids.
     local_agn_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
     local_broad_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
     local_narrow_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
@@ -4624,6 +4704,7 @@ def evaluate_photometric_state(
         coarse_nebular_line_fluxes = band_fluxes(nebular_lines_att_rest)
         pred_fluxes_raw = pred_fluxes_raw - coarse_nebular_line_fluxes + local_nebular_line_fluxes
     host_dust_fluxes_total = jnp.zeros_like(pred_fluxes_raw)
+    # Host aperture capture: each photometric aperture sees only part of the extended host.
     if host_capture_enabled or include_components or spectroscopy_enabled:
         host_obs = (
             jnp.zeros_like(obs_wave)
@@ -4702,6 +4783,7 @@ def evaluate_photometric_state(
         else _apply_extended_capture(pred_fluxes_raw, extended_capture_source_fluxes, host_capture_fraction)
     )
 
+    # Spectrum model. These defaults are kept when no spectrum is fitted.
     spec_model_fluxes = jnp.zeros_like(spec_fluxes)
     spec_host_model_fluxes = jnp.zeros_like(spec_fluxes)
     spec_disk_model_fluxes = jnp.zeros_like(spec_fluxes)
@@ -4743,6 +4825,7 @@ def evaluate_photometric_state(
         else jnp.zeros_like(obs_wave)
     )
     if spectroscopy_enabled:
+        # Continuum (host, disk and torus) on the spectral pixels.
         use_spec_resolution_continuum = bool(
             context.spec_host_basis_jax is not None
             and context.spec_rest_wave_jax.size == context.spec_wave_obs.size
@@ -4851,6 +4934,7 @@ def evaluate_photometric_state(
             spec_torus_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_torus_lambda)
             spec_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_model_lambda)
         spec_continuum_model_fluxes = spec_model_fluxes
+        # Gray flux-scale factor of each spectrum.
         fit_spectrum_scale = (
             cfg.photometry is not None
             if cfg.likelihood.fit_spectrum_scale is None
@@ -4895,6 +4979,7 @@ def evaluate_photometric_state(
             if jnp.ndim(spectrum_scale) > 0
             else spectrum_scale
         )
+        # AGN emission lines, Fe II, Balmer continuum and custom components.
         if include_spectral_features:
             spectral_components = _evaluate_spectral_components(
                 spec_wave_obs,
@@ -5130,6 +5215,7 @@ def evaluate_photometric_state(
             spec_feii_fluxes = jnp.zeros_like(spec_model_fluxes)
         pixel_spectrum_scale = spectrum_scale[spec_spectrum_index] if jnp.ndim(spectrum_scale) > 0 else spectrum_scale
         spec_model_fluxes = pixel_spectrum_scale * spec_model_fluxes
+        # Spectral likelihood.
         spec_jitter_variance = _sample_spectral_jitter_variance(
             context.spectral_prior_config,
             spec_model_fluxes,
@@ -5167,6 +5253,7 @@ def evaluate_photometric_state(
         or cfg.likelihood.agn_systematics_width > 0.0
     )
     need_trans_fluxes = include_components or cfg.likelihood.attenuation_model_uncertainty
+    # Component SEDs and fluxes for plotting and predictive products.
     if include_components:
         agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
         host_stellar_obs = _redshift_to_obs(rest_wave, host_stellar_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
@@ -5365,6 +5452,8 @@ def evaluate_photometric_state(
         else:
             trans_fluxes = jnp.ones_like(pred_fluxes)
 
+    # Photometric likelihood. With spectral features, the AGN line, Fe II and Balmer
+    # photometry come from the fitted spectral state.
     if spectral_engine_enabled and include_spectral_features:
         agn_fluxes = agn_fluxes + spectral_photometry_adjustment
         constant_agn_fluxes = (
@@ -5425,6 +5514,7 @@ def evaluate_photometric_state(
         joint_chi2_sum / jnp.maximum(joint_n_eff, 1.0e-30),
         jnp.asarray(jnp.nan, dtype=jnp.float64),
     )
+    # Likelihood factor and the recorded outputs.
     if add_likelihood:
         numpyro.factor("photometry_loglike", logl)
     numpyro.deterministic("pred_fluxes", pred_fluxes)
@@ -5678,7 +5768,7 @@ def grahsp_photometric_model(
         components) are evaluated.
     include_spectral_lines : bool
         Whether detailed broad and narrow spectral emission lines are active.
-    force_component_fluxes : object
+    force_component_fluxes : bool
         Compute component band fluxes even when the likelihood does not need
         them. Used by lightweight posterior prediction products.
     include_spectral_bal : bool

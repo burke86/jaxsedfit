@@ -1,3 +1,5 @@
+"""The packaged Matplotlib style used by the jaxsedfit plots."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager

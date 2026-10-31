@@ -1,3 +1,7 @@
+"""SED, corner and trace plots, and the shared component color palette
+(``PLOT_COLORS``) used by both the SED and spectrum plots.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping

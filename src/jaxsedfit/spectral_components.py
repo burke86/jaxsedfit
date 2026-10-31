@@ -1,3 +1,11 @@
+"""Spectral features for joint SED and spectrum fits.
+
+Samples and evaluates the AGN emission lines, Fe II and Balmer continuum on the
+observed spectral pixels, around the continuum from the SED model, including the
+instrumental broadening and custom components. Use the public interface in
+:mod:`jaxsedfit.spectroscopy`.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -356,10 +364,10 @@ def _instrumental_sigma_pixels(instrumental_sigma_ln, wave_obs):
 
     Parameters
     ----------
-    instrumental_sigma_ln : object
+    instrumental_sigma_ln : float or jax.Array
         Scalar or per-pixel Gaussian instrumental sigma in ln(wavelength); must be
         static (known before sampling), e.g. derived from the spectrum's resolving power.
-    wave_obs : object
+    wave_obs : jax.Array
         Observed-frame wavelength grid the sigma applies to.
     """
     if instrumental_sigma_ln is None:
@@ -381,13 +389,13 @@ def _split_instrument_broadened_gauss_lnlam(lnwave, amps, mus, sigs, broad_mask,
 
     Parameters
     ----------
-    lnwave : object
+    lnwave : jax.Array
         ln(rest wavelength) of each pixel.
-    amps, mus, sigs : object
+    amps, mus, sigs : jax.Array
         Intrinsic per-component amplitudes, ln-centers, and ln-sigmas.
-    broad_mask : object
+    broad_mask : jax.Array
         1 for broad components, 0 for narrow.
-    sigma_inst_ln : object
+    sigma_inst_ln : jax.Array
         Per-pixel instrumental sigma in ln(wavelength).
     """
     sigma_inst = jnp.asarray(sigma_inst_ln, dtype=jnp.float64)[:, None]
@@ -419,9 +427,9 @@ def _broaden_per_instrument(evaluate, sigma_inst_ln, like, instrument_index=None
     evaluate : callable
         ``evaluate(sigma_inst_ln)`` returning the component on every pixel for one
         scalar instrumental sigma in ln(wavelength).
-    sigma_inst_ln : object
+    sigma_inst_ln : jax.Array or None
         Static per-pixel instrumental sigma, or None.
-    like : object
+    like : jax.Array
         Array whose shape the result takes.
     instrument_index : array_like of int, optional
         Static spectrum index of each pixel. Required when ``sigma_inst_ln`` is
@@ -462,6 +470,12 @@ def _evaluate_tied_line_components(
         Component configuration controlling the line table and narrow-line overrides.
     site_prefix : str
         Prefix for the NumPyro sample-site names.
+    feature_amplitude_scale : float or jax.Array
+        Calibration scale of the observed spectrum; sampled amplitudes are divided by it
+        (see :func:`evaluate_joint_spectral_components`).
+    instrumental_sigma_ln : float or jax.Array, optional
+        Instrumental Gaussian sigma in ln(wavelength), scalar or per pixel; None leaves
+        the lines unconvolved.
     """
     prior_config = _component_prior_config(cfg)
     tied_line_meta = build_joint_tied_line_meta(cfg)
@@ -563,6 +577,12 @@ def _evaluate_simple_line_components(
         width/velocity defaults.
     site_prefix : str
         Prefix for the NumPyro sample-site names.
+    feature_amplitude_scale : float or jax.Array
+        Calibration scale of the observed spectrum; sampled amplitudes are divided by it
+        (see :func:`evaluate_joint_spectral_components`).
+    instrumental_sigma_ln : float or jax.Array, optional
+        Instrumental Gaussian sigma in ln(wavelength), scalar or per pixel; None leaves
+        the lines unconvolved.
     """
     line_model = jnp.zeros_like(wave_rest)
     broad_model = jnp.zeros_like(wave_rest)
@@ -783,6 +803,8 @@ def evaluate_joint_spectral_components(
         continuum are convolved with it on this grid only; sampled widths and
         the returned per-component line state stay intrinsic. Zero or None
         leaves the model unconvolved.
+    site_prefix
+        Prefix for the NumPyro sample-site names.
     feature_amplitude_scale
         Multiplicative calibration of the reference observed spectrum. Line,
         Fe II, and Balmer amplitudes are sampled in that observed coordinate

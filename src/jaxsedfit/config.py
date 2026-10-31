@@ -1,3 +1,12 @@
+"""Fit configuration dataclasses.
+
+:class:`FitConfig` collects the data (:class:`PhotometryData`,
+:class:`SpectroscopyData`, :class:`Observation`), the model settings
+(:class:`GalaxyConfig`, :class:`AGNConfig`, :class:`NebularConfig`), the priors, the
+likelihood and inference settings, and the output options. It also holds the
+serialization to and from plain mappings used by saved fits and the CLI.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Sequence as SequenceABC

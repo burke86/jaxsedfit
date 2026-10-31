@@ -1,3 +1,10 @@
+"""jaxsedfit: Bayesian SED and spectrum fitting of AGN and their host galaxies in JAX.
+
+The public API is re-exported here: the configuration classes (:class:`FitConfig` and
+its parts), the single-object fitter :class:`JAXSEDFit`, :func:`fit_batch` for many
+objects, results, plotting and simulation helpers.
+"""
+
 from .config import (
     AGNConfig,
     EmissionLineTemplate,

@@ -1,3 +1,5 @@
+"""Default emission-line table, line ties and priors for the spectral model."""
+
 from __future__ import annotations
 
 import copy
