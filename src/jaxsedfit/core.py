@@ -246,6 +246,53 @@ def _print_physical_nuts_summary(mcmc, replacements):
         )
 
 
+def _defer_nuts_postprocessing(kernel):
+    """Make ``kernel``'s compiled sampling loop collect only unconstrained latent values.
+
+    NumPyro otherwise runs the whole model at every draw inside the compiled loop to
+    constrain the values and record the deterministic sites, which makes that loop much
+    slower to compile and more memory-hungry. Returns a function that gives NumPyro's
+    post-processing for the draws afterwards (see ``_postprocess_nuts_draws``), or None
+    if ``kernel`` has no ``postprocess_fn``.
+    """
+    original = getattr(kernel, "postprocess_fn", None)
+    if original is None:
+        return None
+    kernel.postprocess_fn = lambda args, kwargs: (lambda z, *_args, **_kwargs: z)
+    return original
+
+
+def _postprocess_nuts_draws(mcmc, constrain_fn, chunk_size=50):
+    """Constrain the collected draws of ``mcmc`` in place, in jit-compiled chunks.
+
+    The draws of all chains are flattened and processed ``chunk_size`` at a time with one
+    compiled, vectorized ``constrain_fn`` (the last chunk is padded), then written back
+    so ``mcmc.get_samples()`` returns the same values as NumPyro's in-loop processing.
+    """
+    field = mcmc._sample_field
+    grouped = mcmc._states[field]
+    leaves = jax.tree.leaves(grouped)
+    if not leaves:
+        return
+    num_chains, num_draws = leaves[0].shape[:2]
+    total = num_chains * num_draws
+    flat = jax.tree.map(lambda x: np.asarray(x).reshape((total,) + x.shape[2:]), grouped)
+    chunk_size = int(max(1, min(chunk_size, total)))
+    process = jax.jit(jax.vmap(constrain_fn))
+    pieces = []
+    for start in range(0, total, chunk_size):
+        stop = min(start + chunk_size, total)
+        chunk = jax.tree.map(
+            lambda x: np.concatenate([x[start:stop], np.repeat(x[stop - 1 : stop], chunk_size - (stop - start), axis=0)]),
+            flat,
+        )
+        out = process(chunk)
+        pieces.append(jax.tree.map(lambda x: np.asarray(x)[: stop - start], out))
+    processed = jax.tree.map(lambda *xs: np.concatenate(xs).reshape((num_chains, num_draws) + xs[0].shape[1:]), *pieces)
+    mcmc._states = {**mcmc._states, field: processed}
+    mcmc._states_flat = None
+
+
 def _joint_dense_mass_blocks(
     latent_values: Mapping[str, Any],
     context: ModelContext | None = None,
@@ -1749,6 +1796,7 @@ class JAXSEDFit:
             max_tree_depth=kernel_max_tree_depth,
             find_heuristic_step_size=True,
         )
+        constrain_fn = _defer_nuts_postprocessing(kernel)
         mcmc = MCMC(
             kernel,
             num_warmup=num_warmup,
@@ -1767,6 +1815,8 @@ class JAXSEDFit:
                 "energy",
             ),
         )
+        if constrain_fn is not None:
+            _postprocess_nuts_draws(mcmc, constrain_fn((), {}))
         # NumPyro writes this directly to stdout, so it is visible both in a
         # terminal and as captured output beneath a notebook cell. For exact
         # sampler-only pivots, report the scientific parameter rather than the

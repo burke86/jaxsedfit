@@ -430,3 +430,32 @@ def test_additive_pivot_reparam_rejects_observed_sites():
         assert "latent site" in str(exc)
     else:
         raise AssertionError("Observed sites must not be additively reparameterized")
+
+
+def test_deferred_nuts_postprocessing_matches_numpyro():
+    from jaxsedfit.core import _defer_nuts_postprocessing, _postprocess_nuts_draws
+
+    def model():
+        scale = numpyro.sample("scale", dist.LogNormal(0.0, 0.5))
+        loc = numpyro.sample("loc", dist.Normal(0.0, 1.0))
+        numpyro.deterministic("shifted", loc + jnp.arange(3.0) * scale)
+        numpyro.sample("obs", dist.Normal(loc, scale), obs=jnp.array([0.3, -0.2, 0.5]))
+
+    def run(defer):
+        kernel = NUTS(model)
+        constrain_fn = _defer_nuts_postprocessing(kernel) if defer else None
+        mcmc = MCMC(kernel, num_warmup=20, num_samples=23, num_chains=2, chain_method="sequential", progress_bar=False)
+        mcmc.run(jax.random.PRNGKey(0))
+        return constrain_fn, mcmc
+
+    _, reference = run(False)
+    constrain_fn, deferred = run(True)
+    # Before post-processing, the deferred sampler holds unconstrained values only.
+    assert "shifted" not in deferred.get_samples()
+    _postprocess_nuts_draws(deferred, constrain_fn((), {}), chunk_size=10)
+    for group_by_chain in (False, True):
+        expected = reference.get_samples(group_by_chain=group_by_chain)
+        actual = deferred.get_samples(group_by_chain=group_by_chain)
+        assert set(actual) == set(expected)
+        for name in expected:
+            np.testing.assert_allclose(actual[name], expected[name], rtol=1e-12, atol=1e-12)
