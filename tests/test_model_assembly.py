@@ -416,6 +416,24 @@ def test_sampled_nebular_metallicity_is_shared_with_host_when_tied(monkeypatch):
     assert _site(tr, "gal_lgmet_fit") == pytest.approx(np.log10(0.012))
 
 
+def test_sampled_tied_nebular_metallicity_has_finite_gradient(monkeypatch):
+    # With zero metallicity scatter, the DSPS weights used to give a NaN gradient.
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    cfg.prior_config.nebular.zgas = dist.Normal(0.02, 0.005)
+    context = build_model_context(cfg)
+    data = _fixed_component_data()
+
+    def log_prob(zgas):
+        model = substitute(lambda: grahsp_photometric_model(context), data={**data, "nebular_zgas": zgas})
+        tr = trace(seed(model, 0)).get_trace()
+        return sum(jnp.sum(site["fn"].log_prob(site["value"])) for site in tr.values() if site["type"] == "sample")
+
+    grad = jax.grad(log_prob)(jnp.asarray(0.012))
+    assert np.isfinite(grad)
+    assert grad != 0.0
+
+
 def test_sampled_stellar_metallicity_is_shared_with_nebular_when_tied(monkeypatch):
     _patch_ssp(monkeypatch)
     cfg = _cfg()

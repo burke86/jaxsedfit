@@ -71,13 +71,19 @@ fixed ratios cannot match go into the AGN narrow lines:
 
    from numpyro import distributions as dist
 
-   cfg.prior_config.nebular.logU = dist.Uniform(-4.0, -1.0)
+   cfg.prior_config.nebular.logU = dist.TruncatedNormal(
+       loc=-2.5, scale=1.0, low=-4.0, high=-1.0
+   )
    cfg.prior_config.nebular.zgas = dist.TruncatedNormal(
        loc=0.02, scale=0.01, low=1.0e-4, high=0.05
    )
    cfg.prior_config.nebular.lines_width = dist.TruncatedNormal(
        loc=300.0, scale=150.0, low=50.0, high=1000.0
    )
+   # Fit the gas metallicity separately from the stellar one (they are tied by default).
+   cfg.galaxy.tie_stellar_nebular_metallicity = False
+
+These priors must be ``Normal`` or ``TruncatedNormal`` (see :doc:`host`).
 
 Spectrum calibration and apertures
 ----------------------------------
