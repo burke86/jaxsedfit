@@ -1413,3 +1413,59 @@ def test_local_line_photometry_improves_redshift_fit_line_projection(monkeypatch
 
     assert not np.allclose(coarse_local, coarse_legacy)
     assert np.all(local_error < legacy_error)
+
+
+def _host_spectrum_around_halpha(monkeypatch, *, emission=True, photometry=True):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(fit_agn=False, spectroscopy_enabled=True, n_wave=256)
+    wave = np.linspace(6700.0, 7100.0, 401)  # H-alpha at z = 0.05 is near 6891 A
+    cfg.spectroscopy = SpectroscopyData(wave_obs=wave, fluxes=np.ones_like(wave), errors=np.full_like(wave, 0.1),
+                                        resolving_power=2000.0)
+    cfg.nebular.emission = emission
+    if not photometry:
+        cfg.photometry = None
+        cfg.filters = FilterSet()
+    tr = _deterministic_trace(build_model_context(cfg), {"log_ebv_gal": _log_positive(0.1), "dust_alpha": np.array(2.0)})
+    return wave, _site(tr, "spec_host_model_fluxes")
+
+
+def test_joint_spectrum_host_includes_nebular_lines(monkeypatch):
+    wave, with_lines = _host_spectrum_around_halpha(monkeypatch)
+    _, without_lines = _host_spectrum_around_halpha(monkeypatch, emission=False)
+    halpha = np.argmin(np.abs(wave - 6562.8 * 1.05))
+
+    # Line-to-continuum contrast at H-alpha; the nebular continuum also raises the edge.
+    assert with_lines[halpha] / with_lines[0] > 1.5 * without_lines[halpha] / without_lines[0]
+
+
+def test_spectrum_only_host_has_no_nebular_lines(monkeypatch):
+    wave, with_lines = _host_spectrum_around_halpha(monkeypatch, photometry=False)
+    _, without_lines = _host_spectrum_around_halpha(monkeypatch, emission=False, photometry=False)
+
+    assert np.allclose(with_lines, without_lines)
+
+
+def _birth_cloud_trace(monkeypatch, *, enabled, ratio=0.44):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(fit_agn=False, n_wave=256)
+    cfg.galaxy.differential_attenuation = enabled
+    cfg.galaxy.old_to_young_ebv_ratio = ratio
+    return _deterministic_trace(build_model_context(cfg), {"log_ebv_gal": _log_positive(0.2), "dust_alpha": np.array(2.0)})
+
+
+def test_differential_attenuation_off_and_unit_ratio_match(monkeypatch):
+    off = _birth_cloud_trace(monkeypatch, enabled=False)
+    unit = _birth_cloud_trace(monkeypatch, enabled=True, ratio=1.0)
+
+    assert "ebv_gal_young_fit" not in off
+    np.testing.assert_allclose(_site(unit, "pred_fluxes"), _site(off, "pred_fluxes"), rtol=1e-10)
+    np.testing.assert_allclose(_site(unit, "log_dust_luminosity_fit"), _site(off, "log_dust_luminosity_fit"), rtol=1e-10)
+
+
+def test_differential_attenuation_dims_young_light_into_dust(monkeypatch):
+    off = _birth_cloud_trace(monkeypatch, enabled=False)
+    on = _birth_cloud_trace(monkeypatch, enabled=True)
+
+    np.testing.assert_allclose(_site(on, "ebv_gal_young_fit"), 0.2 / 0.44)
+    assert np.all(_site(on, "pred_fluxes") < _site(off, "pred_fluxes"))
+    assert _site(on, "log_dust_luminosity_fit") > _site(off, "log_dust_luminosity_fit")

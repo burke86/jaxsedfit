@@ -206,6 +206,9 @@ def _configs(rows, dsps_ssp_fn, steps, learning_rate, spectra=None):
             # the AGN continuum absorbs the host misfit. A recent burst (delayed_burst) also
             # helped M* and L_bol but biased the SFR about 1 dex low, so it is left off.
             cfg.galaxy.fit_host_kinematics = True
+            # Young stars and their lines behind birth-cloud dust: with one screen, the spectra
+            # rejected young stars and the joint SFR came out about 1 dex low.
+            cfg.galaxy.differential_attenuation = True
         configs.append(cfg)
     return configs
 

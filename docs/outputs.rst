@@ -240,6 +240,9 @@ Attenuation, host dust, and nebular emission
    * - ``ebv_gal``, ``ebv_agn``
      - mag
      - Foreground host E(B-V) and additional nuclear E(B-V). The disk and native AGN lines use their sum; the torus uses the foreground screen.
+   * - ``ebv_gal_young_fit``
+     - mag
+     - With ``galaxy.differential_attenuation``: total E(B-V) of the young stars and the nebular emission, ``ebv_gal / galaxy.old_to_young_ebv_ratio``.
    * - ``dust_alpha``, ``dust_alpha_fit``
      - dimensionless
      - Dale host-dust heating-distribution index when using the Dale model.

@@ -53,6 +53,32 @@ model cannot follow a real galaxy spectrum, and the AGN continuum absorbs the
 misfit: in tests on Chimeras (real galaxies with an added quasar of known
 luminosity), the AGN luminosity came out too high and the stellar mass too low.
 
+In joint fits the host's nebular emission (see :doc:`host`) is also drawn on the
+spectrum: the CIGALE nebular lines, including the higher-order Balmer lines, and the
+nebular continuum. Their strength follows the ionizing photons of the young stars,
+as on the photometry, so the lines constrain the SFR; they move with the stellar
+velocity and have the nebular ``lines_width`` (FWHM, 300 km/s by default) combined
+with the instrumental resolution. The AGN narrow lines add only what the host lines
+do not explain. Spectrum-only fits do not include the host nebular emission.
+
+By default the nebular line ratios are fixed (``logU = -2``, ``zgas = 0.019``,
+``ne = 100``). When the spectrum covers the strong host lines ([O II], Hβ,
+[O III], Hα, [N II]), free the ionization parameter and the gas metallicity, and
+the line width, so the ratios and widths can follow the data; otherwise lines the
+fixed ratios cannot match go into the AGN narrow lines:
+
+.. code-block:: python
+
+   from numpyro import distributions as dist
+
+   cfg.prior_config.nebular.logU = dist.Uniform(-4.0, -1.0)
+   cfg.prior_config.nebular.zgas = dist.TruncatedNormal(
+       loc=0.02, scale=0.01, low=1.0e-4, high=0.05
+   )
+   cfg.prior_config.nebular.lines_width = dist.TruncatedNormal(
+       loc=300.0, scale=150.0, low=50.0, high=1000.0
+   )
+
 Spectrum calibration and apertures
 ----------------------------------
 

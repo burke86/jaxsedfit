@@ -56,7 +56,7 @@ python benchmarks/chimera_validation.py make-sample \
 
 ### Joint photometry + spectra
 
-`run --spectra` fits the objects that have a spectrum in `data/chimera_validation_spectra.fits` with their photometry and spectrum together (quasar emission lines and Fe II on; the spectrum scale is fixed because the composite spectra are scaled to the total photometry). It makes the same plots as the photometry-only run. `--compare-photometry` also fits the same objects with photometry only; the report shows that table under the joint run's fold. The joint results have their own limits in the thresholds file.
+`run --spectra` fits the objects that have a spectrum in `data/chimera_validation_spectra.fits` with their photometry and spectrum together (quasar emission lines and Fe II on, host kinematics and differential attenuation on; the spectrum scale is fixed because the composite spectra are scaled to the total photometry). It makes the same plots as the photometry-only run. `--compare-photometry` also fits the same objects with photometry only; the report shows that table under the joint run's fold. The joint results have their own limits in the thresholds file.
 
 ```bash
 python benchmarks/chimera_validation.py run \
