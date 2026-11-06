@@ -2567,6 +2567,27 @@ def _host_rest_on_basis(host_state: dict[str, Any], host_basis_jax):
     )
 
 
+def _young_host_rest_on_basis(context: ModelContext, host_state: dict[str, Any], host_basis_jax):
+    """Return the part of the SSP mixture younger than ``nebular.young_age_cut_myr``.
+
+    Parameters
+    ----------
+    context : ModelContext
+        Preloaded model context (data, templates, caches, and fit config).
+    host_state : dict[str, Any]
+        Host state with ``formed_mass`` and ``host_ssp_weights`` (n_met, n_age).
+    host_basis_jax : HostBasisJax
+        SSP basis to evaluate on (the SED grid or the spectral pixels).
+    """
+    age_myr = jnp.power(10.0, host_basis_jax.ssp_lg_age_gyr) * 1.0e3
+    young = (age_myr <= float(context.fit_config.nebular.young_age_cut_myr)).astype(jnp.float64)
+    return host_state["formed_mass"] * jnp.tensordot(
+        host_state["host_ssp_weights"] * young[None, :],
+        host_basis_jax.rest_llambda,
+        axes=((0, 1), (0, 1)),
+    )
+
+
 def _empty_host_state(context: ModelContext):
     """Return zero-valued host placeholders for AGN-only fits.
 
@@ -3420,6 +3441,42 @@ def _spectral_instrumental_sigma_ln(context):
     if not np.any(valid):
         return None
     return np.where(valid, 1.0 / (2.354820045 * np.where(valid, pixel_r, 1.0)), 0.0)
+
+
+def _spectral_nebular_emission_rest(context, spec_rest_wave, nebular, gal_v_kms):
+    """Render the host nebular lines and continuum on the spectral pixels.
+
+    The lines keep the integrated luminosities of the photometric nebular model,
+    move with the stellar velocity, and have the nebular ``lines_width`` (FWHM)
+    combined in quadrature with each pixel's instrumental resolution.
+
+    Parameters
+    ----------
+    context : ModelContext
+        Preloaded model context (data, templates, caches, and fit config).
+    spec_rest_wave : jax.Array
+        Rest-frame wavelength of each spectral pixel in Angstrom, shape (n_pix,).
+    nebular : dict[str, Any]
+        Output of ``_build_nebular_components``.
+    gal_v_kms : float or jax.Array
+        Stellar velocity offset in km/s, shared by the gas.
+
+    Returns
+    -------
+    jax.Array
+        Intrinsic (unattenuated) nebular L_lambda in W/Angstrom, shape (n_pix,).
+    """
+    line_wave = context.nebular_templates_jax.line_wave_a * (1.0 + gal_v_kms / C_KMS)
+    sigma_ln = nebular["lines_width"] / (2.354820045 * C_KMS)
+    sigma_inst_ln = _spectral_instrumental_sigma_ln(context)
+    if sigma_inst_ln is not None:
+        sigma_ln = jnp.sqrt(sigma_ln**2 + jnp.asarray(sigma_inst_ln) ** 2)
+    sigma_ln = jnp.maximum(jnp.broadcast_to(sigma_ln, spec_rest_wave.shape), 1.0e-6)[:, None]
+    z = (jnp.log(spec_rest_wave)[:, None] - jnp.log(line_wave)[None, :]) / sigma_ln
+    profile = jnp.exp(-0.5 * z * z) / (sigma_ln * jnp.sqrt(2.0 * jnp.pi) * spec_rest_wave[:, None])
+    lines = jnp.sum(nebular["line_lumin"][None, :] * profile, axis=1)
+    continuum = jnp.interp(spec_rest_wave, context.rest_wave_jax, nebular["continuum_rest"], left=0.0, right=0.0)
+    return lines + continuum
 
 
 def _broaden_spectral_host(context, spec_rest_wave, spec_host_intrinsic, gal_v_kms, gal_sigma_kms):
@@ -4524,6 +4581,29 @@ def evaluate_photometric_state(
         build_line_sed=not skip_coarse_nebular_line_grid,
         shared_zgas=shared_zgas,
     )
+    # Birth clouds: the young stars and the nebular emission see an extra screen on top of ebv_gal,
+    # applied here so that every later product (photometry, spectra, energy balance) includes it.
+    birth_cloud_screen = None
+    birth_cloud_dust_luminosity = jnp.asarray(0.0, dtype=jnp.float64)
+    if fit_host and cfg.galaxy.differential_attenuation:
+        delta_ebv = ebv_gal * (1.0 / float(cfg.galaxy.old_to_young_ebv_ratio) - 1.0)
+        birth_cloud_screen = DustScreen(delta_ebv, 0.0, noll_delta) if noll_delta is not None else delta_ebv
+        bc_rest = 10 ** (_screen_magnitudes(birth_cloud_screen, rest_wave) / -2.5)
+        bc_lines = 10 ** (_screen_magnitudes(birth_cloud_screen, context.nebular_templates_jax.line_wave_a) / -2.5)
+        young_rest = _young_host_rest_on_basis(context, host_state, context.host_basis_jax)
+        birth_cloud_dust_luminosity = (
+            jnp.trapezoid((young_rest + nebular["continuum_rest"]) * (1.0 - bc_rest), rest_wave)
+            + jnp.sum(nebular["line_lumin"] * (1.0 - bc_lines))
+        )
+        host_rest = host_rest - young_rest * (1.0 - bc_rest)
+        nebular = {
+            **nebular,
+            "lines_rest": nebular["lines_rest"] * bc_rest,
+            "continuum_rest": nebular["continuum_rest"] * bc_rest,
+            "emission_rest": nebular["emission_rest"] * bc_rest,
+            "line_lumin": nebular["line_lumin"] * bc_lines,
+        }
+        numpyro.deterministic("ebv_gal_young_fit", ebv_gal + delta_ebv)
     host_with_nebular_rest = host_rest + nebular["absorption_rest"] + nebular["emission_rest"]
     agn_attenuated_input_rest = disk_rest + feii_rest + line_rest + balmer_rest
     gal_att_rest, agn_attenuated_rest, host_absorbed_rest, dust_luminosity = _apply_biattenuation(
@@ -4552,7 +4632,7 @@ def evaluate_photometric_state(
             GRAHSP_BIATTENUATION_BREAK_A,
             noll_delta=noll_delta,
         )
-    dust_luminosity = dust_luminosity + nebular["dust_luminosity"]
+    dust_luminosity = dust_luminosity + nebular["dust_luminosity"] + birth_cloud_dust_luminosity
     attenuation_curve = _attenuation_curve(rest_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
     gal_att_factor = 10 ** (_screen_magnitudes(host_screen, rest_wave, attenuation_curve) / -2.5)
     agn_att_factor = 10 ** (_screen_magnitudes(agn_screen, rest_wave, attenuation_curve) / -2.5)
@@ -4851,11 +4931,22 @@ def evaluate_photometric_state(
                 right=0.0,
             )
             spec_host_intrinsic = _host_rest_on_basis(host_state, context.spec_host_basis_jax)
+            if birth_cloud_screen is not None:
+                spec_host_intrinsic = spec_host_intrinsic - _young_host_rest_on_basis(
+                    context, host_state, context.spec_host_basis_jax
+                ) * (1.0 - 10 ** (_screen_magnitudes(birth_cloud_screen, spec_rest_wave) / -2.5))
             if host_kinematics_enabled:
                 spec_host_intrinsic = _broaden_spectral_host(
                     context, spec_rest_wave, spec_host_intrinsic, gal_v_kms, gal_sigma_kms
                 )
             spec_host_rest = (spec_host_intrinsic + spec_nebular_absorption_rest) * spec_gal_att_factor
+            if cfg.photometry is not None and fit_host and cfg.nebular.enabled:
+                # Host nebular emission, tied to the SFR as on the photometry. Without it, the AGN
+                # narrow lines absorb the host's star-forming lines (spectrum-only fits keep the
+                # old behavior for now).
+                spec_host_rest = spec_host_rest + spec_gal_att_factor * _spectral_nebular_emission_rest(
+                    context, spec_rest_wave, nebular, gal_v_kms
+                )
             spec_disk_rest = (
                 _powerlaw_jax(
                     spec_rest_wave,

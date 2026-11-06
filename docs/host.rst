@@ -109,6 +109,21 @@ Conroy (2013), ``E_b = 0.85 - 1.9 delta``, so the only new parameter is
 the host screen through this curve and its own screen, ``ebv_agn``, through the
 GRAHSP curve.
 
+By default all stars and the nebular emission see the same screen. Young stars and
+their emission lines are usually more reddened, because they are still in their
+birth clouds. With differential attenuation, stars younger than
+``nebular.young_age_cut_myr`` (10 Myr) and the nebular emission see an extra screen,
+so that their total E(B-V) is ``ebv_gal / old_to_young_ebv_ratio``:
+
+.. code-block:: python
+
+   cfg.galaxy.differential_attenuation = True     # default: False
+   cfg.galaxy.old_to_young_ebv_ratio = 0.44       # Calzetti et al. (2000)
+
+``ebv_gal`` stays the screen of the older stars, which the AGN also sees; the
+extra absorbed light is added to the dust energy balance. The total E(B-V) of the
+young stars is reported as ``ebv_gal_young_fit``.
+
 Stellar kinematics
 ------------------
 

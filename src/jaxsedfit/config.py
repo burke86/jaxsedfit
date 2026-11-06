@@ -225,6 +225,12 @@ class GalaxyConfig:
     # "dust_delta") is the one extra parameter; ebv_gal stays an E(B-V). AGN light sees the
     # host screen through this curve and its own screen (ebv_agn) through the GRAHSP curve.
     attenuation_curve: str = "grahsp"
+    # Birth clouds: stars younger than ``nebular.young_age_cut_myr`` and the nebular emission
+    # see an extra screen, so their total E(B-V) is ebv_gal / old_to_young_ebv_ratio; ebv_gal
+    # stays the screen of the older stars (and the host screen seen by the AGN). 0.44 is the
+    # Calzetti et al. (2000) stellar-to-gas ratio.
+    differential_attenuation: bool = False
+    old_to_young_ebv_ratio: float = 0.44
     sfh_n_steps: int = 64
     sfh_t_min_gyr: float = 0.01
     cosmology_h0: float = 70.0
@@ -275,6 +281,8 @@ class GalaxyConfig:
         self.attenuation_curve = str(self.attenuation_curve).strip().lower()
         if self.attenuation_curve not in {"grahsp", "noll2009"}:
             raise ValueError("galaxy.attenuation_curve must be one of: 'grahsp', 'noll2009'.")
+        if not 0.0 < float(self.old_to_young_ebv_ratio) <= 1.0:
+            raise ValueError("galaxy.old_to_young_ebv_ratio must be in (0, 1].")
         self.dust_model = str(self.dust_model).strip().lower()
         if self.dust_model not in {"dale2014", "dl07"}:
             raise ValueError("galaxy.dust_model must be one of: 'dale2014', 'dl07'.")
