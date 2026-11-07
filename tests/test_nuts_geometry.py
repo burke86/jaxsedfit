@@ -459,3 +459,51 @@ def test_deferred_nuts_postprocessing_matches_numpyro():
         assert set(actual) == set(expected)
         for name in expected:
             np.testing.assert_allclose(actual[name], expected[name], rtol=1e-12, atol=1e-12)
+
+
+def _toy_potential_model():
+    def model():
+        scale = numpyro.sample("scale", dist.LogNormal(0.0, 0.5))
+        loc = numpyro.sample("loc", dist.Normal(jnp.zeros(2), 1.0).to_event(1))
+        numpyro.deterministic("total", jnp.sum(loc) * scale)
+        numpyro.sample("obs", dist.Normal(loc[0] + loc[1], scale), obs=jnp.array([0.3, -0.2, 0.5]))
+
+    return model
+
+
+def test_callback_potential_matches_value_and_gradient():
+    from numpyro.infer.util import initialize_model
+
+    from jaxsedfit.core import _callback_potential
+
+    info = initialize_model(jax.random.PRNGKey(0), _toy_potential_model())
+    z = info.param_info.z
+    potential = _callback_potential(info.potential_fn, z)
+    value, grad = jax.jit(jax.value_and_grad(potential))(z)
+    ref_value, ref_grad = jax.value_and_grad(info.potential_fn)(z)
+    np.testing.assert_allclose(value, ref_value, rtol=1e-12)
+    for name in z:
+        np.testing.assert_allclose(grad[name], ref_grad[name], rtol=1e-12)
+    batch = jax.tree.map(lambda x: jnp.stack([x, x + 0.1]), z)
+    values = jax.jit(jax.vmap(potential))(batch)
+    np.testing.assert_allclose(values, jax.vmap(info.potential_fn)(batch), rtol=1e-12)
+
+
+def test_callback_potential_nuts_matches_plain_nuts():
+    from numpyro.infer.util import initialize_model
+
+    from jaxsedfit.core import _callback_potential, _postprocess_nuts_draws
+
+    info = initialize_model(jax.random.PRNGKey(0), _toy_potential_model())
+
+    def run(potential):
+        mcmc = MCMC(NUTS(potential_fn=potential), num_warmup=30, num_samples=25, progress_bar=False)
+        mcmc.run(jax.random.PRNGKey(1), init_params=info.param_info.z)
+        _postprocess_nuts_draws(mcmc, info.postprocess_fn)
+        return mcmc.get_samples()
+
+    expected = run(info.potential_fn)
+    actual = run(_callback_potential(info.potential_fn, info.param_info.z))
+    assert set(actual) == {"scale", "loc", "total"}
+    for name in expected:
+        np.testing.assert_allclose(actual[name], expected[name], rtol=1e-8, atol=1e-10)
