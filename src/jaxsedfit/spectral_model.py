@@ -1187,6 +1187,34 @@ def _sample_line_widths(tied_line_meta, prior_config, *, site_prefix: str = ""):
     return sig_group
 
 
+def _line_amplitude_prior(
+    group_jax, amp_min, amp_max, amp_init, extra_amp_reference, amp_scale_mult, extra_amp_scale_mult
+):
+    """Return the truncated-normal amplitude prior of the line groups ``group_jax``.
+
+    Extra Gaussian components of a broad line (``extra_amp_reference >= 0``) use a
+    zero-attracting prior whose scale is relative to the first component's initial
+    amplitude; the others are centered on their initial amplitude.
+    """
+    is_extra = extra_amp_reference[group_jax] >= 0
+    reference_ids = jnp.maximum(extra_amp_reference[group_jax], 0)
+    regular_scale = amp_scale_mult * (amp_max[group_jax] - amp_min[group_jax])
+    shrinkage_scale = extra_amp_scale_mult * amp_init[reference_ids]
+    return dist.TruncatedNormal(
+        loc=jnp.where(is_extra, amp_min[group_jax], amp_init[group_jax]),
+        scale=jnp.maximum(
+            jnp.where(
+                is_extra & (extra_amp_scale_mult > 0.0),
+                shrinkage_scale,
+                regular_scale,
+            ),
+            AMPLITUDE_FLOOR,
+        ),
+        low=amp_min[group_jax],
+        high=amp_max[group_jax],
+    )
+
+
 def _sample_line_amplitudes(
     tied_line_meta,
     prior_config,
@@ -1230,6 +1258,9 @@ def _sample_line_amplitudes(
             "amp_complex_groups",
             [{"complex_index": 0, "name": "all", "fgroup_ids": list(range(n_f))}],
         )
+        standardized = bool(prior_config.get("standardize_active_priors", False))
+        standardized_ids = []
+        standardized_eps = []
         for complex_group in complex_groups:
             complex_index = int(complex_group["complex_index"])
             complex_label = str(
@@ -1238,44 +1269,40 @@ def _sample_line_amplitudes(
             group_ids = _line_meta_int(complex_group, "fgroup_ids")
             if not group_ids.size:
                 continue
+            if standardized:
+                # Sample each complex's standard-normal coordinate here; the
+                # truncated-normal transform is applied once to all of them below.
+                standardized_ids.append(group_ids)
+                standardized_eps.append(
+                    numpyro.sample(
+                        _prefixed_site(
+                            site_prefix,
+                            _line_amplitude_site(complex_label, standardized=True),
+                        ),
+                        dist.Normal(jnp.zeros(group_ids.size), jnp.ones(group_ids.size)).to_event(1),
+                    )
+                )
+                continue
             group_jax = jnp.asarray(group_ids, dtype=jnp.int32)
-            is_extra = extra_amp_reference[group_jax] >= 0
-            reference_ids = jnp.maximum(extra_amp_reference[group_jax], 0)
-            regular_scale = amp_scale_mult * (
-                amp_max[group_jax] - amp_min[group_jax]
-            )
-            shrinkage_scale = extra_amp_scale_mult * amp_init[reference_ids]
-            local_prior = dist.TruncatedNormal(
-                loc=jnp.where(is_extra, amp_min[group_jax], amp_init[group_jax]),
-                scale=jnp.maximum(
-                    jnp.where(
-                        is_extra & (extra_amp_scale_mult > 0.0),
-                        shrinkage_scale,
-                        regular_scale,
-                    ),
-                    AMPLITUDE_FLOOR,
+            local_amp = numpyro.sample(
+                _prefixed_site(
+                    site_prefix,
+                    _line_amplitude_site(complex_label, standardized=False),
                 ),
-                low=amp_min[group_jax],
-                high=amp_max[group_jax],
+                _line_amplitude_prior(
+                    group_jax, amp_min, amp_max, amp_init, extra_amp_reference,
+                    amp_scale_mult, extra_amp_scale_mult,
+                ).to_event(1),
             )
-            if bool(prior_config.get("standardize_active_priors", False)):
-                eps = numpyro.sample(
-                    _prefixed_site(
-                        site_prefix,
-                        _line_amplitude_site(complex_label, standardized=True),
-                    ),
-                    dist.Normal(jnp.zeros(group_ids.size), jnp.ones(group_ids.size)).to_event(1),
-                )
-                probability = dist.Normal(0.0, 1.0).cdf(eps)
-                local_amp = local_prior.icdf(probability)
-            else:
-                local_amp = numpyro.sample(
-                    _prefixed_site(
-                        site_prefix,
-                        _line_amplitude_site(complex_label, standardized=False),
-                    ),
-                    local_prior.to_event(1),
-                )
+            amp_group = amp_group.at[group_jax].set(local_amp)
+        if standardized_ids:
+            # One vectorized transform for all complexes keeps the traced graph small.
+            group_jax = jnp.asarray(np.concatenate(standardized_ids), dtype=jnp.int32)
+            probability = dist.Normal(0.0, 1.0).cdf(jnp.concatenate(standardized_eps))
+            local_amp = _line_amplitude_prior(
+                group_jax, amp_min, amp_max, amp_init, extra_amp_reference,
+                amp_scale_mult, extra_amp_scale_mult,
+            ).icdf(probability)
             amp_group = amp_group.at[group_jax].set(local_amp)
         numpyro.deterministic(_prefixed_site(site_prefix, "line_amp_group"), amp_group)
 
