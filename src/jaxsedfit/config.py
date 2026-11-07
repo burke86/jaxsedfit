@@ -494,7 +494,9 @@ class InferenceConfig:
     coordinate leaves the priors, likelihood, and predictions unchanged.
     Active detailed-spectrum Fe II and Balmer-continuum Normal/LogNormal priors use
     exact standard-Normal NUTS coordinates by default. Their public posterior
-    names and physical values are unchanged.
+    names and physical values are unchanged. With ``nuts_gradient_callback`` (the
+    default), NUTS calls a separately compiled gradient of the potential instead of
+    compiling the gradient inside its loops.
     """
     method: str = "optax+nuts"
     learning_rate: float = 5e-3
@@ -512,6 +514,10 @@ class InferenceConfig:
     reparameterize_normalizations: bool = True
     reparameterize_spectral_features: bool = True
     use_map_init: bool = True
+    # NUTS gets the potential's value and gradient from one separately compiled call
+    # instead of compiling the gradient inside its loops: much less compile time and
+    # memory for large (joint) models, for a few percent slower sampling.
+    nuts_gradient_callback: bool = True
     svi_steps: int = 2000
     svi_learning_rate: float | None = None
     svi_num_particles: int = 4

@@ -459,3 +459,55 @@ def test_deferred_nuts_postprocessing_matches_numpyro():
         assert set(actual) == set(expected)
         for name in expected:
             np.testing.assert_allclose(actual[name], expected[name], rtol=1e-12, atol=1e-12)
+
+
+def _toy_potential_model():
+    def model():
+        scale = numpyro.sample("scale", dist.LogNormal(0.0, 0.5))
+        loc = numpyro.sample("loc", dist.Normal(jnp.zeros(2), 1.0).to_event(1))
+        numpyro.deterministic("total", jnp.sum(loc) * scale)
+        numpyro.sample("obs", dist.Normal(loc[0] + loc[1], scale), obs=jnp.array([0.3, -0.2, 0.5]))
+
+    return model
+
+
+def test_callback_potential_matches_value_and_gradient():
+    from numpyro.infer.util import initialize_model
+
+    from jaxsedfit.core import _callback_potential
+
+    info = initialize_model(jax.random.PRNGKey(0), _toy_potential_model())
+    z = info.param_info.z
+    potential = _callback_potential(info.potential_fn, z)
+    value, grad = jax.jit(jax.value_and_grad(potential))(z)
+    ref_value, ref_grad = jax.value_and_grad(info.potential_fn)(z)
+    np.testing.assert_allclose(value, ref_value, rtol=1e-12)
+    for name in z:
+        np.testing.assert_allclose(grad[name], ref_grad[name], rtol=1e-12)
+    batch = jax.tree.map(lambda x: jnp.stack([x, x + 0.1]), z)
+    values = jax.jit(jax.vmap(potential))(batch)
+    np.testing.assert_allclose(values, jax.vmap(info.potential_fn)(batch), rtol=1e-12)
+
+
+def test_callback_gradient_nuts_matches_plain_nuts():
+    from numpyro.infer.initialization import init_to_uniform
+
+    from jaxsedfit.core import _defer_nuts_postprocessing, _postprocess_nuts_draws, _use_callback_gradient
+
+    rng_key = jax.random.PRNGKey(1)
+
+    def run(callback):
+        kernel = NUTS(_toy_potential_model(), init_strategy=init_to_uniform())
+        constrain_fn = _defer_nuts_postprocessing(kernel)
+        if callback:
+            _use_callback_gradient(kernel, rng_key, init_to_uniform())
+        mcmc = MCMC(kernel, num_warmup=30, num_samples=25, num_chains=2, progress_bar=False)
+        mcmc.run(rng_key)
+        _postprocess_nuts_draws(mcmc, constrain_fn((), {}))
+        return mcmc.get_samples(group_by_chain=True)
+
+    expected = run(False)
+    actual = run(True)
+    assert set(actual) == {"scale", "loc", "total"}
+    for name in expected:
+        np.testing.assert_allclose(actual[name], expected[name], rtol=1e-8, atol=1e-10)

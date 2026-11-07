@@ -34,6 +34,8 @@ from numpyro.infer import (
     init_to_value,
 )
 from numpyro.infer.autoguide import AutoDelta
+from numpyro.infer.hmc import hmc
+from numpyro.infer.util import initialize_model
 from numpyro.infer.reparam import Reparam
 from numpyro.diagnostics import print_summary as print_diagnostics_summary
 
@@ -244,6 +246,84 @@ def _print_physical_nuts_summary(mcmc, replacements):
                 int(np.asarray(extra_fields["diverging"]).sum())
             )
         )
+
+
+def _run_svi_steps(svi, rng_key, num_steps, *, progress_bar=False):
+    """Run ``num_steps`` SVI updates from a Python loop over one jit-compiled step.
+
+    ``SVI.run(progress_bar=False)`` puts all the steps inside one ``lax.scan``. XLA then
+    compiles the model's gradient inside that loop, which for joint fits takes several
+    times the time and memory of compiling one step. The per-step dispatch overhead here
+    is small next to the gradient. Returns a NumPyro ``SVIRunResult``.
+    """
+    from numpyro.infer.svi import SVIRunResult
+
+    svi_state = svi.init(rng_key)
+    update = jax.jit(svi.update)
+    losses = []
+    steps = range(int(num_steps))
+    if progress_bar:
+        from tqdm.auto import trange
+
+        steps = trange(int(num_steps))
+    for _ in steps:
+        svi_state, loss = update(svi_state)
+        losses.append(loss)
+    losses = jnp.stack(losses) if losses else jnp.zeros((0,))
+    return SVIRunResult(svi.get_params(svi_state), svi_state, losses)
+
+
+def _callback_potential(potential_fn, example_params):
+    """Return ``potential_fn`` with its value and gradient from one pre-compiled call.
+
+    NUTS evaluates the gradient inside its tree-building loops, and XLA compiles a large
+    model gradient there far more slowly and with far more memory than on its own. The
+    returned function hands the loops an opaque host callback instead: the callback runs
+    a separately compiled ``value_and_grad`` of ``potential_fn``, and a custom VJP
+    returns its gradient, so one call gives both. ``example_params`` fixes the parameter
+    pytree's shapes and dtypes.
+    """
+    value_and_grad = jax.jit(jax.value_and_grad(potential_fn))
+    result_shapes = (
+        jax.ShapeDtypeStruct((), jnp.result_type(float)),
+        jax.tree.map(lambda x: jax.ShapeDtypeStruct(jnp.shape(x), jnp.result_type(x)), example_params),
+    )
+
+    def _host(params):
+        value, grad = value_and_grad(params)
+        return np.asarray(value), jax.tree.map(np.asarray, grad)
+
+    def _value_and_grad(params):
+        return jax.pure_callback(_host, result_shapes, params, vmap_method="sequential")
+
+    @jax.custom_vjp
+    def potential(params):
+        return _value_and_grad(params)[0]
+
+    def _forward(params):
+        return _value_and_grad(params)
+
+    def _backward(grad, cotangent):
+        return (jax.tree.map(lambda g: cotangent * g, grad),)
+
+    potential.defvjp(_forward, _backward)
+    return potential
+
+
+def _use_callback_gradient(kernel, rng_key, init_strategy):
+    """Make NUTS ``kernel`` integrate with the model's potential from ``_callback_potential``.
+
+    Only the integrator's potential changes: the kernel keeps its model, so NumPyro still
+    initializes each chain, splits the random keys and structures the mass matrix exactly
+    as it would without the callback.
+    """
+    model_info = initialize_model(rng_key, kernel.model, init_strategy=init_strategy)
+    potential = _callback_potential(model_info.potential_fn, model_info.param_info.z)
+    kernel._init_fn, kernel._sample_fn = hmc(
+        potential_fn=potential,
+        kinetic_fn=kernel._kinetic_fn,
+        algo=kernel._algo,
+    )
 
 
 def _defer_nuts_postprocessing(kernel):
@@ -1345,7 +1425,7 @@ class JAXSEDFit:
         optimizer = optax_to_numpyro(optax.adam(learning_rate))
         svi = SVI(model_fn, guide, optimizer, loss=Trace_ELBO())
         rng_key = jax.random.PRNGKey(rng_seed)
-        svi_result = svi.run(rng_key, steps, progress_bar=progress_bar)
+        svi_result = _run_svi_steps(svi, rng_key, steps, progress_bar=progress_bar)
         median = guide.median(svi_result.params)
         return svi_result, median
 
@@ -1784,19 +1864,19 @@ class JAXSEDFit:
                 init_values or {},
                 context=getattr(self, "context", None),
             )
-        kernel = NUTS(
-            nuts_model,
-            init_strategy=(
-                init_to_value(values=init_values)
-                if init_values
-                else init_to_uniform()
-            ),
+        init_strategy = init_to_value(values=init_values) if init_values else init_to_uniform()
+        kernel_options = dict(
             target_accept_prob=target_accept_prob,
             dense_mass=mass_matrix_structure,
             max_tree_depth=kernel_max_tree_depth,
             find_heuristic_step_size=True,
         )
+        rng_key = jax.random.PRNGKey(inference.seed + 1)
+        init_params = None
+        kernel = NUTS(nuts_model, init_strategy=init_strategy, **kernel_options)
         constrain_fn = _defer_nuts_postprocessing(kernel)
+        if bool(getattr(inference, "nuts_gradient_callback", False)):
+            _use_callback_gradient(kernel, rng_key, init_strategy)
         mcmc = MCMC(
             kernel,
             num_warmup=num_warmup,
@@ -1805,9 +1885,9 @@ class JAXSEDFit:
             progress_bar=progress_bar,
             jit_model_args=False,
         )
-        rng_key = jax.random.PRNGKey(inference.seed + 1)
         mcmc.run(
             rng_key,
+            init_params=init_params,
             extra_fields=(
                 "num_steps",
                 "accept_prob",

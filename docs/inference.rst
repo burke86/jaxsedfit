@@ -162,6 +162,13 @@ coordinates for the Fe II and Balmer-continuum priors
 (``reparameterize_spectral_features=True``). Set either to ``False`` for a
 controlled comparison.
 
+XLA compiles a large model's gradient slowly and with a lot of memory when the gradient
+sits inside NUTS's tree-building loops. By default (``nuts_gradient_callback=True``)
+the gradient is compiled once on its own and NUTS calls it from the loops, which makes
+compiling a joint fit take seconds instead of minutes and cuts the memory severalfold,
+for a few percent slower sampling. Set it to ``False`` to compile the gradient inside
+the sampler instead.
+
 If NUTS keeps reaching the maximum tree depth:
 
 1. check the MAP with a ``"map"`` fit, and inspect the printed NumPyro diagnostics;

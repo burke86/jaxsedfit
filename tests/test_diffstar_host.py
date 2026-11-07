@@ -748,6 +748,8 @@ def test_fit_nuts_reads_sampler_settings_from_config(monkeypatch):
     fitter.config.inference.dense_mass = True
     fitter.config.inference.max_tree_depth = 8
     fitter.config.inference.warmup_max_tree_depth = 11
+    # The model-based kernel path (the callback path builds NUTS from the potential).
+    fitter.config.inference.nuts_gradient_callback = False
     fitter.map_result = None
     fitter.predictive = {"stale": True}
     fitter._model = lambda: None
