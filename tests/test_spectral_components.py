@@ -597,3 +597,40 @@ def test_feii_template_arrays_can_be_traced_under_jit():
 
     assert np.asarray(result).shape == wave_obs.shape
     assert np.all(np.isfinite(np.asarray(result)))
+
+
+def test_standardized_line_amplitudes_match_per_complex_transform():
+    # The standardized amplitudes are transformed in one vectorized call; each complex
+    # must get exactly what its own truncated-normal transform would give.
+    from jaxsedfit.spectral_components import _component_prior_config, build_joint_tied_line_meta
+    from jaxsedfit.spectral_model import AMPLITUDE_FLOOR, _sample_line_amplitudes
+    from jaxsedfit.spectroscopy import SpectralComponentConfig
+
+    cfg = SpectralComponentConfig()
+    meta = build_joint_tied_line_meta(cfg)
+    prior = {**_component_prior_config(cfg), "standardize_active_priors": True, "line_extra_amp_scale_mult": 0.5}
+    complexes = [group for group in meta["amp_complex_groups"] if len(group["fgroup_ids"])]
+    assert len(complexes) > 3
+    tr = trace(seed(_sample_line_amplitudes, jax.random.PRNGKey(3))).get_trace(meta, prior, None)
+    amp_group = np.asarray(tr["line_amp_group"]["value"])
+
+    amp_min = np.clip(np.asarray(meta["amp_min_group"]), AMPLITUDE_FLOOR, None)
+    amp_max = np.clip(np.asarray(meta["amp_max_group"]), AMPLITUDE_FLOOR, None)
+    amp_init = np.clip(np.asarray(meta["amp_init_group"]), AMPLITUDE_FLOOR, None)
+    reference = np.asarray(meta["extra_amp_reference_group"])
+    for group in complexes:
+        ids = np.asarray(group["fgroup_ids"])
+        eps = tr[f"line_amp_{group['site_label']}_std"]["value"]
+        is_extra = reference[ids] >= 0
+        scale = np.where(
+            is_extra,
+            prior["line_extra_amp_scale_mult"] * amp_init[np.maximum(reference[ids], 0)],
+            prior["line_amp_scale_mult"] * (amp_max[ids] - amp_min[ids]),
+        )
+        expected = dist.TruncatedNormal(
+            loc=np.where(is_extra, amp_min[ids], amp_init[ids]),
+            scale=np.maximum(scale, AMPLITUDE_FLOOR),
+            low=amp_min[ids],
+            high=amp_max[ids],
+        ).icdf(dist.Normal(0.0, 1.0).cdf(eps))
+        np.testing.assert_allclose(amp_group[ids], expected, rtol=1e-12)
