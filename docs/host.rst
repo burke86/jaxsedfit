@@ -43,6 +43,11 @@ Other useful settings:
    The size of the internal rest-frame wavelength grid. Larger values are more
    faithful for detailed spectra but slower.
 
+``stellar_metallicity`` and ``stellar_metallicity_scatter``
+   The stellar metallicity (absolute Z, 0.019 by default) and the lognormal scatter
+   of the metallicity distribution in dex (0 by default). With zero scatter, the SSPs
+   are interpolated linearly in log Z between the two nearest grid metallicities.
+
 ``ssp_template_fwhm_angstrom``
    The rest-frame FWHM resolution of the SSP templates: 2.5 Å by default, for
    MILES-based FSPS libraries. Set it to match your SSP file, or ``None`` to ignore
@@ -155,9 +160,16 @@ Host nebular emission is configured with :class:`jaxsedfit.NebularConfig`:
    )
 
 By default ``logU``, ``zgas`` and ``ne`` are fixed to the GRAHSP-like values
-``-2.0``, ``0.019`` and ``100 cm^-3``. Set ``zgas=None`` to tie the gas metallicity
-to the host metallicity. Only add priors for ``logU``, ``zgas`` or ``ne`` when the
-data can constrain them:
+``-2.0``, ``0.019`` and ``100 cm^-3``. The gas and stellar metallicities are tied
+(``cfg.galaxy.tie_stellar_nebular_metallicity = True``): one value sets both, so a
+prior on ``zgas`` also frees the stellar metallicity. Put a shared prior on either
+``prior_config.nebular.zgas`` or ``prior_config.host.gal_lgmet``, not both, or set
+the tie to ``False`` to fit the gas metallicity on its own. With
+``zgas=None`` the configured stellar metallicity is used for both.
+
+Only add priors for ``logU``, ``zgas`` or ``ne`` when the data can constrain them.
+They must be ``Normal`` or ``TruncatedNormal``; the sampled values are kept inside the
+template grid:
 
 .. code-block:: python
 
@@ -165,7 +177,7 @@ data can constrain them:
 
    cfg.prior_config.nebular.logU = dist.Normal(-2.0, 0.3)
    cfg.prior_config.nebular.zgas = dist.TruncatedNormal(
-       loc=0.02, scale=0.01, low=1.0e-4, high=0.1
+       loc=0.02, scale=0.01, low=1.0e-4, high=0.05
    )
 
 The packaged nebular templates are interpolated over metallicity, ionization

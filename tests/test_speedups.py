@@ -68,12 +68,11 @@ def test_collapsed_metallicity_basis_matches_full_contraction(fake_ssp):
     assert fixed.shape == basis.shape[1:]
     rng = np.random.default_rng(2)
     age_weights = jnp.asarray(rng.uniform(0.0, 1.0, basis.shape[1]))
-    from dsps.sed.metallicity_weights import calc_lgmet_weights_from_lognormal_mdf
-    from jaxsedfit.model import _host_metallicity_parameters, _resolve_tied_metallicity
+    from jaxsedfit.model import _host_metallicity_parameters, _lgmet_weights, _resolve_tied_metallicity
 
     _, shared = _resolve_tied_metallicity(ctx, {})
     lgmet, scatter = _host_metallicity_parameters(ctx, {}, shared)
-    lgmet_weights = calc_lgmet_weights_from_lognormal_mdf(lgmet, scatter, ctx.host_basis_jax.ssp_lgmet)
+    lgmet_weights = _lgmet_weights(lgmet, scatter, ctx.host_basis_jax.ssp_lgmet)
     host_weights = lgmet_weights[:, None] * age_weights[None, :]
     host_weights = host_weights / jnp.sum(host_weights)
     full = _contract_host_basis(host_weights, age_weights, basis, None)

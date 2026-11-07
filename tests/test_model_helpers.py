@@ -49,6 +49,7 @@ from jaxsedfit.model import (
     _feii_component,
     _flux_conserving_line_gaussians,
     _gal_lgmet_to_absolute_z,
+    _lgmet_weights,
     _host_dust_emission,
     _igm_transmission,
     _line_gaussians,
@@ -2880,3 +2881,26 @@ def test_igm_matches_cigale_v2025_1_static_reference(redshift, expected):
     transmission = np.asarray(_build_fixed_igm_jax(cache, redshift), dtype=float)
 
     np.testing.assert_allclose(transmission, expected, rtol=2.0e-12, atol=1.0e-15)
+
+
+def test_zero_scatter_metallicity_weights_interpolate_in_log_z():
+    from dsps.sed.metallicity_weights import calc_lgmet_weights_from_lognormal_mdf
+
+    grid = jnp.linspace(-4.35, -1.35, 13)
+    on_grid = np.asarray(_lgmet_weights(grid[4], 0.0, grid))
+    np.testing.assert_allclose(on_grid, np.eye(13)[4], atol=1.0e-12)
+
+    lgmet = np.log10(0.019)
+    weights = np.asarray(_lgmet_weights(lgmet, 0.0, grid))
+    assert np.count_nonzero(weights) == 2
+    assert weights.sum() == pytest.approx(1.0)
+    assert np.sum(weights * np.asarray(grid)) == pytest.approx(lgmet)
+
+    grad = jax.grad(lambda x: jnp.sum(_lgmet_weights(x, 0.0, grid) * grid))(jnp.asarray(lgmet))
+    assert grad == pytest.approx(1.0)
+    np.testing.assert_allclose(np.asarray(_lgmet_weights(1.0, 0.0, grid)), np.eye(13)[-1], atol=1.0e-12)
+
+    np.testing.assert_allclose(
+        np.asarray(_lgmet_weights(lgmet, 0.2, grid)),
+        np.asarray(calc_lgmet_weights_from_lognormal_mdf(lgmet, 0.2, grid)),
+    )

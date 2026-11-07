@@ -662,6 +662,38 @@ def _cigale_delayed_sfh_shape(elapsed_gyr, tau_gyr, age_gyr):
     return jnp.where((elapsed_gyr > 0.0) & (elapsed_gyr <= age_gyr), shape, 0.0)
 
 
+def _lgmet_weights(gal_lgmet, gal_lgmet_scatter, ssp_lgmet):
+    """SSP metallicity weights for a lognormal metallicity distribution.
+
+    With zero scatter, DSPS puts all the weight in the single grid bin containing
+    ``gal_lgmet``, which snaps an off-grid metallicity to its bin and gives a zero
+    (or NaN) gradient. Zero scatter instead interpolates linearly in log Z between
+    the two neighboring grid points, clipped to the grid.
+
+    Parameters
+    ----------
+    gal_lgmet : float or jax.Array
+        Center of the metallicity distribution, in the SSP metallicity coordinate.
+    gal_lgmet_scatter : float or jax.Array
+        Lognormal scatter in dex; zero means a single metallicity.
+    ssp_lgmet : jax.Array
+        Increasing SSP metallicity grid.
+    """
+    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
+    if ssp_lgmet.shape[0] < 2:
+        return jnp.ones_like(ssp_lgmet)
+    gal_lgmet = jnp.asarray(gal_lgmet, dtype=jnp.float64)
+    scatter = jnp.asarray(gal_lgmet_scatter, dtype=jnp.float64)
+    x = jnp.clip(gal_lgmet, ssp_lgmet[0], ssp_lgmet[-1])
+    lo = jnp.clip(jnp.searchsorted(ssp_lgmet, x, side="right") - 1, 0, ssp_lgmet.shape[0] - 2)
+    frac = (x - ssp_lgmet[lo]) / (ssp_lgmet[lo + 1] - ssp_lgmet[lo])
+    interpolated = jnp.zeros_like(ssp_lgmet).at[lo].add(1.0 - frac).at[lo + 1].add(frac)
+    has_scatter = scatter > 0.0
+    # Keep the DSPS branch finite at zero scatter so its gradient does not leak through.
+    lognormal = calc_lgmet_weights_from_lognormal_mdf(gal_lgmet, jnp.where(has_scatter, scatter, 1.0), ssp_lgmet)
+    return jnp.where(has_scatter, lognormal, interpolated)
+
+
 def _ssp_log_age_bin_edges(ssp_lg_age_gyr):
     """Return logarithmic bin edges centered on the tabulated SSP ages."""
     lg_age = jnp.asarray(ssp_lg_age_gyr, dtype=jnp.float64)
@@ -693,7 +725,7 @@ def _analytic_delayed_ssp_weights(
     to each SSP age bin does not require an auxiliary cosmic-time grid.
     """
     age_weights = _analytic_delayed_age_weights(age_gyr, tau_gyr, ssp_lg_age_gyr)
-    lgmet_weights = calc_lgmet_weights_from_lognormal_mdf(
+    lgmet_weights = _lgmet_weights(
         gal_lgmet, gal_lgmet_scatter, ssp_lgmet
     )
     weights = lgmet_weights[:, None] * age_weights[None, :]
@@ -2016,7 +2048,7 @@ def _fixed_metallicity_host_basis(context: ModelContext, prior_config: dict[str,
     with jax.ensure_compile_time_eval():
         shared_gal_lgmet = _resolve_tied_metallicity(context, prior_config)[1] if tied else None
         gal_lgmet, gal_lgmet_scatter = _host_metallicity_parameters(context, prior_config, shared_gal_lgmet)
-        lgmet_weights = calc_lgmet_weights_from_lognormal_mdf(
+        lgmet_weights = _lgmet_weights(
             gal_lgmet, gal_lgmet_scatter, context.host_basis_jax.ssp_lgmet
         )
         lgmet_weights = lgmet_weights / jnp.maximum(jnp.sum(lgmet_weights), 1.0e-30)
@@ -2110,7 +2142,7 @@ def _build_diffstar_host(
         t_obs_gyr,
         t_birth_min_gyr=gal_t_table[0],
     )
-    lgmet_weights = calc_lgmet_weights_from_lognormal_mdf(
+    lgmet_weights = _lgmet_weights(
         gal_lgmet, gal_lgmet_scatter, ssp_lgmet
     )
     host_weights = lgmet_weights[:, None] * age_weights[None, :]
@@ -2450,7 +2482,7 @@ def _build_delayed_host(
         )
     else:
         age_weights = _analytic_delayed_age_weights(age_gyr, tau_gyr, ssp_lg_age_gyr)
-    lgmet_weights = calc_lgmet_weights_from_lognormal_mdf(
+    lgmet_weights = _lgmet_weights(
         gal_lgmet, gal_lgmet_scatter, ssp_lgmet
     )
     host_weights = lgmet_weights[:, None] * age_weights[None, :]
