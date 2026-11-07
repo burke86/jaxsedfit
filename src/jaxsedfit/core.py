@@ -34,6 +34,7 @@ from numpyro.infer import (
     init_to_value,
 )
 from numpyro.infer.autoguide import AutoDelta
+from numpyro.infer.hmc import hmc
 from numpyro.infer.util import initialize_model
 from numpyro.infer.reparam import Reparam
 from numpyro.diagnostics import print_summary as print_diagnostics_summary
@@ -307,6 +308,22 @@ def _callback_potential(potential_fn, example_params):
 
     potential.defvjp(_forward, _backward)
     return potential
+
+
+def _use_callback_gradient(kernel, rng_key, init_strategy):
+    """Make NUTS ``kernel`` integrate with the model's potential from ``_callback_potential``.
+
+    Only the integrator's potential changes: the kernel keeps its model, so NumPyro still
+    initializes each chain, splits the random keys and structures the mass matrix exactly
+    as it would without the callback.
+    """
+    model_info = initialize_model(rng_key, kernel.model, init_strategy=init_strategy)
+    potential = _callback_potential(model_info.potential_fn, model_info.param_info.z)
+    kernel._init_fn, kernel._sample_fn = hmc(
+        potential_fn=potential,
+        kinetic_fn=kernel._kinetic_fn,
+        algo=kernel._algo,
+    )
 
 
 def _defer_nuts_postprocessing(kernel):
@@ -1856,21 +1873,10 @@ class JAXSEDFit:
         )
         rng_key = jax.random.PRNGKey(inference.seed + 1)
         init_params = None
+        kernel = NUTS(nuts_model, init_strategy=init_strategy, **kernel_options)
+        constrain_fn = _defer_nuts_postprocessing(kernel)
         if bool(getattr(inference, "nuts_gradient_callback", False)):
-            # NUTS on the model's potential, with the value and gradient from one
-            # pre-compiled callback (see _callback_potential); the draws are constrained
-            # afterwards. One initialization per chain, as NumPyro does.
-            chain_keys = jax.random.split(rng_key, num_chains) if num_chains > 1 else [rng_key]
-            chain_info = [initialize_model(key, nuts_model, init_strategy=init_strategy) for key in chain_keys]
-            model_info = chain_info[0]
-            init_params = model_info.param_info.z
-            if num_chains > 1:
-                init_params = jax.tree.map(lambda *z: jnp.stack(z), *(info.param_info.z for info in chain_info))
-            kernel = NUTS(potential_fn=_callback_potential(model_info.potential_fn, model_info.param_info.z), **kernel_options)
-            constrain_fn = lambda args, kwargs: model_info.postprocess_fn
-        else:
-            kernel = NUTS(nuts_model, init_strategy=init_strategy, **kernel_options)
-            constrain_fn = _defer_nuts_postprocessing(kernel)
+            _use_callback_gradient(kernel, rng_key, init_strategy)
         mcmc = MCMC(
             kernel,
             num_warmup=num_warmup,
