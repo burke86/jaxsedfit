@@ -1,6 +1,81 @@
 Likelihood and priors
 =====================
 
+Full likelihood
+---------------
+
+A fit samples or optimizes the log posterior
+
+.. math::
+
+   \ln p(\theta \mid D) = \ln \pi(\theta) + \ln \mathcal{L}_{\rm phot}(\theta)
+   + \ln \mathcal{L}_{\rm spec}(\theta) + {\rm const},
+
+where :math:`\theta` holds every fitted parameter, physical and nuisance, and
+:math:`\pi(\theta)` is the product of their priors (see `Priors`_), including a
+tabulated redshift prior when one is given. A photometry-only fit has no
+:math:`\mathcal{L}_{\rm spec}`, and a spectrum-only fit no
+:math:`\mathcal{L}_{\rm phot}`.
+
+**Photometry.** For bands :math:`b` with observed flux :math:`F_b^{\rm obs}`,
+catalog error :math:`\sigma_b` and model flux :math:`F_b(\theta)`:
+
+.. math::
+
+   \ln \mathcal{L}_{\rm phot} = \sum_{b\,\in\,{\rm detections}}
+   \ln t_\nu\!\left( F_b^{\rm obs} - F_b \,;\, \sigma_{{\rm eff},b} \right)
+   + \sum_{b\,\in\,{\rm upper\ limits}}
+   \ln T_\nu\!\left( \frac{F_b^{\rm obs} - F_b}{\sigma_{{\rm eff},b}} \right),
+
+with the Student-t density and its cumulative distribution
+
+.. math::
+
+   t_\nu(r; \sigma) = \frac{\Gamma\!\left(\frac{\nu+1}{2}\right)}
+   {\Gamma\!\left(\frac{\nu}{2}\right) \sqrt{\nu \pi}\, \sigma}
+   \left( 1 + \frac{r^2}{\nu \sigma^2} \right)^{-\frac{\nu+1}{2}},
+   \qquad
+   T_\nu(x) = \int_{-\infty}^{x} t_\nu(r; 1)\, dr,
+
+:math:`\nu` = ``student_t_df`` (5). For an upper limit, :math:`F_b^{\rm obs}` is the
+limiting flux, and the likelihood is the probability that the measurement falls
+below it. With ``likelihood_family="gaussian"``, :math:`t_\nu` and :math:`T_\nu` are the
+normal density and cumulative distribution. The effective variance is
+
+.. math::
+
+   \sigma_{{\rm eff},b}^2 = \sigma_b^2
+   + \left( w_{\rm sys} F_b \right)^2
+   + \left( w_{\rm AGN} F_b^{\rm AGN} \right)^2
+   + {\rm NEV}(L_{\rm bol}) \left( F_b^{\rm AGN} \right)^2
+   + \left( s_{\rm neb} F_b^{\rm neb} \right)^2
+   \; [ + \text{optional terms} ],
+
+where :math:`F_b^{\rm AGN}` is the AGN part of the model flux (disk, torus and AGN
+emission features) and :math:`F_b^{\rm neb}` the host nebular-line flux in the band.
+`Photometric likelihood`_ describes each term.
+
+**Spectra.** For pixels :math:`p` of all spectra, with observed flux :math:`D_p`,
+quoted error :math:`e_p`, model :math:`M_p(\theta)`, Fe II model
+:math:`M_p^{\rm Fe}(\theta)` and the gray scale :math:`s` of the pixel's spectrum:
+
+.. math::
+
+   \ln \mathcal{L}_{\rm spec} = \sum_{p\,\in\,{\rm mask}}
+   \ln t_{\nu_s}\!\left( D_p - s M_p \,;\, \sigma_p \right),
+   \qquad
+   \sigma_p^2 = e_p^2 + \left( f_{\rm jit}\, s M_p \right)^2
+   + \left( f_{\rm Fe}\, s M_p^{\rm Fe} \right)^2 + a_{\rm jit}^2,
+
+with :math:`\nu_s` = ``spectrum_student_t_df`` (5). `Spectral likelihood`_
+describes the jitter terms, and :doc:`spectroscopy` the scale and the model.
+
+Points with a non-finite model, flux or variance add :math:`-10^6` each instead of a
+likelihood term, so invalid regions of parameter space are rejected. The reported
+``sed_chi2``, ``spectroscopy_chi2`` and ``joint_chi2`` are
+:math:`\sum r^2 / \sigma_{\rm eff}^2` over the detections and valid pixels, with
+the same variances (see :doc:`outputs`).
+
 Calibration and error-model terms
 ---------------------------------
 
@@ -66,15 +141,7 @@ catalog points than a Gaussian. Upper limits (``is_upper_limit``) use a one-side
 likelihood. With the host-capture model, the data are compared with the
 aperture-captured model flux (see :doc:`photometry`).
 
-For band :math:`b` with model flux :math:`F_b` and AGN flux :math:`F_b^{\rm AGN}`,
-the variance adds these terms to the catalog error :math:`\sigma_b`:
-
-.. math::
-
-   \sigma_{{\rm eff},b}^2 = \sigma_b^2
-   + (w_{\rm sys} F_b)^2
-   + (w_{\rm AGN} F_b^{\rm AGN})^2
-   + {\rm NEV}(L_{\rm bol}) \, (F_b^{\rm AGN})^2 .
+The variance terms in `Full likelihood`_:
 
 ``systematics_width`` (:math:`w_{\rm sys}`)
    Model error, proportional to the model flux as in GRAHSP, so that broadband
@@ -89,21 +156,42 @@ the variance adds these terms to the catalog error :math:`\sigma_b`:
 
 ``variability_uncertainty``
    For AGN variability between photometric epochs: the normalized excess variance
-   of Simm et al. (2016), :math:`{\rm NEV} = 10^{-1.43 - 0.74\,(\log L_{\rm bol} -
-   45)}` with :math:`L_{\rm bol}` in erg s\ :sup:`-1`, smoothly capped at
-   ``agn_nev`` (0.1). On by default.
+   of Simm et al. (2016), :math:`{\rm NEV}_{\rm S16} = 10^{-1.43 - 0.74\,(\log L_{\rm bol}
+   - 45)}` with :math:`L_{\rm bol}` in erg s\ :sup:`-1`, smoothly capped at
+   ``agn_nev`` (0.1): :math:`{\rm NEV} = \left( {\rm NEV}_{\rm S16}^{-8} +
+   {\rm agn\_nev}^{-8} \right)^{-1/8}`. On by default.
+
+``local_nebular_line_uncertainty_dex`` (:math:`s_{\rm neb}`)
+   With ``use_local_line_photometry`` (default) and nebular emission on, the host
+   nebular-line flux in each band carries an error of
+   :math:`s_{\rm neb} = 10^{0.3} - 1 \approx 1`, i.e. 0.3 dex, for line-strength
+   mismatch.
+
+Optional terms, off by default:
+
+``attenuation_model_uncertainty``
+   Adds :math:`(u_b F_b)^2`, which grows as the band's dust transmission
+   :math:`\mathcal{T}_b` (attenuated over intrinsic flux) falls:
+   :math:`u_b = \min\!\left(10^{-4 - 2\log_{10}(\mathcal{T}_b + 10^{-4})}, 0.1\right) /
+   \mathcal{T}_b`. Heavily attenuated bands count for less.
+
+``lyman_break_uncertainty``
+   Gives bands with a rest-frame pivot below 1500 Å a variance of
+   :math:`(10^8 F_b)^2`, which removes them from the fit.
 
 Spectral likelihood
 -------------------
 
 Spectra use a Student-t likelihood with ``spectrum_student_t_df`` degrees of
-freedom (5 by default). The quoted spectral errors are not assumed correct: as in
-``jaxqsofit``, three terms are added to them in quadrature,
+freedom (5 by default); `Full likelihood`_ gives it in full. The quoted spectral
+errors are not assumed correct: as in ``jaxqsofit``, three terms are added to them in
+quadrature,
 
-* ``frac_jitter`` times the model, fitted (prior HalfNormal(0.02));
-* ``frac_fe_jitter`` times the Fe II model, fixed at 0.20, for Fe II template
-  mismatch;
-* ``add_jitter``, a constant, 0 by default.
+* ``frac_jitter`` (:math:`f_{\rm jit}`) times the model, fitted (prior
+  HalfNormal(0.02));
+* ``frac_fe_jitter`` (:math:`f_{\rm Fe}`) times the Fe II model, fixed at 0.20, for
+  Fe II template mismatch;
+* ``add_jitter`` (:math:`a_{\rm jit}`), a constant, 0 by default.
 
 ``spectroscopy_chi2`` and the related outputs use the same variance (see
 :doc:`outputs`).
