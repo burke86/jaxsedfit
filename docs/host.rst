@@ -53,9 +53,9 @@ Other useful settings:
    MILES-based FSPS libraries. Set it to match your SSP file, or ``None`` to ignore
    the template resolution.
 
-``use_energy_balance`` and ``dust_alpha``
-   Control the host-dust energy-balance component. Disable dust only for debugging
-   or deliberately dust-free comparisons.
+``use_energy_balance``, ``dust_model``, ``dust_alpha`` and ``dust_umin``
+   Control the host's infrared dust emission; see `Dust emission`_. Disable it only
+   for debugging or deliberately dust-free comparisons.
 
 Star-formation history
 ----------------------
@@ -128,6 +128,59 @@ so that their total E(B-V) is ``ebv_gal / old_to_young_ebv_ratio``:
 ``ebv_gal`` stays the screen of the older stars, which the AGN also sees; the
 extra absorbed light is added to the dust energy balance. The total E(B-V) of the
 young stars is reported as ``ebv_gal_young_fit``.
+
+Dust emission
+-------------
+
+The starlight that the host's dust absorbs is re-emitted in the infrared (energy
+balance, as in CIGALE and GRAHSP). The absorbed luminosity is
+
+.. math::
+
+   L_{\rm dust} = \int \left( L_\lambda^{\rm host} - L_\lambda^{\rm host,\,att} \right) d\lambda
+   + \sum_i L_i^{\rm line} \left( 1 - 10^{-0.4\,A_i} \right)
+   + L_{\rm ion,\,dust},
+
+where :math:`L_\lambda^{\rm host}` is the intrinsic stellar and nebular continuum,
+:math:`L_\lambda^{\rm host,\,att}` the same after the host screen (and the
+birth-cloud screen, with differential attenuation), :math:`L_i^{\rm line}` and
+:math:`A_i` the luminosity and attenuation of each nebular line, and
+:math:`L_{\rm ion,\,dust}` the ionizing luminosity absorbed by dust inside H II
+regions (``nebular.f_dust``). This luminosity is spread over an infrared template
+normalized to unit integrated luminosity, so the dust emits exactly
+:math:`L_{\rm dust}`, reported as ``log_dust_luminosity_fit``. The dust emission
+itself is not attenuated.
+
+``cfg.galaxy.dust_model`` selects the template family:
+
+``"dale2014"`` (default)
+   The Dale et al. (2014) star-forming templates (the set without an AGN), with the
+   stellar emission removed and zero below 2 µm. One parameter, ``dust_alpha``, is
+   the power-law index of the dust mass heated by each radiation intensity,
+   :math:`dM_{\rm dust} \propto U^{-\alpha}\, dU`. Smaller values mean more intensely
+   heated, warmer dust, peaking at shorter wavelengths. Templates are interpolated
+   linearly in ``dust_alpha``; the default prior is uniform from 0.75 to 2.75, the
+   range of the GRAHSP and CIGALE grid.
+
+``"dl07"``
+   The Draine & Li (2007) model with the FSPS and Prospector shape constants:
+   PAH mass fraction 2.5%, :math:`U_{\max} = 10^6`, :math:`\gamma = 0.01` and
+   :math:`\alpha = 2`. One parameter, ``dust_umin``, is the minimum radiation
+   intensity heating the diffuse dust (default prior uniform from 0.1 to 25).
+
+.. code-block:: python
+
+   cfg.galaxy.dust_model = "dl07"            # default: "dale2014"
+   cfg.galaxy.use_energy_balance = True      # False: no host dust emission
+
+With ``use_energy_balance=False`` the host has no infrared dust emission, and
+``dust_alpha`` and ``dust_umin`` are fixed at their configured values (2.0 and 1.0).
+
+AGN light absorbed by either dust screen (``ebv_gal`` or ``ebv_agn``) is not added to
+:math:`L_{\rm dust}`: the AGN's infrared emission is the empirical torus described in
+:doc:`agn`. Without photometry at rest-frame wavelengths of tens of microns, the
+template shape (``dust_alpha`` or ``dust_umin``) is set mostly by its prior, while
+:math:`L_{\rm dust}` is still fixed by the attenuation.
 
 Stellar kinematics
 ------------------

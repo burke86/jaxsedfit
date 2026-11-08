@@ -45,6 +45,74 @@ In joint fits, the lines covered by the spectrum use the detailed spectral line
 model; the SED-scale corrections still apply to filters outside the spectral
 coverage.
 
+Accretion disk and torus
+------------------------
+
+The continuum follows GRAHSP: a bent power-law accretion disk and an empirical
+torus whose luminosity is tied to the disk's.
+
+**Disk.** The disk is normalized by its luminosity at rest 5100 Å,
+``agn_amp`` :math:`= \lambda L_\lambda(5100\,\text{Å})` in W (sampled as
+``log_agn_amp``, a natural logarithm). It is a smoothly bent power law,
+:math:`L_\lambda \propto \lambda^{\texttt{pl\_slope}}` redward of the bend at
+``pl_bend_loc`` (about 1000 Å) and :math:`\propto \lambda^{\texttt{uv\_slope}}`
+blueward of it, with the bend's sharpness set by ``pl_bend_width`` and an exponential
+cutoff, :math:`1 - e^{-\lambda_c / \lambda}`, at :math:`\lambda_c = 10^5` Å. Both
+dust screens attenuate the disk (see `AGN luminosity and reddening`_).
+
+**Torus.** The torus is two log-normal dust bumps, cool and hot, with a silicate
+feature:
+
+.. math::
+
+   L_\lambda^{\rm torus}(\lambda) = \frac{2.5\, f_{\rm cov}\, \lambda L_\lambda(5100\,\text{Å})}{12\,\mu{\rm m}}
+   \, \frac{S(\lambda)}{S(12\,\mu{\rm m})}
+   \left[ 1 + \tanh({\rm si})\, P_{\rm Si}(\lambda) \right],
+
+.. math::
+
+   S(\lambda) = \exp\!\left[ -\left( \frac{\log_{10}(\lambda / \lambda_{\rm cool})}{w_{\rm cool}} \right)^2 \right]
+   + h\, \frac{\lambda_{\rm cool}}{\lambda_{\rm hot}}
+   \exp\!\left[ -\left( \frac{\log_{10}(\lambda / \lambda_{\rm hot})}{w_{\rm hot}} \right)^2 \right],
+
+.. math::
+
+   P_{\rm Si}(\lambda) = \exp\!\left[ -\tfrac{1}{2} \left( \frac{\lambda - 9.84\,\mu{\rm m}}{1.03\,\mu{\rm m}} \right)^2 \right]
+   - 0.29 \exp\!\left[ -\tfrac{1}{2} \left( \frac{\lambda - 14.22\,\mu{\rm m}}{1.16\,\mu{\rm m}} \right)^2 \right].
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Parameter
+     - Meaning (default prior)
+   * - ``fcov`` (:math:`f_{\rm cov}`)
+     - Torus normalization: :math:`\lambda L_\lambda(12\,\mu{\rm m}) = 2.5\, f_{\rm cov}\,
+       \lambda L_\lambda(5100\,\text{Å})` before the silicate term, so the default
+       range 0.05–0.95 allows 12 µm-to-5100 Å ratios from 0.13 to 2.4. A proxy, not a
+       geometric covering factor or a ratio of integrated luminosities.
+   * - ``cool_lam``, ``cool_width``
+     - Peak wavelength (10–30 µm) and width in dex (0.2–0.65) of the cool bump
+   * - ``hot_lam``, ``hot_width``
+     - Peak wavelength (1–5.5 µm) and width in dex (0.2–0.65) of the hot bump
+   * - ``hot_fcov`` (:math:`h`)
+     - Hot-to-cool amplitude ratio, before the common normalization (log-uniform
+       from 0.04 to 10)
+   * - ``si``
+     - Silicate strength: positive for emission near 9.8 µm, negative for
+       absorption; ``tanh`` keeps the torus positive (Normal(0, 1))
+
+The hot bump dominates the torus from about 1 to 5 µm rest frame and the cool bump
+in the mid-infrared. The torus is not energy-balanced: its luminosity scales with
+the *intrinsic* disk luminosity through ``fcov``, independently of the light the
+nuclear screen ``ebv_agn`` absorbs. Its own obscuration is part of the template, so
+it sees only the host screen ``ebv_gal``.
+
+Because the disk and torus share ``agn_amp``, the torus is the main infrared
+constraint on the AGN luminosity. With photometry that stops short of rest-frame
+1 µm, it is barely sampled, and an AGN disk can be hard to tell apart from young
+stars.
+
 AGN luminosity and reddening
 ----------------------------
 
