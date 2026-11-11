@@ -55,7 +55,10 @@ def query_vizier_sed(
     target: str,
     radius: float = 3.0,
     host: tuple[str, int, bool] = ("vizier.cfa.harvard.edu", 443, True),
-    fallback_hosts: list[tuple[str, int, bool]] | tuple[tuple[str, int, bool], ...] | None = (("vizier.u-strasbg.fr", 80, False),),
+    fallback_hosts: list[tuple[str, int, bool]] | tuple[tuple[str, int, bool], ...] | None = (
+        ("vizier.cds.unistra.fr", 443, True),
+        ("vizier.idia.ac.za", 443, True),
+    ),
     timeout: float = 120.0,
     verbose: bool = True,
 ) -> tuple[list[dict[str, float | str | None]], Table, str]:
@@ -70,8 +73,10 @@ def query_vizier_sed(
     host
         Primary host triple of ``(hostname, port, use_https)``.
     fallback_hosts
-        Additional host triples tried in order after ``host`` fails; defaults to
-        the Strasbourg mirror.
+        Additional host triples tried in order after ``host`` fails. The
+        defaults are the main CDS site in Strasbourg and the IDIA mirror in
+        South Africa. A host also counts as failed when its response has fewer
+        than 4 supported filters.
     timeout
         Socket timeout in seconds for each host attempt.
     verbose
