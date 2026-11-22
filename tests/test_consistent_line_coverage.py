@@ -64,7 +64,7 @@ def _config(consistent=None, host_capture=False):
             **({"psf_fwhm_arcsec": [1.4] * 3, "photometry_method": ["psf"] * 3} if host_capture else {}),
         ),
         filters=FilterSet(curves=curves),
-        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=512, fit_host=host_capture),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake_consistent_coverage.h5", n_wave=512, fit_host=host_capture),
         agn=AGNConfig(
             fit_lines=True,
             tied_lines=True,
