@@ -3922,7 +3922,7 @@ def _spectral_family_extrapolation(
     line_blagn,
     line_narrow_template,
     *,
-    disc_llambda_at_lines=None,
+    agn_continuum_at_lines=None,
     disc_llambda_2500=None,
 ):
     """Return intrinsic luminosities [W] and widths for out-of-coverage AGN lines.
@@ -3933,8 +3933,10 @@ def _spectral_family_extrapolation(
     lines; ``"continuum_ew"`` uses (for lines selected by
     ``cfg.agn.line_extrapolation_ew_scope``; others keep the fitted anchor)
     :func:`jaxsedfit.line_extrapolation.continuum_ew_broad_line_luminosity`,
-    which needs the unattenuated disc ``L_lambda`` [W/A] at ``line_wave``
-    (``disc_llambda_at_lines``) and at rest 2500 A (``disc_llambda_2500``).
+    which needs the unattenuated AGN continuum (disc + torus) ``L_lambda``
+    [W/A] at ``line_wave`` (``agn_continuum_at_lines``) and the disc at rest
+    2500 A (``disc_llambda_2500``). Under ``"continuum_ew"`` narrow lines are
+    tied to QSOGEN narrow EWs the same way (zero where QSOGEN has none).
     Both anchors return intrinsic luminosities that the caller attenuates and
     projects identically.
     """
@@ -3965,28 +3967,43 @@ def _spectral_family_extrapolation(
         jnp.sum(intrinsic_lumin * (1.0 - broad_mask)) / jnp.maximum(narrow_template_anchor, 1.0e-30),
         0.0,
     )
+    broad_lumin = broad_norm * line_blagn * outside_mask
+    narrow_lumin = narrow_norm * line_narrow_template * outside_mask
     if cfg.agn.line_extrapolation_anchor == "continuum_ew":
-        from .line_extrapolation import continuum_ew_broad_line_luminosity
+        from .line_extrapolation import (
+            continuum_ew_broad_line_luminosity,
+            continuum_ew_narrow_line_luminosity,
+        )
 
-        if disc_llambda_at_lines is None or disc_llambda_2500 is None:
-            raise ValueError("The continuum_ew line anchor needs the disc L_lambda at the lines and at 2500 A.")
-        continuum_lumin = continuum_ew_broad_line_luminosity(
+        if agn_continuum_at_lines is None or disc_llambda_2500 is None:
+            raise ValueError(
+                "The continuum_ew line anchor needs the AGN continuum L_lambda at the lines and the disc at 2500 A."
+            )
+        narrow_weights = (
+            context.templates.line_liner if int(cfg.agn.agn_type) == 3 else context.templates.line_sy2
+        )
+        ew_broad = continuum_ew_broad_line_luminosity(
             context.templates.line_wave,
             context.templates.line_blagn,
-            disc_llambda_at_lines,
+            agn_continuum_at_lines,
             disc_llambda_2500,
             emline_type=cfg.agn.line_extrapolation_emline_type,
-        )
+        ) * outside_mask
+        ew_narrow = continuum_ew_narrow_line_luminosity(
+            context.templates.line_wave,
+            narrow_weights,
+            agn_continuum_at_lines,
+            disc_llambda_2500,
+            emline_type=cfg.agn.line_extrapolation_emline_type,
+        ) * outside_mask
         if cfg.agn.line_extrapolation_ew_scope == "all":
-            broad_lumin = continuum_lumin * outside_mask
+            broad_lumin, narrow_lumin = ew_broad, ew_narrow
         else:
             # Only lines blueward of the spectrum's blue edge use the EW anchor;
             # redward lines keep the fitted-line anchor.
             blueward = _blueward_of_spectral_coverage(context, cfg, line_wave, redshift)
-            broad_lumin = jnp.where(blueward, continuum_lumin, broad_norm * line_blagn) * outside_mask
-    else:
-        broad_lumin = broad_norm * line_blagn * outside_mask
-    narrow_lumin = narrow_norm * line_narrow_template * outside_mask
+            broad_lumin = jnp.where(blueward, ew_broad, broad_lumin)
+            narrow_lumin = jnp.where(blueward, ew_narrow, narrow_lumin)
     positive = jnp.clip(intrinsic_lumin, 0.0, None)
     broad_weight = positive * broad_mask
     narrow_weight = positive * (1.0 - broad_mask)
@@ -5322,12 +5339,16 @@ def evaluate_photometric_state(
                 line_narrow_template = jnp.where(agn_type == 3, line_liner, line_sy2)
                 continuum_anchor_inputs = {}
                 if cfg.agn.line_extrapolation_anchor == "continuum_ew":
-                    # Unattenuated disc L_lambda [W/A], log-interpolated from
-                    # the rest grid to the line centres and to 2500 A.
+                    # Unattenuated AGN continuum L_lambda [W/A] (disc + torus,
+                    # QSOGEN's power law + hot dust), log-interpolated to the
+                    # line centres; the disc alone at 2500 A sets M_i(z=2).
                     log_disk_rest = jnp.log(jnp.maximum(disk_rest, 1.0e-300))
+                    log_agn_continuum_rest = jnp.log(jnp.maximum(disk_rest + torus_rest, 1.0e-300))
                     log_rest_wave = jnp.log(rest_wave)
                     continuum_anchor_inputs = {
-                        "disc_llambda_at_lines": jnp.exp(jnp.interp(jnp.log(line_wave), log_rest_wave, log_disk_rest)),
+                        "agn_continuum_at_lines": jnp.exp(
+                            jnp.interp(jnp.log(line_wave), log_rest_wave, log_agn_continuum_rest)
+                        ),
                         "disc_llambda_2500": jnp.exp(jnp.interp(jnp.log(2500.0), log_rest_wave, log_disk_rest)),
                     }
                 spectral_extrapolated_broad_lumin, spectral_extrapolated_narrow_lumin, spectral_extrapolated_broad_width, spectral_extrapolated_narrow_width = (

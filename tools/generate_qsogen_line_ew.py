@@ -64,6 +64,31 @@ LINE_GROUPS = (
     ("Paa", (18400.0, 18490.0), (19030.0, 19120.0), (18445.0, 19075.0)),
 )
 
+# Narrow lines. "full": isolated forbidden lines measured in the full QSOGEN
+# template (scal_nlr = 1) above a local linear pseudo-continuum, so their
+# strength follows QSOGEN's emline_type mixing (the peaky/windy templates carry
+# different [O III]). "nlr": lines on top of broad lines, integrated from the
+# narrow-line (NLR) column alone (independent of emline_type). QSOGEN has no
+# narrow UV or near-IR lines; jaxsedfit narrow lines outside these windows get
+# zero EW.
+NARROW_GROUPS = (
+    ("[NeV]3426", "full", (3395.0, 3405.0), (3445.0, 3455.0), (3410.0, 3440.0)),
+    ("[OII]3727", "full", (3695.0, 3710.0), (3750.0, 3765.0), (3712.0, 3745.0)),
+    ("[NeIII]3869", "full", (3845.0, 3855.0), (3900.0, 3910.0), (3858.0, 3880.0)),
+    ("Hg_n+[OIII]4363", "nlr", None, None, (4330.0, 4375.0)),
+    ("HeII4686_n", "nlr", None, None, (4676.0, 4696.0)),
+    ("Hb_n", "nlr", None, None, (4850.0, 4872.0)),
+    ("[OIII]5007", "full", (4975.0, 4982.0), (5030.0, 5040.0), (4990.0, 5025.0)),
+    # Fixed by atomic physics to [O III] 5007 / 2.98; its local pseudo-continuum
+    # sits on the H-beta red wing and Fe II and is not measured reliably.
+    ("[OIII]4959", "tie:[OIII]5007:2.98", None, None, (4945.0, 4972.0)),
+    ("[FeVII]6087", "nlr", None, None, (6077.0, 6097.0)),
+    ("[OI]6300", "nlr", None, None, (6288.0, 6312.0)),
+    ("[FeX]6374", "nlr", None, None, (6362.0, 6382.0)),
+    ("Ha_n", "nlr", None, None, (6553.0, 6572.0)),
+    ("[NII]6583", "nlr", None, None, (6575.0, 6595.0)),
+)
+
 EMLINE_TYPE_GRID = np.round(np.arange(-2.0, 3.0 + 1.0e-9, 0.1), 6)
 
 
@@ -83,7 +108,9 @@ def read_qsogen_params(qsogen_dir: Path) -> dict[str, float]:
     return values
 
 
-def qsogen_line_ratio(template: np.ndarray, emline_type: float, params: dict[str, float]) -> np.ndarray:
+def qsogen_line_ratio(
+    template: np.ndarray, emline_type: float, params: dict[str, float], scal_nlr: float = 0.0
+) -> np.ndarray:
     """Return QSOGEN's broad-line flux per unit continuum, ``|s| linval / conval``.
 
     Follows ``Quasar_sed.add_emission_lines`` for ``scal_emline < 0`` with
@@ -91,7 +118,7 @@ def qsogen_line_ratio(template: np.ndarray, emline_type: float, params: dict[str
     ``scal_lya`` / ``scal_halpha`` multipliers.
     """
     linwav, medval, conval, pkyval, wdyval, nlr = template
-    scanlr = 0.0
+    scanlr = float(scal_nlr)
     varlin = float(emline_type)
     if varlin == 0.0:
         linval = medval + (scanlr - 1.0) * nlr
@@ -128,15 +155,37 @@ def group_equivalent_width(wave: np.ndarray, ratio: np.ndarray, group) -> float:
     return float(np.trapezoid(excess, grid))
 
 
-def build_table(qsogen_dir: Path) -> tuple[np.ndarray, dict[str, float]]:
+def narrow_equivalent_width(template: np.ndarray, emline_type: float, params: dict[str, float], group) -> float:
+    """Narrow-line rest EW for one narrow group (see NARROW_GROUPS)."""
+    name, method, blue, red, (lo, hi) = group
+    wave = template[0]
+    if method == "nlr":
+        nlr_ratio = abs(params["scal_emline"]) * template[5] / template[2]
+        grid = np.linspace(lo, hi, 2001)
+        return float(np.trapezoid(np.interp(grid, wave, nlr_ratio), grid))
+    ratio = qsogen_line_ratio(template, emline_type, params, scal_nlr=1.0)
+    return group_equivalent_width(wave, ratio, (name, blue, red, (lo, hi)))
+
+
+def build_table(qsogen_dir: Path) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
     template = np.genfromtxt(qsogen_dir / TEMPLATE_NAME, unpack=True)
     params = read_qsogen_params(qsogen_dir)
     ew = np.zeros((len(LINE_GROUPS), EMLINE_TYPE_GRID.size))
+    narrow = np.zeros((len(NARROW_GROUPS), EMLINE_TYPE_GRID.size))
     for j, emline_type in enumerate(EMLINE_TYPE_GRID):
         ratio = qsogen_line_ratio(template, float(emline_type), params)
         for i, group in enumerate(LINE_GROUPS):
             ew[i, j] = group_equivalent_width(template[0], ratio, group)
-    return ew, params
+        names = [group[0] for group in NARROW_GROUPS]
+        for i, group in enumerate(NARROW_GROUPS):
+            if group[1].startswith("tie:"):
+                continue
+            narrow[i, j] = max(narrow_equivalent_width(template, float(emline_type), params, group), 0.0)
+        for i, group in enumerate(NARROW_GROUPS):
+            if group[1].startswith("tie:"):
+                _tie, target, divisor = group[1].split(":")
+                narrow[i, j] = narrow[names.index(target), j] / float(divisor)
+    return ew, narrow, params
 
 
 def _qsogen_commit(qsogen_dir: Path) -> str:
@@ -151,27 +200,34 @@ def _qsogen_commit(qsogen_dir: Path) -> str:
         return "unknown"
 
 
-def write_table(path: Path, ew: np.ndarray, params: dict[str, float], commit: str) -> None:
+def write_table(path: Path, ew: np.ndarray, narrow: np.ndarray, params: dict[str, float], commit: str) -> None:
     header = [
         "# Broad emission-line rest equivalent widths [Angstrom] from QSOGEN.",
         "# Source: QSOGEN, Temple, Hewett & Banerji (2021), MNRAS 508, 737;",
         "#   https://github.com/MJTemple/qsogen (MIT licence, see LICENSES/QSOGEN-MIT.txt).",
         f"#   Template {TEMPLATE_NAME}, upstream commit {commit}.",
         "# Generated by tools/generate_qsogen_line_ew.py; do not edit by hand.",
-        "# EW = |scal_emline| * int[(linval - nlr)/conval - local linear pseudo-continuum] dlambda",
+        "# broad: EW = |scal_emline| * int[(linval - nlr)/conval - local linear pseudo-continuum] dlambda",
         "#   over [window_lo, window_hi]; linval mixes the median, peaky and windy templates",
         "#   following Quasar_sed.add_emission_lines with scal_nlr = 0.",
+        "# narrow: isolated forbidden lines from the full template (scal_nlr = 1) above a local",
+        "#   pseudo-continuum; lines on broad lines from |scal_emline| * int nlr/conval dlambda.",
+        "# EWs are relative to QSOGEN's continuum (power law + hot-dust blackbody).",
         f"# scal_emline = {params['scal_emline']:.6g}; beslope = {params['beslope']:.6g}; "
         f"benorm = {params['benorm']:.6g}",
         "# emline_type = (M_i(z=2) - benorm) * beslope, clipped by QSOGEN to [-2, 3].",
         "# emline_type_grid: " + " ".join(f"{value:.1f}" for value in EMLINE_TYPE_GRID),
-        "# columns: name window_lo window_hi EW(emline_type_grid[0]) ... EW(emline_type_grid[-1])",
+        "# columns: name family window_lo window_hi EW(emline_type_grid[0]) ... EW(emline_type_grid[-1])",
     ]
     lines = list(header)
     for group, row in zip(LINE_GROUPS, ew):
         name, _blue, _red, (lo, hi) = group
         values = " ".join(f"{value:.4f}" for value in row)
-        lines.append(f"{name} {lo:.1f} {hi:.1f} {values}")
+        lines.append(f"{name} broad {lo:.1f} {hi:.1f} {values}")
+    for group, row in zip(NARROW_GROUPS, narrow):
+        name, _method, _blue, _red, (lo, hi) = group
+        values = " ".join(f"{value:.4f}" for value in row)
+        lines.append(f"{name} narrow {lo:.1f} {hi:.1f} {values}")
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -180,11 +236,13 @@ def main() -> None:
     parser.add_argument("qsogen_dir", type=Path, help="Local QSOGEN checkout.")
     parser.add_argument("output", type=Path, help="Output table path.")
     args = parser.parse_args()
-    ew, params = build_table(args.qsogen_dir)
-    write_table(args.output, ew, params, _qsogen_commit(args.qsogen_dir))
+    ew, narrow, params = build_table(args.qsogen_dir)
+    write_table(args.output, ew, narrow, params, _qsogen_commit(args.qsogen_dir))
     mid = int(np.argmin(np.abs(EMLINE_TYPE_GRID)))
     for group, row in zip(LINE_GROUPS, ew):
-        print(f"{group[0]:>20s}  EW(emline_type=0) = {row[mid]:8.2f} A")
+        print(f"{group[0]:>20s} broad  EW(emline_type=0) = {row[mid]:8.2f} A")
+    for group, row in zip(NARROW_GROUPS, narrow):
+        print(f"{group[0]:>20s} narrow EW(emline_type=0) = {row[mid]:8.2f} A")
 
 
 if __name__ == "__main__":

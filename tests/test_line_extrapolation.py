@@ -39,7 +39,7 @@ from jaxsedfit.preload import build_model_context
 
 REDSHIFT = 0.5
 # Rest-frame C IV + He II/O III] band, fully outside the rest 2000-3000 A spectrum.
-BAND_REST = (1450.0, 1700.0)
+BAND_REST = (1440.0, 1720.0)
 
 
 def _ew(name, emline_type=0.0):
@@ -61,6 +61,11 @@ def test_qsogen_table_matches_composite_sanity_ranges():
     assert 25.0 < _ew("MgII") < 55.0
     # H-beta side bands must avoid its red wing and Fe II 4924/5018 (about 60-66 A).
     assert 55.0 < _ew("Hb") < 75.0
+    # Narrow lines: [O III] 5007 of order 10 A, 4959 tied at 1/2.98; none in the UV.
+    assert 8.0 < _ew("[OIII]5007") < 20.0
+    assert _ew("[OIII]4959") == pytest.approx(_ew("[OIII]5007") / 2.98)
+    assert {"broad", "narrow"} == set(table.family)
+    assert all(lo > 3000.0 for fam, lo in zip(table.family, table.window_lo) if fam == "narrow")
     # Baldwin effect: fainter quasars (larger emline_type) have stronger Ly-alpha and C IV.
     assert _ew("Lya+NV", 1.0) > _ew("Lya+NV", 0.0) > _ew("Lya+NV", -1.0)
     assert _ew("CIV", 1.0) > _ew("CIV", 0.0) > _ew("CIV", -1.0)
@@ -273,7 +278,7 @@ def test_continuum_ew_band_flux_ratio_matches_equivalent_width(fake_ssp):
         np.exp(np.interp(np.log(band), np.log(rest), np.log(disk_rest))), band
     )
     # QSOGEN: C IV + N IV] + He II + O III] ~ 53 A over a 250 A band.
-    assert expected_ratio == pytest.approx((_ew("CIV") + _ew("HeII+OIII]")) / 250.0, rel=0.1)
+    assert expected_ratio == pytest.approx((_ew("CIV") + _ew("HeII+OIII]")) / (BAND_REST[1] - BAND_REST[0]), rel=0.1)
     assert line_flux / disk_flux == pytest.approx(expected_ratio, rel=0.02)
 
 
@@ -287,15 +292,92 @@ def test_default_anchor_is_bit_identical_to_explicit_fitted_lines(fake_ssp):
         np.testing.assert_array_equal(np.asarray(tr_default[site]["value"]), np.asarray(tr_explicit[site]["value"]))
 
 
-def test_continuum_ew_changes_only_out_of_coverage_broad_lines(fake_ssp):
+def test_continuum_ew_changes_only_out_of_coverage_lines(fake_ssp):
     _, tr_fitted = _trace(_joint_config())
     _, tr_cew = _trace(_joint_config(anchor="continuum_ew"))
-    for site in ("spectral_line_photometry", "spectral_extrapolated_narrow_photometry", "disk_fluxes"):
+    for site in ("spectral_line_photometry", "disk_fluxes"):
         np.testing.assert_array_equal(np.asarray(tr_fitted[site]["value"]), np.asarray(tr_cew[site]["value"]))
-    assert not np.array_equal(
-        np.asarray(tr_fitted["spectral_extrapolated_broad_photometry"]["value"]),
-        np.asarray(tr_cew["spectral_extrapolated_broad_photometry"]["value"]),
-    )
+    for site in ("spectral_extrapolated_broad_photometry", "spectral_extrapolated_narrow_photometry"):
+        assert not np.array_equal(np.asarray(tr_fitted[site]["value"]), np.asarray(tr_cew[site]["value"]))
+
+
+def _spy_extrapolation(monkeypatch):
+    import jaxsedfit.model as model_module
+
+    captured = {}
+    original = model_module._spectral_family_extrapolation
+
+    def spy(*args, **kwargs):
+        out = original(*args, **kwargs)
+        captured.update(args=args, kwargs=kwargs, out=out)
+        return out
+
+    monkeypatch.setattr(model_module, "_spectral_family_extrapolation", spy)
+    return captured
+
+
+def _red_side_config(redshift, spec_rest, band_rest):
+    cfg = _joint_config(anchor="continuum_ew", emline_type=0.0)
+    cfg.observation.redshift = redshift
+    band_obs = np.array(band_rest) * (1.0 + redshift)
+    filter_wave = np.linspace(band_obs[0] - 1.0, band_obs[1] + 1.0, 600)
+    trans = ((filter_wave >= band_obs[0]) & (filter_wave <= band_obs[1])).astype(float)
+    cfg.filters.curves[0] = FilterCurve(name="civ_band", wave=filter_wave.tolist(), transmission=trans.tolist())
+    spec_wave = np.linspace(*spec_rest, 200) * (1.0 + redshift)
+    cfg.spectroscopy.wave_obs = spec_wave.tolist()
+    return cfg
+
+
+@pytest.mark.parametrize(
+    ("redshift", "spec_rest"),
+    [(0.6, (3000.0, 6000.0)), (2.0, (1300.0, 3000.0))],
+)
+def test_continuum_ew_red_side_h_alpha(fake_ssp, monkeypatch, redshift, spec_rest):
+    """H-alpha redward of the spectrum (z ~ 0.6 optical, z ~ 2 in the K band) gets EW x (disc + torus)."""
+    captured = _spy_extrapolation(monkeypatch)
+    cfg = _red_side_config(redshift, spec_rest, (6300.0, 6800.0))
+    context, tr = _trace(cfg)
+    broad, narrow, _, _ = (np.asarray(x) for x in captured["out"])
+    continuum = np.asarray(captured["kwargs"]["agn_continuum_at_lines"])
+    wave = np.asarray(context.templates.line_wave)
+    ha = int(np.flatnonzero(np.abs(wave - 6563.0) < 1.0)[0])
+    assert broad[ha] == pytest.approx(_ew("Ha") * continuum[ha], rel=1e-10)
+    # Narrow H-alpha from QSOGEN's narrow-line template (not the Seyfert-2 one).
+    table = load_qsogen_line_ew_table()
+    ha_n = float(np.interp(0.0, table.emline_type_grid, table.ew_angstrom[table.names.index("Ha_n")]))
+    assert narrow[ha] == pytest.approx(ha_n * continuum[ha], rel=1e-10)
+    # The continuum at the line includes the torus: at least the disc.
+    rest = np.asarray(context.rest_wave, dtype=float)
+    disc = np.exp(np.interp(np.log(wave), np.log(rest), np.log(np.asarray(tr["disk_rest_sed"]["value"]))))
+    assert continuum[ha] >= disc[ha] * (1.0 - 1e-6)
+    assert np.asarray(tr["spectral_extrapolated_broad_photometry"]["value"])[0] > 0.0
+
+
+def test_continuum_ew_includes_torus_in_the_near_ir(fake_ssp, monkeypatch):
+    captured = _spy_extrapolation(monkeypatch)
+    context, tr = _trace(_red_side_config(0.6, (3000.0, 6000.0), (18000.0, 19500.0)))
+    continuum = np.asarray(captured["kwargs"]["agn_continuum_at_lines"])
+    wave = np.asarray(context.templates.line_wave)
+    rest = np.asarray(context.rest_wave, dtype=float)
+    disc = np.exp(np.interp(np.log(wave), np.log(rest), np.log(np.asarray(tr["disk_rest_sed"]["value"]))))
+    paa = int(np.flatnonzero(np.abs(wave - 18750.0) < 1.0)[0])
+    lya = int(np.flatnonzero(np.abs(wave - 1215.0) < 1.0)[0])
+    assert continuum[paa] > 1.01 * disc[paa]  # the torus (hot dust) contributes at 1.9 micron
+    assert continuum[lya] == pytest.approx(disc[lya], rel=1e-3)
+
+
+def test_continuum_ew_narrow_lines(fake_ssp, monkeypatch):
+    captured = _spy_extrapolation(monkeypatch)
+    context, _ = _trace(_red_side_config(0.6, (3000.0, 4800.0), (4900.0, 5100.0)))
+    _, narrow, _, _ = (np.asarray(x) for x in captured["out"])
+    continuum = np.asarray(captured["kwargs"]["agn_continuum_at_lines"])
+    wave = np.asarray(context.templates.line_wave)
+    o3 = int(np.flatnonzero(np.abs(wave - 5007.0) < 1.0)[0])
+    lya = int(np.flatnonzero(np.abs(wave - 1215.0) < 1.0)[0])
+    civ = int(np.flatnonzero(np.abs(wave - 1549.0) < 1.0)[0])
+    assert 8.0 < narrow[o3] / continuum[o3] < 25.0  # [O III] 5007 rest EW of order 10 A
+    # QSOGEN has no narrow UV lines: none are extrapolated.
+    assert narrow[lya] == 0.0 and narrow[civ] == 0.0
 
 
 def test_uv_slope_is_deterministic_without_prior(fake_ssp):
@@ -308,12 +390,12 @@ def test_ew_scope_blueward_keeps_fitted_anchor_redward(fake_ssp):
     sites = {}
     for label, kwargs in {
         "fitted": {},
-        "blueward": {"anchor": "continuum_ew", "emline_type": 0.0},
-        "all": {"anchor": "continuum_ew", "emline_type": 0.0, "scope": "all"},
+        "blueward": {"anchor": "continuum_ew", "emline_type": 0.0, "scope": "blueward"},
+        "all": {"anchor": "continuum_ew", "emline_type": 0.0},
     }.items():
         _, tr = _trace(_joint_config(red_band=True, **kwargs))
         sites[label] = np.asarray(tr["spectral_extrapolated_broad_photometry"]["value"])
-    assert _joint_config(anchor="continuum_ew").agn.line_extrapolation_ew_scope == "blueward"
+    assert _joint_config(anchor="continuum_ew").agn.line_extrapolation_ew_scope == "all"
     blue, red = 0, 1
     # Blue band: both continuum_ew scopes anchor C IV to the continuum.
     assert sites["blueward"][blue] == sites["all"][blue]
