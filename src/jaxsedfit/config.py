@@ -344,6 +344,12 @@ class AGNConfig:
     fit_spectrum_tilt: bool = False
     line_flux_scale_mjy: float = 1.0
     line_coverage_margin_kms: float = 3000.0
+    # Use one coverage rule for fitted and extrapolated lines: a fitted spectral
+    # line component enters the photometry only if its rest wavelength is
+    # inside the spectral coverage (+- line_coverage_margin_kms), and an SED
+    # template line is extrapolated only if no covered fitted component exists
+    # at its wavelength. Off by default (legacy behaviour).
+    consistent_line_coverage: bool = False
     # Rest-frame range [A] that fixes the tied-line set instead of each spectrum's
     # coverage; lines the spectra do not cover are then masked (zero amplitude), so
     # objects at different redshifts share one model structure (see fit_batch).

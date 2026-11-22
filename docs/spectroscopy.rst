@@ -129,6 +129,24 @@ output is ``spectral_continuum_tilt``. Leave it off unless the spectrum's shape 
 known to be unreliable: it is partly degenerate with the dust attenuation and the
 AGN continuum slope.
 
+Lines at the edge of the spectrum
+---------------------------------
+
+In a joint fit each emission line reaches the photometry either as a fitted
+spectral Gaussian or, when the spectrum does not cover it, as a fixed-ratio
+template line scaled to the fitted lines. By default the two use different
+coverage rules: a spectral line is fitted when its broad wings reach the data
+(Ly-alpha whenever the spectrum starts blueward of about rest 1294 Å), while the
+template treats a line as uncovered unless its centre lies inside the data
+within ``agn.line_coverage_margin_kms``. A line between the two limits is then
+counted twice (fitted from one wing *and* extrapolated), and a narrow line can be
+counted by neither. ``AGNConfig(consistent_line_coverage=True)`` applies the
+centre rule to both: fitted components outside it are left out of the
+photometry and out of the anchor of the extrapolated lines, and template lines
+without a covered fitted counterpart are extrapolated, so each line is counted
+once. The sampled parameters are unchanged, but the photometric prediction (and
+therefore the likelihood) is, so fits should be rerun.
+
 Multiple spectra
 ----------------
 

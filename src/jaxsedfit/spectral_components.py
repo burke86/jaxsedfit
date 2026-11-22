@@ -452,6 +452,11 @@ def _broaden_per_instrument(evaluate, sigma_inst_ln, like, instrument_index=None
     return model
 
 
+# Static per-component metadata carried in the line state for the photometric
+# projection; not emitted as trace sites (it never changes between draws).
+_STATIC_LINE_STATE_KEYS = frozenset({"line_ln_lambda0_per_component"})
+
+
 def _evaluate_tied_line_components(
     wave_rest,
     cfg: SpectralComponentConfig,
@@ -546,6 +551,7 @@ def _evaluate_tied_line_components(
     diagnostics = {
         "line_amp_per_component": amps,
         "line_mu_per_component": mus,
+        "line_ln_lambda0_per_component": _line_meta_array(tied_line_meta, "ln_lambda0"),
         "line_sig_per_component": sigs,
         "line_broad_mask_per_component": broad_mask,
         "line_narrow_fwhm_kms": narrow_fwhm_kms,
@@ -597,6 +603,7 @@ def _evaluate_simple_line_components(
     )
     cont_scale = jnp.maximum(jnp.nanmedian(jnp.abs(continuum_model)) * amplitude_scale, 1.0e-8)
     amps, mus, sigs, broad_flags = [], [], [], []
+    nominal_ln = []
     for name, center in zip(line_names, cfg.line_centers_rest):
         is_broad = str(name) in broad_names
         default_fwhm = cfg.broad_fwhm_kms_default if is_broad else cfg.narrow_fwhm_kms_default
@@ -635,11 +642,13 @@ def _evaluate_simple_line_components(
         # ln-lambda equivalent of this Gaussian, so photometric line projection sees it.
         amps.append(amp)
         mus.append(jnp.log(center_shifted))
+        nominal_ln.append(float(np.log(float(center))))
         sigs.append(jnp.maximum(fwhm / 299792.458 / 2.354820045, 1.0e-12))
         broad_flags.append(1.0 if is_broad else 0.0)
     return line_model, broad_model, narrow_model, {
         "line_amp_per_component": jnp.stack(amps),
         "line_mu_per_component": jnp.stack(mus),
+        "line_ln_lambda0_per_component": jnp.asarray(nominal_ln, dtype=jnp.float64),
         "line_sig_per_component": jnp.stack(sigs),
         "line_broad_mask_per_component": jnp.asarray(broad_flags, dtype=jnp.float64),
         "line_narrow_fwhm_kms": (
@@ -1000,6 +1009,8 @@ def evaluate_joint_spectral_components(
     numpyro.deterministic(f"{site_prefix}_line_model_broad", line_broad_model)
     numpyro.deterministic(f"{site_prefix}_line_model_narrow", line_narrow_model)
     for name, value in line_diagnostics.items():
+        if name in _STATIC_LINE_STATE_KEYS:
+            continue
         numpyro.deterministic(f"{site_prefix}_{name}", value)
     numpyro.deterministic(f"{site_prefix}_feii_model", feii_model)
     numpyro.deterministic(f"{site_prefix}_balmer_model", balmer_model)
