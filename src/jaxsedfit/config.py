@@ -350,6 +350,12 @@ class AGNConfig:
     # template line is extrapolated only if no covered fitted component exists
     # at its wavelength. Off by default (legacy behaviour).
     consistent_line_coverage: bool = False
+    # Narrow lines outside the spectral coverage: "template" (default) scales
+    # the Seyfert-2/LINER template to the fitted narrow lines; "optical_only"
+    # drops extrapolated narrow lines blueward of rest 3000 A (Ly-beta/O VI to
+    # Mg II, where fitted "narrow" components absorb broad-line cores and
+    # continuum-EW anchors already include them); "none" drops all.
+    narrow_line_extrapolation: str = "template"
     # Rest-frame range [A] that fixes the tied-line set instead of each spectrum's
     # coverage; lines the spectra do not cover are then masked (zero amplitude), so
     # objects at different redshifts share one model structure (see fit_batch).
@@ -399,6 +405,12 @@ class AGNConfig:
         if int(self.feature_grid_size) < 256:
             raise ValueError("AGNConfig.feature_grid_size must be at least 256.")
         self.feature_grid_size = int(self.feature_grid_size)
+        mode = str(self.narrow_line_extrapolation).strip().lower()
+        if mode not in {"template", "optical_only", "none"}:
+            raise ValueError(
+                "AGNConfig.narrow_line_extrapolation must be 'template', 'optical_only' or 'none'."
+            )
+        self.narrow_line_extrapolation = mode
         if self.line_activation_rest is not None:
             lo, hi = (float(v) for v in self.line_activation_rest)
             if not (np.isfinite(lo) and np.isfinite(hi) and 0.0 < lo < hi):

@@ -100,6 +100,7 @@ def _run(cfg, monkeypatch):
 
     def spy(*args, **kwargs):
         captured["state"] = args[2]
+        captured["args"] = args
         captured["kwargs"] = kwargs
         return original(*args, **kwargs)
 
@@ -346,3 +347,38 @@ def test_native_narrow_lines_removed_as_captured(fake_ssp, monkeypatch):
     np.testing.assert_allclose(
         agn_minus_spectral(tr_on) - agn_minus_spectral(tr_off), total - captured, rtol=1e-9, atol=1e-15
     )
+
+
+def test_narrow_line_extrapolation_modes(fake_ssp, monkeypatch):
+    import copy
+
+    from jaxsedfit.model import NARROW_EXTRAPOLATION_OPTICAL_MIN_A
+
+    assert AGNConfig().narrow_line_extrapolation == "template"
+    with pytest.raises(ValueError, match="narrow_line_extrapolation"):
+        AGNConfig(narrow_line_extrapolation="uv")
+    context, tr_t, cap = _run(_config(consistent=True), monkeypatch)
+    band = list(BANDS_REST).index("lya_band")
+    assert _site(tr_t, "spectral_extrapolated_narrow_photometry")[band] > 0.0
+    args = list(cap["args"])
+    line_wave = np.asarray(args[7])
+    results = {}
+    for mode in ("template", "optical_only", "none"):
+        cfg = copy.deepcopy(args[1])
+        cfg.agn.narrow_line_extrapolation = mode
+        broad, narrow, _, _ = model_module._spectral_family_extrapolation(
+            args[0], cfg, *args[2:], **cap["kwargs"]
+        )
+        results[mode] = (np.asarray(broad), np.asarray(narrow))
+    broad_t, narrow_t = results["template"]
+    optical = line_wave >= NARROW_EXTRAPOLATION_OPTICAL_MIN_A
+    assert narrow_t[~optical].sum() > 0.0 and narrow_t[optical].sum() > 0.0
+    np.testing.assert_array_equal(results["optical_only"][1][optical], narrow_t[optical])
+    assert np.all(results["optical_only"][1][~optical] == 0.0)
+    assert np.all(results["none"][1] == 0.0)
+    for mode in ("optical_only", "none"):
+        np.testing.assert_array_equal(results[mode][0], broad_t)
+    cfg = _config(consistent=True)
+    cfg.agn.narrow_line_extrapolation = "none"
+    _, tr_none, _ = _run(cfg, monkeypatch)
+    assert np.all(_site(tr_none, "spectral_extrapolated_narrow_photometry") == 0.0)
