@@ -535,6 +535,26 @@ def test_fitted_redshift_weights_sum_to_one(fake_ssp, monkeypatch):
     np.testing.assert_allclose(np.asarray(cov.broad_anchor_weight)[anchored], covered[anchored], rtol=1e-12)
 
 
+def test_fitted_redshift_edges_sit_at_the_data_edges(fake_ssp, monkeypatch):
+    """The smoothed edge is centred on the first/last valid pixel with the documented width."""
+    import copy
+
+    from jaxsedfit.model import C_KMS, _inside_spectral_data
+
+    spec_rest = (1300.0, 2900.0)
+    context, _, _ = _run(_config(spec_rest=spec_rest), monkeypatch)
+    cfg = copy.deepcopy(context.fit_config)
+    cfg.observation.redshift_mode = "fit"
+    spec_wave = np.asarray(context.spec_wave_obs)
+    spec_min, spec_max = float(spec_wave.min()), float(spec_wave.max())
+    margin = cfg.agn.line_coverage_margin_kms / C_KMS
+    width = margin * 0.5 * (spec_min + spec_max) / 6.0
+    rest = np.array([spec_min, spec_min + width, spec_max, spec_max - width]) / (1.0 + REDSHIFT)
+    w = np.asarray(_inside_spectral_data(context, cfg, rest, REDSHIFT))
+    expected_core = 1.0 / (1.0 + np.exp(-1.0))
+    np.testing.assert_allclose(w, [0.5, expected_core, 0.5, expected_core], atol=1e-6)
+
+
 def test_zero_amplitude_component_leaves_its_line_out_of_the_denominator(fake_ssp, monkeypatch):
     context, _, _ = _run(_config(), monkeypatch)
     line_wave = np.asarray(context.templates.line_wave)
@@ -568,21 +588,25 @@ def test_zero_amplitude_component_leaves_its_line_out_of_the_denominator(fake_ss
 def test_unmatched_components_follow_their_own_centre(fake_ssp, monkeypatch):
     """Fitted lines without a template counterpart are counted only when their centre is in the data."""
     context, _, _ = _run(_config(spec_rest=(1300.0, 2900.0)), monkeypatch)
-    # Si III] 1892 and Al III 1857 (no template line) inside; H-delta 4102.89 and
-    # an 1817 A line placed outside by the spectrum range below/above.
-    nominal = np.array([1892.03, 1857.40, 4102.89, 1250.0])
+    # Si III] 1892 and Al III 1857 (no template line) lie inside the data;
+    # H-delta 4102.89 and a 1250 A line lie outside it, far from the edges;
+    # 2905 A lies outside the data but within the 3000 km/s (1%) margin of the
+    # red edge, so a margin applied to unmatched lines would count it.
+    nominal = np.array([1892.03, 1857.40, 4102.89, 1250.0, 2905.0])
+    n = nominal.size
     state = {
-        "line_amp_per_component": jnp.ones(4),
+        "line_amp_per_component": jnp.ones(n),
         "line_mu_per_component": jnp.asarray(np.log(nominal)),
         "line_ln_lambda0_per_component": jnp.asarray(np.log(nominal)),
-        "line_sig_per_component": jnp.full(4, 0.004),
-        "line_broad_mask_per_component": jnp.asarray([0.0, 0.0, 1.0, 1.0]),
+        "line_sig_per_component": jnp.full(n, 0.004),
+        "line_broad_mask_per_component": jnp.asarray([0.0, 0.0, 1.0, 1.0, 1.0]),
     }
     cov = _coverage(context, state)
     line_wave = np.asarray(context.templates.line_wave)
     rel = np.abs(nominal[None, :] / line_wave[:, None] - 1.0)
-    assert np.all(np.min(rel, axis=0)[:3] >= 0.005)  # the first three are unmatched
-    np.testing.assert_array_equal(np.asarray(cov.component_covered)[:3], [1.0, 1.0, 0.0])
+    assert np.all(np.min(rel, axis=0) >= 0.005)  # all are unmatched
+    assert abs(2905.0 / 2900.0 - 1.0) < 3000.0 / 299792.458  # inside the old margin
+    np.testing.assert_array_equal(np.asarray(cov.component_covered), [1.0, 1.0, 0.0, 0.0, 0.0])
     # Unmatched components never enter the anchors.
-    assert np.all(np.asarray(cov.broad_anchor_weight)[:3] == 0.0)
-    assert np.all(np.asarray(cov.narrow_anchor_weight)[:3] == 0.0)
+    assert np.all(np.asarray(cov.broad_anchor_weight) == 0.0)
+    assert np.all(np.asarray(cov.narrow_anchor_weight) == 0.0)
