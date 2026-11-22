@@ -3910,34 +3910,80 @@ def _project_spectral_line_state_filters(
 CONSISTENT_COVERAGE_MATCH_TOLERANCE = 0.005
 
 
-def _consistent_line_coverage(context: ModelContext, cfg: FitConfig, state, redshift, line_wave):
+class LineCoverage(NamedTuple):
+    """Per-component and per-template-line decisions of :func:`_consistent_line_coverage`."""
+
+    component_covered: Any
+    broad_anchor_weight: Any
+    narrow_anchor_weight: Any
+    template_outside: Any
+    broad_template_covered: Any
+    narrow_template_covered: Any
+
+
+def _inside_spectral_data(context: ModelContext, line_wave, redshift):
+    """Return 1 where a rest wavelength falls inside the valid spectral pixels' range."""
+    spec_wave = jnp.asarray(context.spec_wave_obs, dtype=jnp.float64)
+    valid = jnp.asarray(context.spec_mask, dtype=bool) & jnp.isfinite(spec_wave) & (spec_wave > 0.0)
+    spec_min = jnp.min(jnp.where(valid, spec_wave, jnp.inf))
+    spec_max = jnp.max(jnp.where(valid, spec_wave, -jnp.inf))
+    line_obs = jnp.asarray(line_wave, dtype=jnp.float64) * jnp.maximum(1.0 + redshift, 1.0e-8)
+    return ((line_obs >= spec_min) & (line_obs <= spec_max)).astype(jnp.float64)
+
+
+def _consistent_line_coverage(
+    context: ModelContext,
+    cfg: FitConfig,
+    state,
+    redshift,
+    line_wave,
+    line_blagn,
+    line_narrow_template,
+):
     """Decide fitted-or-extrapolated for every line with one centre-based rule.
 
-    A fitted spectral component is "covered" when its nominal rest wavelength
-    passes :func:`_photometric_agn_line_mask` (centre within the spectral
-    coverage +- ``agn.line_coverage_margin_kms``). An SED template line is
-    extrapolated unless it passes the same rule and a covered, non-zero fitted
-    component sits at its wavelength. Each transition is therefore counted
-    exactly once: by the fitted Gaussians when covered, by the template when not.
-
-    Returns
-    -------
-    component_covered : jax.Array
-        Weight per fitted component, shape (n_components,).
-    template_outside : jax.Array
-        Extrapolation mask per SED template line, shape (n_lines,).
+    * A fitted spectral component is covered when its nominal rest wavelength
+      passes :func:`_photometric_agn_line_mask` (centre within the spectral
+      coverage +- ``agn.line_coverage_margin_kms``); only covered components
+      enter the photometry.
+    * An SED template line is extrapolated when no covered, non-zero fitted
+      component sits at its wavelength (0.5% match) and its centre lies outside
+      the valid spectral pixels. Template lines inside the data without a fitted
+      counterpart are not extrapolated (the spectral model, which the spectrum
+      constrains, does not contain them).
+    * The extrapolation anchors use matched lines only: a covered broad (narrow)
+      component counts in the broad (narrow) numerator only if it matches a
+      template line with non-zero broad (narrow) weight whose centre is covered,
+      and the denominator sums exactly those template lines.
     """
     amps = jnp.asarray(state["line_amp_per_component"], dtype=jnp.float64)
     mus = jnp.asarray(state["line_mu_per_component"], dtype=jnp.float64)
+    broad_mask = jnp.asarray(state["line_broad_mask_per_component"], dtype=jnp.float64)
     nominal = jnp.exp(jnp.asarray(state.get("line_ln_lambda0_per_component", mus), dtype=jnp.float64))
     component_covered = 1.0 - _photometric_agn_line_mask(context, cfg, nominal, redshift)
     line_wave = jnp.asarray(line_wave, dtype=jnp.float64)
     centre_covered = 1.0 - _photometric_agn_line_mask(context, cfg, line_wave, redshift)
-    match = jnp.abs(nominal[None, :] / line_wave[:, None] - 1.0) < CONSISTENT_COVERAGE_MATCH_TOLERANCE
-    fitted_weight = component_covered * (amps != 0.0)
-    has_fitted = jnp.max(jnp.where(match, fitted_weight[None, :], 0.0), axis=1)
-    template_outside = 1.0 - centre_covered * has_fitted
-    return component_covered, template_outside
+    match = (jnp.abs(nominal[None, :] / line_wave[:, None] - 1.0) < CONSISTENT_COVERAGE_MATCH_TOLERANCE).astype(jnp.float64)
+    live = component_covered * (amps != 0.0)
+    has_fitted = jnp.max(match * live[None, :], axis=1)
+    inside_data = _inside_spectral_data(context, line_wave, redshift)
+    template_covered = has_fitted * centre_covered + (1.0 - has_fitted) * inside_data
+    broad_line = (jnp.asarray(line_blagn, dtype=jnp.float64) > 0.0).astype(jnp.float64)
+    narrow_line = (jnp.asarray(line_narrow_template, dtype=jnp.float64) > 0.0).astype(jnp.float64)
+    has_broad = jnp.max(match * (live * broad_mask)[None, :], axis=1)
+    has_narrow = jnp.max(match * (live * (1.0 - broad_mask))[None, :], axis=1)
+    broad_template_covered = centre_covered * has_broad * broad_line
+    narrow_template_covered = centre_covered * has_narrow * narrow_line
+    broad_anchor_weight = component_covered * broad_mask * jnp.max(match * broad_template_covered[:, None], axis=0)
+    narrow_anchor_weight = component_covered * (1.0 - broad_mask) * jnp.max(match * narrow_template_covered[:, None], axis=0)
+    return LineCoverage(
+        component_covered=component_covered,
+        broad_anchor_weight=broad_anchor_weight,
+        narrow_anchor_weight=narrow_anchor_weight,
+        template_outside=1.0 - template_covered,
+        broad_template_covered=broad_template_covered,
+        narrow_template_covered=narrow_template_covered,
+    )
 
 
 def _spectral_family_extrapolation(
@@ -3952,14 +3998,14 @@ def _spectral_family_extrapolation(
     line_blagn,
     line_narrow_template,
     *,
-    component_covered=None,
-    template_outside_mask=None,
+    coverage: "LineCoverage | None" = None,
 ):
     """Anchor fixed-ratio out-of-coverage lines to fitted spectral family fluxes.
 
-    With ``component_covered`` and ``template_outside_mask`` (from
-    :func:`_consistent_line_coverage`) only covered fitted components set the
-    anchors and widths, and only uncovered template lines are extrapolated.
+    With ``coverage`` (from :func:`_consistent_line_coverage`) the broad and
+    narrow anchors use only covered fitted components matched to template lines
+    of the same family, the denominators sum exactly those template lines, and
+    only template lines marked outside are extrapolated.
     """
     amps = jnp.asarray(state.get("line_amp_per_component", jnp.zeros(0)), dtype=jnp.float64)
     if not amps.size:
@@ -3974,30 +4020,39 @@ def _spectral_family_extrapolation(
     integrated_flux = amps * jnp.sqrt(2.0 * jnp.pi) * sigs / jnp.maximum(conversion * component_obs_wave, 1.0e-30)
     attenuation = 10 ** (_screen_magnitudes(ebv_total, component_wave) / -2.5)
     intrinsic_lumin = integrated_flux * 4.0 * jnp.pi * luminosity_distance_m**2 / jnp.maximum(attenuation, 1.0e-12)
-    if component_covered is not None:
-        intrinsic_lumin = intrinsic_lumin * component_covered
-    if template_outside_mask is not None:
-        outside_mask = template_outside_mask
+    if coverage is not None:
+        outside_mask = coverage.template_outside
+        broad_template_anchor = jnp.sum(line_blagn * coverage.broad_template_covered)
+        narrow_template_anchor = jnp.sum(line_narrow_template * coverage.narrow_template_covered)
+        broad_numerator = jnp.sum(intrinsic_lumin * coverage.broad_anchor_weight)
+        narrow_numerator = jnp.sum(intrinsic_lumin * coverage.narrow_anchor_weight)
+        # Widths from the same matched components.
+        broad_mask = coverage.broad_anchor_weight
+        intrinsic_lumin = intrinsic_lumin * (coverage.broad_anchor_weight + coverage.narrow_anchor_weight)
+        narrow_family = coverage.narrow_anchor_weight
     else:
         outside_mask = _photometric_agn_line_mask(context, cfg, line_wave, redshift)
-    covered_mask = 1.0 - outside_mask
-    broad_template_anchor = jnp.sum(line_blagn * covered_mask)
-    narrow_template_anchor = jnp.sum(line_narrow_template * covered_mask)
+        covered_mask = 1.0 - outside_mask
+        broad_template_anchor = jnp.sum(line_blagn * covered_mask)
+        narrow_template_anchor = jnp.sum(line_narrow_template * covered_mask)
+        broad_numerator = jnp.sum(intrinsic_lumin * broad_mask)
+        narrow_numerator = jnp.sum(intrinsic_lumin * (1.0 - broad_mask))
+        narrow_family = 1.0 - broad_mask
     broad_norm = jnp.where(
         broad_template_anchor > 0.0,
-        jnp.sum(intrinsic_lumin * broad_mask) / jnp.maximum(broad_template_anchor, 1.0e-30),
+        broad_numerator / jnp.maximum(broad_template_anchor, 1.0e-30),
         0.0,
     )
     narrow_norm = jnp.where(
         narrow_template_anchor > 0.0,
-        jnp.sum(intrinsic_lumin * (1.0 - broad_mask)) / jnp.maximum(narrow_template_anchor, 1.0e-30),
+        narrow_numerator / jnp.maximum(narrow_template_anchor, 1.0e-30),
         0.0,
     )
     broad_lumin = broad_norm * line_blagn * outside_mask
     narrow_lumin = narrow_norm * line_narrow_template * outside_mask
     positive = jnp.clip(intrinsic_lumin, 0.0, None)
     broad_weight = positive * broad_mask
-    narrow_weight = positive * (1.0 - broad_mask)
+    narrow_weight = positive * narrow_family
     component_fwhm = 299792.458 * 2.354820045 * sigs
     broad_width = jnp.exp(jnp.sum(broad_weight * jnp.log(jnp.maximum(component_fwhm, 1.0))) / jnp.maximum(jnp.sum(broad_weight), 1.0e-30))
     narrow_width = jnp.exp(jnp.sum(narrow_weight * jnp.log(jnp.maximum(component_fwhm, 1.0))) / jnp.maximum(jnp.sum(narrow_weight), 1.0e-30))
@@ -5204,6 +5259,21 @@ def evaluate_photometric_state(
                 numpyro.deterministic("spectral_line_model_aperture", spectral_line_model_aperture)
                 numpyro.deterministic("spectral_line_model_narrow_aperture", spectral_components["line_narrow"])
             spectral_state = spectral_components["state"]
+            line_coverage = None
+            component_weight = None
+            if bool(spectral_cfg.consistent_line_coverage) and jnp.size(
+                spectral_state.get("line_amp_per_component", jnp.zeros(0))
+            ):
+                line_coverage = _consistent_line_coverage(
+                    context,
+                    cfg,
+                    spectral_state,
+                    redshift,
+                    line_wave,
+                    line_blagn,
+                    jnp.where(agn_type == 3, line_liner, line_sy2),
+                )
+                component_weight = line_coverage.component_covered
             # Render the sampled spectral-feature state on the SED grid as
             # well. These are the same posterior line, Fe II, and Balmer
             # models used by the spectrum, not rescaled native templates.
@@ -5212,7 +5282,13 @@ def evaluate_photometric_state(
             spectral_sed_rendered = render_joint_feature_state(
                 obs_wave,
                 redshift,
-                spectral_state,
+                spectral_state
+                if component_weight is None
+                else {
+                    **spectral_state,
+                    # Plot only the fitted lines that enter the photometry.
+                    "line_amp_per_component": jnp.asarray(spectral_state["line_amp_per_component"]) * component_weight,
+                },
                 config=spectral_components["component_config"],
                 bal_continuum_mjy=_flambda_to_mjy(obs_wave, disk_obs_for_bal),
             )
@@ -5251,18 +5327,7 @@ def evaluate_photometric_state(
                 for component in getattr(component_config, "custom_components", ())
             ):
                 active_bal_component_config = component_config
-            coverage_kwargs = {}
-            component_weight = None
-            if bool(spectral_cfg.consistent_line_coverage) and jnp.size(
-                spectral_state.get("line_amp_per_component", jnp.zeros(0))
-            ):
-                component_weight, template_outside_mask = _consistent_line_coverage(
-                    context, cfg, spectral_state, redshift, line_wave
-                )
-                coverage_kwargs = {
-                    "component_covered": component_weight,
-                    "template_outside_mask": template_outside_mask,
-                }
+            coverage_kwargs = {} if line_coverage is None else {"coverage": line_coverage}
             spectral_broad_photometry = _project_spectral_line_state_filters(
                 context,
                 spectral_state,
@@ -5395,9 +5460,16 @@ def evaluate_photometric_state(
                 + spectral_extrapolated_broad_photometry
                 + spectral_extrapolated_narrow_photometry
             )
+            native_lines_in_agn = local_agn_line_fluxes
+            if line_coverage is not None and host_capture_enabled and fit_agn and include_sed_agn_features:
+                # agn_fluxes holds only the captured fraction of the native
+                # narrow lines (_apply_extended_capture); remove exactly that.
+                native_lines_in_agn = local_agn_line_fluxes - (
+                    agn_narrow_line_fluxes_total - captured_agn_narrow_line_fluxes
+                )
             native_replaced_photometry = jnp.where(
                 bool(spectral_cfg.fit_lines and include_spectral_lines),
-                local_agn_line_fluxes,
+                native_lines_in_agn,
                 jnp.zeros_like(local_agn_line_fluxes),
             )
             spectral_photometry_adjustment = shared_spectral_photometry - native_replaced_photometry

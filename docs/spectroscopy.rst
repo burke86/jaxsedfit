@@ -142,10 +142,26 @@ within ``agn.line_coverage_margin_kms``. A line between the two limits is then
 counted twice (fitted from one wing *and* extrapolated), and a narrow line can be
 counted by neither. ``AGNConfig(consistent_line_coverage=True)`` applies the
 centre rule to both: fitted components outside it are left out of the
-photometry and out of the anchor of the extrapolated lines, and template lines
-without a covered fitted counterpart are extrapolated, so each line is counted
-once. The sampled parameters are unchanged, but the photometric prediction (and
-therefore the likelihood) is, so fits should be rerun.
+photometry (and of the plotted SED) and out of the anchor of the extrapolated
+lines, and template lines outside the data without a covered fitted
+counterpart are extrapolated, so each line is counted once. Template lines
+inside the data that the spectral model does not contain are not extrapolated.
+The extrapolation anchors use only fitted components that match a template
+line of the same family (broad or narrow), and the template denominators sum
+exactly those lines. The switch also removes the native narrow SED lines from
+the AGN photometry in the amount actually included there (their host-captured
+fraction) rather than in full. The sampled parameters are unchanged, but the
+photometric prediction (and therefore the likelihood) is, so fits should be
+rerun.
+
+The rule is all-or-nothing by line centre: a fitted line whose centre lies
+just inside the coverage enters the photometry with its full symmetric profile
+(without IGM absorption), and a line whose centre lies just outside is taken
+from the template even though its wing still constrains the spectral fit.
+With a fitted redshift the coverage mask is a smooth weight ``w``, so a line
+counts as ``w`` (fitted) plus ``1 - w`` (template) only approximately. Gaps
+inside the spectrum are not modelled, and a fitted component whose amplitude
+is exactly zero counts as absent.
 
 Multiple spectra
 ----------------
