@@ -132,58 +132,45 @@ AGN continuum slope.
 Lines at the edge of the spectrum
 ---------------------------------
 
-In a joint fit each emission line reaches the photometry either as a fitted
-spectral Gaussian or, when the spectrum does not cover it, as a fixed-ratio
-template line scaled to the fitted lines. By default the two use different
-coverage rules: a spectral line is fitted when its broad wings reach the data
-(Ly-alpha whenever the spectrum starts blueward of about rest 1294 Å), while the
-template treats a line as uncovered unless its centre lies inside the data
-within ``agn.line_coverage_margin_kms``. A line between the two limits is then
-counted twice (fitted from one wing *and* extrapolated), and a narrow line can be
-counted by neither. ``AGNConfig(consistent_line_coverage=True)`` uses one rule
-for both: is the line centre inside the valid spectral pixels (no velocity
-margin)? Each fitted component is matched to its nearest template line (0.5%
-tolerance) and shares that line's decision; inside, the fitted component enters
-the photometry (and the plotted SED) and the template line is not
-extrapolated; outside, the template line is extrapolated and the component is
-left out, even if its wing reaches the data. Fitted components without a
-template counterpart use their own centre. Template lines inside the data that
-the spectral model does not contain are not extrapolated. The extrapolation
-anchors use only counted fitted components matched to a template line of the
-same family (broad or narrow), and the template denominators sum exactly those
-lines. ``agn.line_coverage_margin_kms`` is not used by this rule (only, with a
-fitted redshift, as the width of the smoothed data edges). The sampled
-parameters are unchanged, but the photometric prediction (and therefore the
-likelihood) is, so fits should be rerun.
+In a joint fit each emission line reaches the photometry exactly once: as the
+fitted spectral Gaussians when the spectrum covers it, or as a fixed-ratio
+template line scaled to the fitted lines when it does not. The decision is one
+rule per transition: is the line centre inside the valid spectral pixels? Each
+fitted component is matched to its nearest template line (0.5% tolerance) and
+shares that line's decision; inside, the fitted component enters the
+photometry (and the plotted SED) and the template line is not extrapolated;
+outside, the template line is extrapolated and the component is left out, even
+if its wing reaches the data (the tied-line table activates a line as soon as
+its broad wings reach the spectrum, e.g. Ly-alpha whenever the spectrum starts
+blueward of about rest 1294 Å). Fitted components without a template
+counterpart use their own centre. Template lines inside the data that the
+spectral model does not contain are not extrapolated. The extrapolation anchors
+use only counted fitted components matched to a template line of the same
+family (broad or narrow), and the template denominators sum exactly those
+lines. ``agn.line_coverage_margin_kms`` does not enter this rule; with a fitted
+redshift it sets the width over which the data edges are smoothed.
 
 Approximations: the decision is all-or-nothing per line, so a line whose centre
 lies just inside the data enters the photometry with its full symmetric fitted
 profile (without IGM absorption), and one whose centre lies just outside is
 taken from the template although its wing still constrains the spectral fit.
-With a fitted redshift the data edges are smoothed, so a line counts as
-``w`` (fitted) plus ``1 - w`` (template). Gaps inside the spectrum are not
-modelled, and a fitted component whose amplitude is exactly zero counts as
-absent.
+With a fitted redshift a transition counts as ``w`` (fitted) plus ``1 - w``
+(template). Gaps inside the spectrum are not modelled, and a fitted component
+whose amplitude is exactly zero counts as absent.
+
+With the host-capture model the photometry contains only the host-captured
+fraction of the native narrow SED lines; when the spectral model replaces the
+native lines, exactly that captured amount is removed.
 
 ``AGNConfig(narrow_line_extrapolation=...)`` controls the narrow lines outside
-the coverage, with or without ``consistent_line_coverage``: ``"template"``
-(default) scales the Seyfert-2 (or LINER) template to the fitted narrow
-components; ``"optical_only"`` drops the extrapolated narrow lines blueward of
-rest 3000 Å (Ly-beta/O VI to Mg II) and keeps the optical forbidden lines;
-``"none"`` drops all. In quasars the fitted "narrow" UV components mostly absorb
-broad-line cores, so scaling a Seyfert-2 template (Ly-alpha / C IV = 35 / 8) to
-them can add a large narrow Ly-alpha; with the continuum-EW broad-line anchor,
-whose QSOGEN equivalent widths already include any line core, a narrow UV
-extrapolation double counts by construction.
-
-``AGNConfig(subtract_captured_native_narrow_lines=True)`` fixes the replacement
-of the native SED lines by the spectral ones in joint fits with the host-capture
-model: the AGN photometry contains only the host-captured fraction of the
-native narrow lines, but the replacement subtracted them in full, so the
-uncaptured part was removed twice. With the switch only what is included is
-subtracted. This changes the photometric likelihood of every host-capture
-joint fit that uses local line photometry (e.g. the predicted u-band flux of
-z ~ 2 quasars rises by the uncaptured narrow Ly-alpha flux).
+the coverage: ``"template"`` (default) scales the Seyfert-2 (or LINER) template
+to the fitted narrow components; ``"optical_only"`` drops the extrapolated
+narrow lines blueward of rest 3000 Å (Ly-beta/O VI to Mg II) and keeps the
+optical forbidden lines; ``"none"`` drops all. In quasars the fitted "narrow"
+UV components mostly absorb broad-line cores, so scaling a Seyfert-2 template
+(Ly-alpha / C IV = 35 / 8) to them can add a large narrow Ly-alpha; with a
+continuum-EW broad-line anchor, whose QSOGEN equivalent widths already include
+any line core, a narrow UV extrapolation double counts by construction.
 
 Multiple spectra
 ----------------

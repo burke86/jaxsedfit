@@ -4028,10 +4028,10 @@ def _spectral_family_extrapolation(
 ):
     """Anchor fixed-ratio out-of-coverage lines to fitted spectral family fluxes.
 
-    With ``coverage`` (from :func:`_consistent_line_coverage`) the broad and
-    narrow anchors use only covered fitted components matched to template lines
-    of the same family, the denominators sum exactly those template lines, and
-    only template lines marked outside are extrapolated.
+    ``coverage`` (from :func:`_consistent_line_coverage`, computed here when not
+    given) decides which template lines are extrapolated; the broad and narrow
+    anchors use only counted fitted components matched to template lines of the
+    same family, and the denominators sum exactly those template lines.
     """
     amps = jnp.asarray(state.get("line_amp_per_component", jnp.zeros(0)), dtype=jnp.float64)
     if not amps.size:
@@ -4046,24 +4046,19 @@ def _spectral_family_extrapolation(
     integrated_flux = amps * jnp.sqrt(2.0 * jnp.pi) * sigs / jnp.maximum(conversion * component_obs_wave, 1.0e-30)
     attenuation = 10 ** (_screen_magnitudes(ebv_total, component_wave) / -2.5)
     intrinsic_lumin = integrated_flux * 4.0 * jnp.pi * luminosity_distance_m**2 / jnp.maximum(attenuation, 1.0e-12)
-    if coverage is not None:
-        outside_mask = coverage.template_outside
-        broad_template_anchor = jnp.sum(line_blagn * coverage.broad_template_covered)
-        narrow_template_anchor = jnp.sum(line_narrow_template * coverage.narrow_template_covered)
-        broad_numerator = jnp.sum(intrinsic_lumin * coverage.broad_anchor_weight)
-        narrow_numerator = jnp.sum(intrinsic_lumin * coverage.narrow_anchor_weight)
-        # Widths from the same matched components.
-        broad_mask = coverage.broad_anchor_weight
-        intrinsic_lumin = intrinsic_lumin * (coverage.broad_anchor_weight + coverage.narrow_anchor_weight)
-        narrow_family = coverage.narrow_anchor_weight
-    else:
-        outside_mask = _photometric_agn_line_mask(context, cfg, line_wave, redshift)
-        covered_mask = 1.0 - outside_mask
-        broad_template_anchor = jnp.sum(line_blagn * covered_mask)
-        narrow_template_anchor = jnp.sum(line_narrow_template * covered_mask)
-        broad_numerator = jnp.sum(intrinsic_lumin * broad_mask)
-        narrow_numerator = jnp.sum(intrinsic_lumin * (1.0 - broad_mask))
-        narrow_family = 1.0 - broad_mask
+    if coverage is None:
+        coverage = _consistent_line_coverage(
+            context, cfg, state, redshift, line_wave, line_blagn, line_narrow_template
+        )
+    outside_mask = coverage.template_outside
+    broad_template_anchor = jnp.sum(line_blagn * coverage.broad_template_covered)
+    narrow_template_anchor = jnp.sum(line_narrow_template * coverage.narrow_template_covered)
+    broad_numerator = jnp.sum(intrinsic_lumin * coverage.broad_anchor_weight)
+    narrow_numerator = jnp.sum(intrinsic_lumin * coverage.narrow_anchor_weight)
+    # Widths from the same matched components.
+    broad_mask = coverage.broad_anchor_weight
+    intrinsic_lumin = intrinsic_lumin * (coverage.broad_anchor_weight + coverage.narrow_anchor_weight)
+    narrow_family = coverage.narrow_anchor_weight
     broad_norm = jnp.where(
         broad_template_anchor > 0.0,
         broad_numerator / jnp.maximum(broad_template_anchor, 1.0e-30),
@@ -5292,9 +5287,7 @@ def evaluate_photometric_state(
             spectral_state = spectral_components["state"]
             line_coverage = None
             component_weight = None
-            if bool(spectral_cfg.consistent_line_coverage) and jnp.size(
-                spectral_state.get("line_amp_per_component", jnp.zeros(0))
-            ):
+            if jnp.size(spectral_state.get("line_amp_per_component", jnp.zeros(0))):
                 line_coverage = _consistent_line_coverage(
                     context,
                     cfg,
@@ -5492,11 +5485,7 @@ def evaluate_photometric_state(
                 + spectral_extrapolated_narrow_photometry
             )
             native_lines_in_agn = local_agn_line_fluxes
-            if (
-                bool(spectral_cfg.subtract_captured_native_narrow_lines)
-                and correct_agn_line_photometry
-                and host_capture_enabled
-            ):
+            if correct_agn_line_photometry and host_capture_enabled:
                 # agn_fluxes holds the local native lines with only the
                 # host-captured fraction of the narrow ones
                 # (_apply_extended_capture); remove exactly that.

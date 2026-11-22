@@ -343,25 +343,19 @@ class AGNConfig:
     use_smart_line_priors: bool = True
     fit_spectrum_tilt: bool = False
     line_flux_scale_mjy: float = 1.0
+    # Velocity margin [km/s] around the spectral coverage used to activate
+    # spectral Fe II / line-table coverage ranges, to bookkeep the native SED
+    # lines replaced by the spectral model, and (fitted redshift only) as the
+    # smoothing width of the data edges. Whether an emission line reaches the
+    # photometry as a fitted line or as an extrapolated template line is
+    # decided by its centre inside the valid pixels, without this margin.
     line_coverage_margin_kms: float = 3000.0
-    # Use one coverage rule for fitted and extrapolated lines: a fitted spectral
-    # line component enters the photometry only if its rest wavelength is
-    # inside the spectral coverage (+- line_coverage_margin_kms), and an SED
-    # template line is extrapolated only if no covered fitted component exists
-    # at its wavelength. Off by default (legacy behaviour).
-    consistent_line_coverage: bool = False
     # Narrow lines outside the spectral coverage: "template" (default) scales
     # the Seyfert-2/LINER template to the fitted narrow lines; "optical_only"
     # drops extrapolated narrow lines blueward of rest 3000 A (Ly-beta/O VI to
     # Mg II, where fitted "narrow" components absorb broad-line cores and
     # continuum-EW anchors already include them); "none" drops all.
     narrow_line_extrapolation: str = "template"
-    # In joint fits the native SED lines are replaced by the spectral ones. With
-    # the host-capture model agn_fluxes contains only the captured fraction of
-    # the native narrow lines, but the replacement subtracts them in full, so
-    # the uncaptured part is subtracted twice. True subtracts exactly what is
-    # included (changes the photometric likelihood of every host-capture fit).
-    subtract_captured_native_narrow_lines: bool = False
     # Rest-frame range [A] that fixes the tied-line set instead of each spectrum's
     # coverage; lines the spectra do not cover are then masked (zero amplitude), so
     # objects at different redshifts share one model structure (see fit_batch).
