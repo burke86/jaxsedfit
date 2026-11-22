@@ -343,3 +343,13 @@ def test_ew_scope_validation():
     assert AGNConfig(line_extrapolation_ew_scope=" ALL ").line_extrapolation_ew_scope == "all"
     with pytest.raises(ValueError, match="line_extrapolation_ew_scope"):
         AGNConfig(line_extrapolation_ew_scope="redward")
+
+
+def test_blueward_scope_excludes_lines_inside_the_spectrum(fake_ssp):
+    from jaxsedfit.model import _blueward_of_spectral_coverage
+
+    context = build_model_context(_joint_config(anchor="continuum_ew"))
+    waves = np.array([1215.0, 1999.0, 2001.0, 2798.0, 3001.0, 4861.0])
+    blue = np.asarray(_blueward_of_spectral_coverage(context, context.fit_config, waves, REDSHIFT))
+    # Spectrum covers rest 2000-3000 A: only lines blueward of 2000 A qualify.
+    assert blue.tolist() == [True, True, False, False, False, False]

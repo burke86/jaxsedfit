@@ -3898,17 +3898,16 @@ def _project_spectral_line_state_filters(
 
 
 def _blueward_of_spectral_coverage(context: ModelContext, cfg: FitConfig, line_wave, redshift):
-    """Return True for lines whose centre lies blueward of the spectrum's middle.
+    """Return True for lines whose centre lies blueward of the first valid spectral pixel.
 
-    Combined with the out-of-coverage mask this selects lines beyond the blue
-    coverage edge; covered lines are masked out by the caller.
+    Lines inside the observed range never qualify, independently of how the
+    caller masks covered lines (e.g. with ``consistent_line_coverage``).
     """
     spec_wave = jnp.asarray(context.spec_wave_obs, dtype=jnp.float64)
     valid = jnp.asarray(context.spec_mask, dtype=bool) & jnp.isfinite(spec_wave) & (spec_wave > 0.0)
     spec_min = jnp.min(jnp.where(valid, spec_wave, jnp.inf))
-    spec_max = jnp.max(jnp.where(valid, spec_wave, -jnp.inf))
     line_obs = jnp.asarray(line_wave, dtype=jnp.float64) * jnp.maximum(1.0 + redshift, 1.0e-8)
-    return line_obs < 0.5 * (spec_min + spec_max)
+    return line_obs < spec_min
 
 
 def _spectral_family_extrapolation(
