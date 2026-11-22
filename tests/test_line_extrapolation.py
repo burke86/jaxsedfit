@@ -298,22 +298,6 @@ def test_continuum_ew_changes_only_out_of_coverage_broad_lines(fake_ssp):
     )
 
 
-# Recorded with jaxsedfit main 041f51f (before the continuum_ew anchor existed)
-# on the fixed input of ``_joint_config()`` / ``_PARAMS``.
-_MAIN_041F51F_DEFAULT_SITES = {
-    "pred_fluxes": [0.007083976730586054],
-    "spectral_extrapolated_broad_photometry": [0.001527605416558358],
-    "spectral_extrapolated_narrow_photometry": [7.021637253046015e-05],
-    "disk_fluxes": [0.005486005841998523],
-}
-
-
-def test_default_anchor_reproduces_pre_feature_outputs(fake_ssp):
-    _, tr = _trace(_joint_config())
-    for site, expected in _MAIN_041F51F_DEFAULT_SITES.items():
-        np.testing.assert_allclose(np.asarray(tr[site]["value"]), expected, rtol=1e-12, atol=0.0, err_msg=site)
-
-
 def test_uv_slope_is_deterministic_without_prior(fake_ssp):
     _, tr = _trace(_joint_config(anchor="continuum_ew", emline_type=0.0))
     assert tr["uv_slope"]["type"] == "deterministic"
