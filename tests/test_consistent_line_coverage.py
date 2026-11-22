@@ -47,14 +47,15 @@ def fake_ssp(monkeypatch):
     monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
 
-def _config(consistent=None, host_capture=False):
+def _config(consistent=None, host_capture=False, spec_rest=SPEC_REST, agn_extra=None, local_lines=True):
     curves = []
     for name, (lo, hi) in BANDS_REST.items():
         wave = np.linspace(lo * (1 + REDSHIFT) - 1.0, hi * (1 + REDSHIFT) + 1.0, 600)
         trans = ((wave >= lo * (1 + REDSHIFT)) & (wave <= hi * (1 + REDSHIFT))).astype(float)
         curves.append(FilterCurve(name=name, wave=wave.tolist(), transmission=trans.tolist()))
-    spec_wave = np.geomspace(*SPEC_REST, 400) * (1.0 + REDSHIFT)
+    spec_wave = np.geomspace(*spec_rest, 400) * (1.0 + REDSHIFT)
     agn_kwargs = {} if consistent is None else {"consistent_line_coverage": consistent}
+    agn_kwargs.update(agn_extra or {})
     return FitConfig(
         observation=Observation(object_id="obj", redshift=REDSHIFT),
         photometry=PhotometryData(
@@ -74,7 +75,10 @@ def _config(consistent=None, host_capture=False):
             **agn_kwargs,
         ),
         likelihood=LikelihoodConfig(
-            variability_uncertainty=False, fit_spectrum_scale=False, use_host_capture_model=host_capture
+            variability_uncertainty=False,
+            fit_spectrum_scale=False,
+            use_host_capture_model=host_capture,
+            use_local_line_photometry=local_lines,
         ),
         spectroscopy=SpectroscopyData(
             **({"aperture_diameter_arcsec": 2.0} if host_capture else {}),
@@ -178,13 +182,18 @@ def test_lya_counted_once_when_spectrum_starts_at_1250(fake_ssp, monkeypatch):
     np.testing.assert_allclose(
         _site(tr_on, "spectral_line_photometry"), np.asarray(expected + expected_narrow), rtol=1e-12
     )
-    lya_only = _project_spectral_line_state_filters(
-        context_on, cap_on["state"], REDSHIFT, component_weight=jnp.asarray(lya.astype(float))
+    # Left out: Ly-alpha and N V (template 1240 A lies outside the data that
+    # start at 1250.5 A, inside only the 3000 km/s margin).
+    nv = np.abs(nominal - 1240.14) < 1.0
+    assert nv.any() and np.all(covered[nv] == 0.0)
+    assert np.array_equal(covered == 0.0, lya | nv)
+    dropped = _project_spectral_line_state_filters(
+        context_on, cap_on["state"], REDSHIFT, component_weight=jnp.asarray((lya | nv).astype(float))
     )
-    assert float(lya_only[band]) > 0.0
+    assert float(dropped[band]) > 0.0
     np.testing.assert_allclose(
         _site(tr_off, "spectral_line_photometry")[band] - _site(tr_on, "spectral_line_photometry")[band],
-        float(lya_only[band]),
+        float(dropped[band]),
         rtol=1e-9,
     )
     # Ly-alpha is still extrapolated once from the template.
@@ -217,6 +226,12 @@ def test_lines_fully_inside_or_outside_are_unchanged(fake_ssp, monkeypatch):
     assert _site(tr_on, "spectral_extrapolated_broad_photometry")[lyb_band] > 0.0
 
 
+def _inside(line_wave, spec_rest=SPEC_REST):
+    obs = np.asarray(line_wave) * (1.0 + REDSHIFT)
+    lo, hi = np.array(spec_rest) * (1.0 + REDSHIFT)
+    return (obs >= lo) & (obs <= hi)
+
+
 def test_template_lines_without_fitted_counterpart(fake_ssp, monkeypatch):
     context, _, cap = _run(_config(consistent=False), monkeypatch)
     state = cap["state"]
@@ -225,18 +240,88 @@ def test_template_lines_without_fitted_counterpart(fake_ssp, monkeypatch):
     covered, outside = _coverage_arrays(context, state)
     legacy_outside = np.asarray(_photometric_agn_line_mask(context, context.fit_config, line_wave, REDSHIFT))
     has_component = np.array([np.any(np.abs(nominal / w - 1.0) < 0.005) for w in line_wave])
-    obs = line_wave * (1.0 + REDSHIFT)
-    spec_obs = np.array(SPEC_REST) * (1.0 + REDSHIFT)
-    inside = (obs >= spec_obs[0]) & (obs <= spec_obs[1])
-    # Inside the data and not in the spectral model: not extrapolated (as before).
+    inside = _inside(line_wave)
+    # Inside the data and not in the spectral model: not extrapolated.
     in_data = inside & ~has_component
     assert in_data.any() and np.all(outside[in_data] == 0.0)
-    # In the coverage margin but outside the data and not fitted: legacy counts
-    # it nowhere; now it is extrapolated once.
-    margin = (legacy_outside == 0.0) & ~inside & ~has_component
+    # Centre within the 3000 km/s margin but outside the data (N V 1240 for a
+    # spectrum starting at 1250.5 A): extrapolated, and any fitted counterpart
+    # is left out of the photometry.
+    margin = (legacy_outside == 0.0) & ~inside
+    assert margin.any(), "test spectrum must leave a template line in the margin"
+    assert 1240.0 in set(np.round(line_wave[margin]))
     assert np.all(outside[margin] == 1.0)
-    both = (legacy_outside == 0.0) & has_component
-    assert both.any() and np.all(outside[both] == 0.0)
+    for w in line_wave[margin]:
+        assert np.all(covered[np.abs(nominal / w - 1.0) < 0.005] == 0.0)
+
+
+def _template_counts(context, state, spec_rest):
+    """Return per template line (counted as fitted, counted as extrapolated)."""
+    cov = _coverage(context, state)
+    line_wave = np.asarray(context.templates.line_wave)
+    nominal = _nominal(state)
+    live = np.asarray(state["line_amp_per_component"]) != 0.0
+    rel = np.abs(nominal[None, :] / line_wave[:, None] - 1.0)
+    nearest = np.argmin(rel, axis=0)
+    within = np.min(rel, axis=0) < 0.005
+    fitted = np.zeros(line_wave.size)
+    for c in range(nominal.size):
+        if within[c] and live[c]:
+            fitted[nearest[c]] = max(fitted[nearest[c]], float(np.asarray(cov.component_covered)[c]))
+    return fitted, np.asarray(cov.template_outside), within, nearest
+
+
+@pytest.mark.parametrize(
+    "spec_rest",
+    [(start, 2900.0) for start in (1200.0, 1210.0, 1215.0, 1216.0, 1227.5, 1236.0, 1241.0, 1250.5, 1300.0, 1396.0, 1401.0, 1405.0, 1416.0)]
+    + [(1300.0, end) for end in (2790.0, 2798.5, 2800.0, 2826.4, 4858.0, 4862.0, 4910.5)],
+)
+def test_every_template_line_counted_once_across_spectrum_edges(fake_ssp, monkeypatch, spec_rest):
+    context, _, cap = _run(_config(consistent=True, spec_rest=spec_rest), monkeypatch)
+    state = cap["state"]
+    fitted, extrapolated, within, nearest = _template_counts(context, state, spec_rest)
+    line_wave = np.asarray(context.templates.line_wave)
+    has_counterpart = np.zeros(line_wave.size, dtype=bool)
+    has_counterpart[nearest[within]] = True
+    total = fitted + extrapolated
+    # Exactly once for every line with a fitted counterpart; template-only
+    # lines are extrapolated outside the data and absent inside it.
+    np.testing.assert_array_equal(total[has_counterpart], 1.0)
+    np.testing.assert_array_equal(extrapolated[~has_counterpart], (~_inside(line_wave, spec_rest)[~has_counterpart]).astype(float))
+
+
+def test_anchor_numerator_and_denominator_use_the_same_lines(fake_ssp, monkeypatch):
+    """If the counted fitted lines follow the template ratio, every extrapolated line does too."""
+    context, _, cap = _run(_config(consistent=True), monkeypatch)
+    line_wave = np.asarray(context.templates.line_wave)
+    blagn = np.asarray(context.templates.line_blagn)
+    # Fitted broad components only at C IV, C III] and Mg II (inside the data);
+    # N IV] 1486, He II 1640, N III] 1750 are template lines inside the data with
+    # no fitted counterpart and must not enter the denominator.
+    picks = [1549.0, 1909.0, 2798.0]
+    idx = [int(np.flatnonzero(np.abs(line_wave - w) < 1.0)[0]) for w in picks]
+    nominal = line_wave[idx]
+    sigs = np.full(len(idx), 0.004)
+    amps = blagn[idx] * nominal * (1.0 + REDSHIFT) / sigs  # L_c proportional to blagn
+    state = {
+        "line_amp_per_component": jnp.asarray(amps),
+        "line_mu_per_component": jnp.asarray(np.log(nominal)),
+        "line_ln_lambda0_per_component": jnp.asarray(np.log(nominal)),
+        "line_sig_per_component": jnp.asarray(sigs),
+        "line_broad_mask_per_component": jnp.ones(len(idx)),
+    }
+    cov = _coverage(context, state)
+    broad, _, _, _ = model_module._spectral_family_extrapolation(
+        context, context.fit_config, state, REDSHIFT, 1.0e26, 0.0, jnp.ones_like(context.rest_wave_jax),
+        jnp.asarray(line_wave), jnp.asarray(blagn), jnp.asarray(context.templates.line_sy2), coverage=cov,
+    )
+    broad = np.asarray(broad)
+    extrapolated = (np.asarray(cov.template_outside) > 0.0) & (blagn > 0.0)
+    assert extrapolated.any()
+    ratios = broad[extrapolated] / blagn[extrapolated]
+    conversion = 1.0e-10 / 299792458.0 * 1.0e29
+    lumin = amps * np.sqrt(2.0 * np.pi) * sigs / (conversion * nominal * (1.0 + REDSHIFT)) * 4.0 * np.pi * 1.0e52
+    np.testing.assert_allclose(ratios, lumin[0] / blagn[idx[0]], rtol=1e-10)
 
 
 def _unmatched_amplitude_scan(context, state, select):
@@ -329,24 +414,26 @@ def test_plotted_line_sed_omits_uncovered_fitted_components(fake_ssp, monkeypatc
 
 def test_native_narrow_lines_removed_as_captured(fake_ssp, monkeypatch):
     """agn_fluxes keeps only the captured native narrow lines; the switch removes exactly that."""
-    _, tr_off, _ = _run(_config(consistent=False, host_capture=True), monkeypatch)
-    _, tr_on, _ = _run(_config(consistent=True, host_capture=True), monkeypatch)
+    switch = {"subtract_captured_native_narrow_lines": True}
+    _, tr_off, _ = _run(_config(host_capture=True), monkeypatch)
+    _, tr_on, _ = _run(_config(host_capture=True, agn_extra=switch), monkeypatch)
     total = _site(tr_on, "agn_narrow_line_fluxes_total")
     captured = _site(tr_on, "captured_agn_narrow_line_fluxes")
-    if np.allclose(total, captured):
-        pytest.skip("host capture inactive in this configuration")
-    # The extra continuum is exactly the uncaptured native narrow flux (other
-    # terms differ through the coverage rule; compare the replaced part only).
-    agn_minus_spectral = lambda tr: _site(tr, "agn_fluxes") - sum(
-        _site(tr, name) for name in (
-            "spectral_line_photometry", "spectral_extrapolated_broad_photometry",
-            "spectral_extrapolated_narrow_photometry", "spectral_feii_photometry",
-            "spectral_extrapolated_feii_photometry", "spectral_balmer_photometry",
-        )
-    )
+    assert np.any(total > 0.0) and np.any(captured < 0.99 * total), "host capture must be active here"
+    np.testing.assert_allclose(_site(tr_on, "agn_fluxes") - _site(tr_off, "agn_fluxes"), total - captured, rtol=1e-9)
+    # pred_fluxes is dominated by the (fake) host here; compare to its precision.
+    pred_scale = np.max(np.abs(_site(tr_off, "pred_fluxes")))
     np.testing.assert_allclose(
-        agn_minus_spectral(tr_on) - agn_minus_spectral(tr_off), total - captured, rtol=1e-9, atol=1e-15
+        _site(tr_on, "pred_fluxes") - _site(tr_off, "pred_fluxes"), total - captured, rtol=0, atol=1e-14 * pred_scale
     )
+
+
+def test_native_narrow_fix_inactive_without_local_line_photometry(fake_ssp, monkeypatch):
+    switch = {"subtract_captured_native_narrow_lines": True}
+    _, tr_off, _ = _run(_config(host_capture=True, local_lines=False), monkeypatch)
+    _, tr_on, _ = _run(_config(host_capture=True, local_lines=False, agn_extra=switch), monkeypatch)
+    for site in ("agn_fluxes", "pred_fluxes"):
+        np.testing.assert_array_equal(_site(tr_on, site), _site(tr_off, site))
 
 
 def test_narrow_line_extrapolation_modes(fake_ssp, monkeypatch):
@@ -382,3 +469,34 @@ def test_narrow_line_extrapolation_modes(fake_ssp, monkeypatch):
     cfg.agn.narrow_line_extrapolation = "none"
     _, tr_none, _ = _run(cfg, monkeypatch)
     assert np.all(_site(tr_none, "spectral_extrapolated_narrow_photometry") == 0.0)
+
+
+def test_optical_only_threshold_on_fixed_lines(fake_ssp, monkeypatch):
+    import copy
+
+    # The spectrum stops at rest 2600 A so Mg II 2798 is extrapolated too.
+    context, _, cap = _run(_config(consistent=True, spec_rest=(1250.5, 2600.0)), monkeypatch)
+    args = list(cap["args"])
+    line_wave = np.asarray(args[7])
+    out = {}
+    for mode in ("template", "optical_only"):
+        cfg = copy.deepcopy(args[1])
+        cfg.agn.narrow_line_extrapolation = mode
+        out[mode] = np.asarray(model_module._spectral_family_extrapolation(args[0], cfg, *args[2:], **cap["kwargs"])[1])
+    for rest, kept in ((1215.0, False), (2798.0, False), (3426.0, True), (3727.0, True), (5007.0, True)):
+        index = np.flatnonzero(np.abs(line_wave - rest) < 2.0)
+        assert index.size, rest
+        index = int(index[0])
+        assert out["template"][index] > 0.0, rest
+        assert (out["optical_only"][index] == out["template"][index]) == kept, rest
+        assert (out["optical_only"][index] == 0.0) == (not kept), rest
+
+
+def test_narrow_mode_is_normalized_in_validate():
+    cfg = _config(consistent=True)
+    cfg.agn.narrow_line_extrapolation = " Optical_Only "
+    cfg.validate()
+    assert cfg.agn.narrow_line_extrapolation == "optical_only"
+    cfg.agn.narrow_line_extrapolation = "uv"
+    with pytest.raises(ValueError, match="narrow_line_extrapolation"):
+        cfg.validate()
