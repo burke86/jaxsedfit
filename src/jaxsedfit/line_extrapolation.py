@@ -34,6 +34,7 @@ import numpy as np
 
 LINE_EXTRAPOLATION_ANCHORS = ("fitted_lines", "continuum_ew")
 DEFAULT_LINE_EXTRAPOLATION_ANCHOR = "fitted_lines"
+LINE_EXTRAPOLATION_EW_SCOPES = ("blueward", "all")
 
 QSOGEN_LINE_EW_RESOURCE = "resources/templates/qsogen_line_ew.txt"
 QSOGEN_EMLINE_TYPE_MIN = -2.0
@@ -56,6 +57,15 @@ def normalize_line_extrapolation_anchor(value) -> str:
         allowed = ", ".join(repr(name) for name in LINE_EXTRAPOLATION_ANCHORS)
         raise ValueError(f"AGNConfig.line_extrapolation_anchor must be one of {allowed}; got {value!r}.")
     return anchor
+
+
+def normalize_line_extrapolation_ew_scope(value) -> str:
+    """Return the canonical continuum-EW scope or raise ``ValueError``."""
+    scope = str(value).strip().lower()
+    if scope not in LINE_EXTRAPOLATION_EW_SCOPES:
+        allowed = ", ".join(repr(name) for name in LINE_EXTRAPOLATION_EW_SCOPES)
+        raise ValueError(f"AGNConfig.line_extrapolation_ew_scope must be one of {allowed}; got {value!r}.")
+    return scope
 
 
 @dataclass(frozen=True)

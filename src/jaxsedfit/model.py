@@ -3897,6 +3897,20 @@ def _project_spectral_line_state_filters(
     return _project_local_grid_filters(context, obs_line_wave, flambda)
 
 
+def _blueward_of_spectral_coverage(context: ModelContext, cfg: FitConfig, line_wave, redshift):
+    """Return True for lines whose centre lies blueward of the spectrum's middle.
+
+    Combined with the out-of-coverage mask this selects lines beyond the blue
+    coverage edge; covered lines are masked out by the caller.
+    """
+    spec_wave = jnp.asarray(context.spec_wave_obs, dtype=jnp.float64)
+    valid = jnp.asarray(context.spec_mask, dtype=bool) & jnp.isfinite(spec_wave) & (spec_wave > 0.0)
+    spec_min = jnp.min(jnp.where(valid, spec_wave, jnp.inf))
+    spec_max = jnp.max(jnp.where(valid, spec_wave, -jnp.inf))
+    line_obs = jnp.asarray(line_wave, dtype=jnp.float64) * jnp.maximum(1.0 + redshift, 1.0e-8)
+    return line_obs < 0.5 * (spec_min + spec_max)
+
+
 def _spectral_family_extrapolation(
     context: ModelContext,
     cfg: FitConfig,
@@ -3917,7 +3931,8 @@ def _spectral_family_extrapolation(
     Narrow lines scale the fixed-ratio narrow template to the fitted covered
     narrow lines. Broad lines follow ``cfg.agn.line_extrapolation_anchor``:
     ``"fitted_lines"`` scales the broad template to the fitted covered broad
-    lines; ``"continuum_ew"`` uses
+    lines; ``"continuum_ew"`` uses (for lines selected by
+    ``cfg.agn.line_extrapolation_ew_scope``; others keep the fitted anchor)
     :func:`jaxsedfit.line_extrapolation.continuum_ew_broad_line_luminosity`,
     which needs the unattenuated disc ``L_lambda`` [W/A] at ``line_wave``
     (``disc_llambda_at_lines``) and at rest 2500 A (``disc_llambda_2500``).
@@ -3956,13 +3971,20 @@ def _spectral_family_extrapolation(
 
         if disc_llambda_at_lines is None or disc_llambda_2500 is None:
             raise ValueError("The continuum_ew line anchor needs the disc L_lambda at the lines and at 2500 A.")
-        broad_lumin = continuum_ew_broad_line_luminosity(
+        continuum_lumin = continuum_ew_broad_line_luminosity(
             context.templates.line_wave,
             context.templates.line_blagn,
             disc_llambda_at_lines,
             disc_llambda_2500,
             emline_type=cfg.agn.line_extrapolation_emline_type,
-        ) * outside_mask
+        )
+        if cfg.agn.line_extrapolation_ew_scope == "all":
+            broad_lumin = continuum_lumin * outside_mask
+        else:
+            # Only lines blueward of the spectrum's blue edge use the EW anchor;
+            # redward lines keep the fitted-line anchor.
+            blueward = _blueward_of_spectral_coverage(context, cfg, line_wave, redshift)
+            broad_lumin = jnp.where(blueward, continuum_lumin, broad_norm * line_blagn) * outside_mask
     else:
         broad_lumin = broad_norm * line_blagn * outside_mask
     narrow_lumin = narrow_norm * line_narrow_template * outside_mask

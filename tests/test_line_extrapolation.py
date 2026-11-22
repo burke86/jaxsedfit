@@ -59,6 +59,8 @@ def test_qsogen_table_matches_composite_sanity_ranges():
     assert 24.0 < _ew("CIV") < 50.0
     assert 15.0 < _ew("CIII]+AlIII+SiIII]") < 40.0
     assert 25.0 < _ew("MgII") < 55.0
+    # H-beta side bands must avoid its red wing and Fe II 4924/5018 (about 60-66 A).
+    assert 55.0 < _ew("Hb") < 75.0
     # Baldwin effect: fainter quasars (larger emline_type) have stronger Ly-alpha and C IV.
     assert _ew("Lya+NV", 1.0) > _ew("Lya+NV", 0.0) > _ew("Lya+NV", -1.0)
     assert _ew("CIV", 1.0) > _ew("CIV", 0.0) > _ew("CIV", -1.0)
@@ -150,6 +152,7 @@ def test_agn_config_line_extrapolation_fields_round_trip_and_default_for_old_con
     legacy = full.to_dict()
     del legacy["agn"]["line_extrapolation_anchor"]
     del legacy["agn"]["line_extrapolation_emline_type"]
+    del legacy["agn"]["line_extrapolation_ew_scope"]
     legacy_cfg = fit_config_from_mapping(legacy)
     assert legacy_cfg.agn.line_extrapolation_anchor == "fitted_lines"
     assert legacy_cfg.agn.line_extrapolation_emline_type is None
@@ -171,15 +174,31 @@ def fake_ssp(monkeypatch):
     monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
 
-def _joint_config(anchor="fitted_lines", emline_type=None):
-    band_obs = np.array(BAND_REST) * (1.0 + REDSHIFT)
+def _top_hat(name, band_rest):
+    band_obs = np.array(band_rest) * (1.0 + REDSHIFT)
     filter_wave = np.linspace(band_obs[0] - 1.0, band_obs[1] + 1.0, 600)
     filter_trans = ((filter_wave >= band_obs[0]) & (filter_wave <= band_obs[1])).astype(float)
+    return FilterCurve(name=name, wave=filter_wave.tolist(), transmission=filter_trans.tolist())
+
+
+# Rest-frame H-alpha band, redward of the rest 2000-3000 A spectrum.
+RED_BAND_REST = (6300.0, 6800.0)
+
+
+def _joint_config(anchor="fitted_lines", emline_type=None, scope=None, red_band=False):
     spec_wave = np.linspace(2000.0, 3000.0, 200) * (1.0 + REDSHIFT)
+    curves = [_top_hat("civ_band", BAND_REST)]
+    if red_band:
+        curves.append(_top_hat("ha_band", RED_BAND_REST))
+    scope_kwargs = {} if scope is None else {"line_extrapolation_ew_scope": scope}
     return FitConfig(
         observation=Observation(object_id="obj", redshift=REDSHIFT),
-        photometry=PhotometryData(filter_names=["civ_band"], fluxes=[1.0], errors=[0.1]),
-        filters=FilterSet(curves=[FilterCurve(name="civ_band", wave=filter_wave.tolist(), transmission=filter_trans.tolist())]),
+        photometry=PhotometryData(
+            filter_names=[curve.name for curve in curves],
+            fluxes=[1.0] * len(curves),
+            errors=[0.1] * len(curves),
+        ),
+        filters=FilterSet(curves=curves),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=512, fit_host=False),
         agn=AGNConfig(
             fit_lines=True,
@@ -189,6 +208,7 @@ def _joint_config(anchor="fitted_lines", emline_type=None):
             line_flux_scale_mjy=0.1,
             line_extrapolation_anchor=anchor,
             line_extrapolation_emline_type=emline_type,
+            **scope_kwargs,
         ),
         likelihood=LikelihoodConfig(variability_uncertainty=False, fit_spectrum_scale=False),
         spectroscopy=SpectroscopyData(
@@ -203,7 +223,6 @@ def _joint_config(anchor="fitted_lines", emline_type=None):
 
 _PARAMS = {
     "log_agn_amp": np.array(85.0),
-    "uv_slope": np.array(0.0),
     "pl_slope": np.array(-1.5),
     "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
     "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
@@ -293,3 +312,34 @@ def test_default_anchor_reproduces_pre_feature_outputs(fake_ssp):
     _, tr = _trace(_joint_config())
     for site, expected in _MAIN_041F51F_DEFAULT_SITES.items():
         np.testing.assert_allclose(np.asarray(tr[site]["value"]), expected, rtol=1e-12, atol=0.0, err_msg=site)
+
+
+def test_uv_slope_is_deterministic_without_prior(fake_ssp):
+    _, tr = _trace(_joint_config(anchor="continuum_ew", emline_type=0.0))
+    assert tr["uv_slope"]["type"] == "deterministic"
+    assert float(np.asarray(tr["uv_slope"]["value"])) == 0.0
+
+
+def test_ew_scope_blueward_keeps_fitted_anchor_redward(fake_ssp):
+    sites = {}
+    for label, kwargs in {
+        "fitted": {},
+        "blueward": {"anchor": "continuum_ew", "emline_type": 0.0},
+        "all": {"anchor": "continuum_ew", "emline_type": 0.0, "scope": "all"},
+    }.items():
+        _, tr = _trace(_joint_config(red_band=True, **kwargs))
+        sites[label] = np.asarray(tr["spectral_extrapolated_broad_photometry"]["value"])
+    assert _joint_config(anchor="continuum_ew").agn.line_extrapolation_ew_scope == "blueward"
+    blue, red = 0, 1
+    # Blue band: both continuum_ew scopes anchor C IV to the continuum.
+    assert sites["blueward"][blue] == sites["all"][blue]
+    assert sites["blueward"][blue] != sites["fitted"][blue]
+    # Red band (H-alpha): "blueward" keeps the fitted-line anchor, "all" does not.
+    assert sites["blueward"][red] == pytest.approx(sites["fitted"][red], rel=1e-12)
+    assert sites["all"][red] != pytest.approx(sites["fitted"][red], rel=1e-3)
+
+
+def test_ew_scope_validation():
+    assert AGNConfig(line_extrapolation_ew_scope=" ALL ").line_extrapolation_ew_scope == "all"
+    with pytest.raises(ValueError, match="line_extrapolation_ew_scope"):
+        AGNConfig(line_extrapolation_ew_scope="redward")

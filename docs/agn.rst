@@ -70,6 +70,15 @@ chooses how their broad-line luminosities are set:
    instead. Lines without a QSOGEN counterpart keep their template ratio to the
    anchored lines.
 
+   ``line_extrapolation_ew_scope`` selects which uncovered lines use this
+   anchor: ``"blueward"`` (default) only lines blueward of the spectrum's blue
+   edge, so lines redward of the spectrum keep the fitted-line anchor (which
+   then rests on fitted lines such as H-beta that the spectrum does cover);
+   ``"all"`` every uncovered broad line. QSOGEN's near-IR equivalent widths are
+   measured against its disk plus hot-dust continuum while the anchor
+   multiplies the disk alone, so ``"all"`` overstates He I 10830 and Pa-alpha
+   relative to QSOGEN.
+
 Both anchors return intrinsic luminosities that are attenuated, IGM-absorbed
 and projected through the filters identically. Narrow lines and the Fe II
 extrapolation always use the fitted anchor. The anchor changes no sampled

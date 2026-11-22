@@ -2560,8 +2560,9 @@ class JAXSEDFit:
             Optional callable applied to the restored :class:`FitConfig` before
             the model context is built, e.g. to change a prediction-only option
             such as ``agn.line_extrapolation_anchor``. The saved posterior draws
-            are reused unchanged, so only options that do not alter the sampled
-            parameter set are meaningful here.
+            are reused unchanged: stored predictions and summaries are dropped,
+            and a ``ValueError`` is raised if the transformed model has a latent
+            site missing from the draws or with a different shape.
 
         Returns
         -------
@@ -2608,7 +2609,31 @@ class JAXSEDFit:
         fitter.nuts_result = payload.get("nuts_diagnostics")
         fitter._saved_summary = payload.get("summary")
         fitter._loaded_posterior_path = posterior_path
+        if config_transform is not None:
+            # Stored predictions and summaries describe the original
+            # configuration; regenerate them from the draws instead.
+            fitter.predictive = None
+            fitter._saved_summary = None
+            if fitter.samples is not None:
+                fitter._require_samples_match_model_latents(posterior_path)
         return fitter
+
+    def _require_samples_match_model_latents(self, source) -> None:
+        """Raise if the stored draws do not cover this model's latent sites."""
+        traced = _trace_latent_values(self._model, self.config.inference.seed)
+        problems = []
+        for name, value in sorted(traced.items()):
+            if name not in self.samples:
+                problems.append(f"{name} (not in the stored draws)")
+                continue
+            stored_shape = tuple(np.shape(self.samples[name])[1:])
+            if stored_shape != tuple(np.shape(value)):
+                problems.append(f"{name} (stored per-draw shape {stored_shape}, model {tuple(np.shape(value))})")
+        if problems:
+            raise ValueError(
+                "config_transform changed the sampled parameter set of "
+                f"{source}; the stored draws cannot be reused: " + "; ".join(problems)
+            )
 
     load_from_samples = load
 

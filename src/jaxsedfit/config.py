@@ -353,6 +353,12 @@ class AGNConfig:
     # Fixed QSOGEN emline_type for "continuum_ew"; None follows QSOGEN's
     # luminosity (Baldwin-effect) relation evaluated on the fitted disc.
     line_extrapolation_emline_type: float | None = None
+    # Which out-of-coverage broad lines "continuum_ew" anchors: "blueward"
+    # (lines blueward of the spectrum's blue coverage edge; redward lines keep
+    # the fitted-line anchor) or "all". QSOGEN's near-IR EWs are relative to
+    # disc plus hot dust while the anchor multiplies the disc alone, so "all"
+    # overstates the near-IR lines (Pa-alpha, He I 10830) relative to QSOGEN.
+    line_extrapolation_ew_scope: str = "blueward"
     # Rest-frame range [A] that fixes the tied-line set instead of each spectrum's
     # coverage; lines the spectra do not cover are then masked (zero amplitude), so
     # objects at different redshifts share one model structure (see fit_batch).
@@ -415,9 +421,11 @@ class AGNConfig:
             QSOGEN_EMLINE_TYPE_MAX,
             QSOGEN_EMLINE_TYPE_MIN,
             normalize_line_extrapolation_anchor,
+            normalize_line_extrapolation_ew_scope,
         )
 
         self.line_extrapolation_anchor = normalize_line_extrapolation_anchor(self.line_extrapolation_anchor)
+        self.line_extrapolation_ew_scope = normalize_line_extrapolation_ew_scope(self.line_extrapolation_ew_scope)
         if self.line_extrapolation_emline_type is not None:
             value = float(self.line_extrapolation_emline_type)
             if not (np.isfinite(value) and QSOGEN_EMLINE_TYPE_MIN <= value <= QSOGEN_EMLINE_TYPE_MAX):

@@ -408,6 +408,15 @@ def test_load_from_samples_requires_unique_posterior_file(monkeypatch, tmp_path)
         JAXSEDFit.load(tmp_path)
 
 
+_STUB_LATENTS = (
+    "joint_reduced_chi2",
+    "log_spectrum_scale",
+    "log_stellar_mass",
+    "sed_reduced_chi2",
+    "spectroscopy_reduced_chi2",
+)
+
+
 def test_load_config_transform_applies_before_context_and_round_trips_anchor(monkeypatch, tmp_path):
     built = []
     monkeypatch.setattr(
@@ -415,7 +424,8 @@ def test_load_config_transform_applies_before_context_and_round_trips_anchor(mon
         lambda config: built.append(config.agn.line_extrapolation_anchor) or SimpleNamespace(mw_ebv=0.03),
     )
     fitter = JAXSEDFit(_minimal_config())
-    fitter.samples = {"log_stellar_mass": np.array([10.0, 10.2])}
+    fitter.samples = {name: np.array([0.1, 0.2]) for name in _STUB_LATENTS}
+    fitter.samples["log_stellar_mass"] = np.array([10.0, 10.2])
     saved_path = fitter.save(tmp_path)
 
     plain = JAXSEDFit.load(saved_path)
@@ -435,3 +445,49 @@ def test_load_config_transform_applies_before_context_and_round_trips_anchor(mon
     assert JAXSEDFit.load(resaved).config.agn.line_extrapolation_anchor == "continuum_ew"
     with pytest.raises(TypeError, match="config_transform"):
         JAXSEDFit.load(saved_path, config_transform=lambda config: None)
+
+
+def test_load_config_transform_drops_stale_predictions_and_summary(monkeypatch, tmp_path):
+    monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.03))
+    loaded_payload = {
+        "config": serialize_config(_minimal_config()),
+        "summary": {"stale": 1.0},
+        "samples": {name: np.array([0.1, 0.2]) for name in _STUB_LATENTS},
+        "predictive": {"pred_fluxes": np.array([[1.0], [1.1]])},
+    }
+    path = tmp_path / "roundtrip_samples.h5"
+    with h5py.File(path, "w") as h5f:
+        for section in ("config", "summary"):
+            JAXSEDFit._write_hdf5_node(h5f, section, loaded_payload[section])
+        for group in ("samples", "predictive"):
+            for key, value in loaded_payload[group].items():
+                h5f.create_dataset(f"{group}/{key}", data=value)
+
+    plain = JAXSEDFit.load(path)
+    assert plain.predictive is not None
+    assert plain._saved_summary == {"stale": 1.0}
+    transformed = JAXSEDFit.load(path, config_transform=lambda config: config)
+    assert transformed.predictive is None
+    assert transformed._saved_summary is None
+
+
+@pytest.mark.parametrize(
+    ("samples", "message"),
+    [
+        ({name: np.zeros(2) for name in _STUB_LATENTS if name != "log_spectrum_scale"}, "log_spectrum_scale"),
+        ({**{name: np.zeros(2) for name in _STUB_LATENTS}, "log_stellar_mass": np.zeros((2, 3))}, "per-draw shape"),
+    ],
+)
+def test_load_config_transform_rejects_changed_sampled_parameter_set(monkeypatch, tmp_path, samples, message):
+    monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.03))
+    fitter = JAXSEDFit(_minimal_config())
+    fitter.samples = samples
+    path = tmp_path / "roundtrip_samples.h5"
+    with h5py.File(path, "w") as h5f:
+        JAXSEDFit._write_hdf5_node(h5f, "config", serialize_config(fitter.config))
+        for key, value in samples.items():
+            h5f.create_dataset(f"samples/{key}", data=value)
+
+    assert set(JAXSEDFit.load(path).samples) == set(samples)
+    with pytest.raises(ValueError, match=message):
+        JAXSEDFit.load(path, config_transform=lambda config: config)
