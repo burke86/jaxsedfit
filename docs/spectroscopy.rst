@@ -129,6 +129,54 @@ output is ``spectral_continuum_tilt``. Leave it off unless the spectrum's shape 
 known to be unreliable: it is partly degenerate with the dust attenuation and the
 AGN continuum slope.
 
+Lines at the edge of the spectrum
+---------------------------------
+
+In a joint fit each emission line reaches the photometry exactly once: as the
+fitted spectral Gaussians when the spectrum covers it, or as a fixed-ratio
+template line scaled to the fitted lines when it does not. The decision is one
+rule per transition: is the line centre inside the valid spectral pixels? Each
+fitted component is matched to its nearest template line (0.5% tolerance) and
+shares that line's decision; inside, the fitted component enters the
+photometry (and the plotted SED) and the template line is not extrapolated;
+outside, the template line is extrapolated and the component is left out, even
+if its wing reaches the data (the tied-line table activates a line as soon as
+its broad wings reach the spectrum, e.g. Ly-alpha whenever the spectrum starts
+blueward of about rest 1294 Å). Fitted components without a template
+counterpart use their own centre. Template lines inside the data that the
+spectral model does not contain are not extrapolated. The extrapolation anchors
+use only counted fitted components matched to a template line of the same
+family (broad or narrow), and the template denominators sum exactly those
+lines. ``agn.line_coverage_margin_kms`` does not enter this rule; with a fitted
+redshift it sets the width over which the data edges are smoothed.
+
+Approximations: the decision is all-or-nothing per line, so a line whose centre
+lies just inside the data enters the photometry with its full symmetric fitted
+profile (without IGM absorption), and one whose centre lies just outside is
+taken from the template although its wing still constrains the spectral fit.
+With a fitted redshift a transition counts as ``w`` (fitted) plus ``1 - w``
+(template). Gaps inside the spectrum are not modelled, and a fitted component
+whose amplitude is exactly zero counts as absent. A fitted line whose nearest
+template line is a different transition shares that line's decision: fitted
+[N II] 6549.85 has no 6548 template line, so it follows H-alpha (it is dropped
+for spectra ending between 6550 and 6563 Å although inside the data, and it
+enters the narrow anchor against H-alpha's narrow weight); this only matters
+at z below about 0.4.
+
+With the host-capture model the photometry contains only the host-captured
+fraction of the native narrow SED lines; when the spectral model replaces the
+native lines, exactly that captured amount is removed.
+
+``AGNConfig(narrow_line_extrapolation=...)`` controls the narrow lines outside
+the coverage: ``"template"`` (default) scales the Seyfert-2 (or LINER) template
+to the fitted narrow components; ``"optical_only"`` drops the extrapolated
+narrow lines blueward of rest 3000 Å (Ly-beta/O VI to Mg II) and keeps the
+optical forbidden lines; ``"none"`` drops all. In quasars the fitted "narrow"
+UV components mostly absorb broad-line cores, so scaling a Seyfert-2 template
+(Ly-alpha / C IV = 35 / 8) to them can add a large narrow Ly-alpha; with a
+continuum-EW broad-line anchor, whose QSOGEN equivalent widths already include
+any line core, a narrow UV extrapolation double counts by construction.
+
 Multiple spectra
 ----------------
 
