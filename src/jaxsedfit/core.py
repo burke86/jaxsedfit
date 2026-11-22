@@ -328,6 +328,33 @@ def _use_callback_gradient(kernel, rng_key, init_strategy):
     )
 
 
+def _use_callback_gradient_if_safe(kernel, rng_key, init_strategy, num_chains):
+    """Apply ``_use_callback_gradient`` if XLA's CPU pool cannot deadlock on it.
+
+    Each callback that is running blocks one thread of XLA's CPU pool (see
+    ``_xla_threads``), so the pool needs one more thread than the callbacks that can run
+    at once. Otherwise warn and leave ``kernel`` compiling the gradient inside NUTS.
+    Returns whether the callback is used.
+    """
+    # Assumes NumPyro's default chain_method="parallel": chains run in parallel (one
+    # callback running per chain) only when there is a CPU device per chain; otherwise
+    # NumPyro runs them one after another and one callback runs at a time.
+    parallel_chains = num_chains if 1 < num_chains <= jax.local_device_count() else 1
+    if _xla_threads.callback_is_safe(parallel_chains):
+        _use_callback_gradient(kernel, rng_key, init_strategy)
+        return True
+    warnings.warn(
+        "XLA's CPU thread pool is too small for the NUTS gradient callback "
+        f"({parallel_chains} parallel chain(s) need {parallel_chains + 1} threads), "
+        "which would deadlock; compiling the gradient inside NUTS instead. To keep the "
+        "callback, import jaxsedfit before JAX runs anything, or set PJRT_NPROC to at least "
+        f"{parallel_chains + 1} before JAX starts.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return False
+
+
 def _defer_nuts_postprocessing(kernel):
     """Make ``kernel``'s compiled sampling loop collect only unconstrained latent values.
 
@@ -1878,20 +1905,7 @@ class JAXSEDFit:
         kernel = NUTS(nuts_model, init_strategy=init_strategy, **kernel_options)
         constrain_fn = _defer_nuts_postprocessing(kernel)
         if bool(getattr(inference, "nuts_gradient_callback", False)):
-            # NumPyro runs chains in parallel (one callback waiting per chain) only when
-            # there is a CPU device per chain; otherwise one callback waits at a time.
-            parallel_chains = num_chains if 1 < num_chains <= jax.local_device_count() else 1
-            if _xla_threads.callback_is_safe(parallel_chains):
-                _use_callback_gradient(kernel, rng_key, init_strategy)
-            else:
-                warnings.warn(
-                    "XLA's CPU thread pool is too small for the NUTS gradient callback "
-                    f"({parallel_chains} parallel chain(s) need {parallel_chains + 1} threads), "
-                    "which would deadlock; compiling the gradient inside NUTS instead. Set "
-                    "PJRT_NPROC before JAX starts, or import jaxsedfit first, to keep the callback.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+            _use_callback_gradient_if_safe(kernel, rng_key, init_strategy, num_chains)
         mcmc = MCMC(
             kernel,
             num_warmup=num_warmup,

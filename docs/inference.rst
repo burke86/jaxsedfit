@@ -169,13 +169,18 @@ compiling a joint fit take seconds instead of minutes and cuts the memory severa
 for a few percent slower sampling. Set it to ``False`` to compile the gradient inside
 the sampler instead.
 
-The callback needs two or more threads in XLA's CPU thread pool: with one, the
-callback's computation waits for the pool thread it is running on, and the fit
-hangs. XLA sizes the pool from ``PJRT_NPROC``, else ``NPROC``, else the CPUs the
-process may use, so a one-CPU batch job gets one thread. Importing jaxsedfit before
-JAX runs anything sets ``PJRT_NPROC=2`` in that case (the two threads share the one
-CPU). If JAX started earlier with a one-thread pool, NUTS warns and compiles the
-gradient inside the sampler instead.
+The callback needs XLA's CPU thread pool to keep a thread free: each running callback
+blocks one, and its computation waits for another. With one thread, the fit hangs.
+XLA sizes the pool once, from ``PJRT_NPROC``, else ``NPROC``, else the CPUs the process
+may use (never below the number of CPU devices), so a one-CPU batch job gets one thread.
+When jaxsedfit is imported before JAX runs anything and ``PJRT_NPROC`` is not set, it
+sets ``PJRT_NPROC`` in ``os.environ`` to ``max(2, devices + 1)`` if the pool would be
+smaller; the threads share the allocated CPUs. Subprocesses started afterwards inherit
+the variable. For parallel chains, set the CPU device count
+(``--xla_force_host_platform_device_count`` or ``jax_num_cpu_devices``) before importing
+jaxsedfit so that it is counted. An explicit ``PJRT_NPROC`` is left alone. If the pool
+is still too small (JAX started first, or ``PJRT_NPROC`` was set too low), NUTS warns
+and compiles the gradient inside the sampler instead.
 
 If NUTS keeps reaching the maximum tree depth:
 
