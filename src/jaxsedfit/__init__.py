@@ -5,6 +5,12 @@ its parts), the single-object fitter :class:`JAXSEDFit`, :func:`fit_batch` for m
 objects, results, plotting and simulation helpers.
 """
 
+from ._xla_threads import reserve_callback_threads as _reserve_callback_threads
+
+# Must run before the JAX backend starts (see _xla_threads): a one-thread XLA:CPU pool
+# deadlocks the NUTS gradient callback.
+_reserve_callback_threads()
+
 from .config import (
     AGNConfig,
     EmissionLineTemplate,

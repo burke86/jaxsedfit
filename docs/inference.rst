@@ -169,6 +169,14 @@ compiling a joint fit take seconds instead of minutes and cuts the memory severa
 for a few percent slower sampling. Set it to ``False`` to compile the gradient inside
 the sampler instead.
 
+The callback needs two or more threads in XLA's CPU thread pool: with one, the
+callback's computation waits for the pool thread it is running on, and the fit
+hangs. XLA sizes the pool from ``PJRT_NPROC``, else ``NPROC``, else the CPUs the
+process may use, so a one-CPU batch job gets one thread. Importing jaxsedfit before
+JAX runs anything sets ``PJRT_NPROC=2`` in that case (the two threads share the one
+CPU). If JAX started earlier with a one-thread pool, NUTS warns and compiles the
+gradient inside the sampler instead.
+
 If NUTS keeps reaching the maximum tree depth:
 
 1. check the MAP with a ``"map"`` fit, and inspect the printed NumPyro diagnostics;

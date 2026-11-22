@@ -8,6 +8,7 @@ products, and saves, loads and plots fits.
 from __future__ import annotations
 
 import gc
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
@@ -39,6 +40,7 @@ from numpyro.infer.util import initialize_model
 from numpyro.infer.reparam import Reparam
 from numpyro.diagnostics import print_summary as print_diagnostics_summary
 
+from . import _xla_threads
 from .approximate import gaussian_vi, laplace_draws, latent_sites, site_transforms
 from .config import FitConfig, fit_config_from_mapping, serialize_config
 from .inference import (
@@ -1876,7 +1878,20 @@ class JAXSEDFit:
         kernel = NUTS(nuts_model, init_strategy=init_strategy, **kernel_options)
         constrain_fn = _defer_nuts_postprocessing(kernel)
         if bool(getattr(inference, "nuts_gradient_callback", False)):
-            _use_callback_gradient(kernel, rng_key, init_strategy)
+            # NumPyro runs chains in parallel (one callback waiting per chain) only when
+            # there is a CPU device per chain; otherwise one callback waits at a time.
+            parallel_chains = num_chains if 1 < num_chains <= jax.local_device_count() else 1
+            if _xla_threads.callback_is_safe(parallel_chains):
+                _use_callback_gradient(kernel, rng_key, init_strategy)
+            else:
+                warnings.warn(
+                    "XLA's CPU thread pool is too small for the NUTS gradient callback "
+                    f"({parallel_chains} parallel chain(s) need {parallel_chains + 1} threads), "
+                    "which would deadlock; compiling the gradient inside NUTS instead. Set "
+                    "PJRT_NPROC before JAX starts, or import jaxsedfit first, to keep the callback.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         mcmc = MCMC(
             kernel,
             num_warmup=num_warmup,
