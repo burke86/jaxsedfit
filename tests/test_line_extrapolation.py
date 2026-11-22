@@ -249,37 +249,47 @@ def _trace(cfg):
     return context, trace(model).get_trace(context, include_components=True)
 
 
-def test_continuum_ew_band_flux_ratio_matches_equivalent_width(fake_ssp):
-    """A known EW on the fitted disc gives the expected line-to-disc band flux ratio.
+def test_continuum_ew_band_flux_ratio_matches_equivalent_width(fake_ssp, monkeypatch):
+    """A known EW on the fitted continuum gives the expected line-to-disc band flux ratio.
 
-    Unit chain: EW [A] x disc L_lambda [W/A] = line luminosity [W], attenuated,
-    redshifted and projected by ``_project_integrated_local_line_filters`` into
-    mJy; the disc goes through the ordinary SED projection into mJy. In a
-    top-hat band over rest 1450-1700 A on a nearly flat continuum the ratio is
-    sum(EW_i L_lambda(lambda_i)) / integral(L_lambda dlambda) over the band.
+    Unit chain: EW [A] x continuum L_lambda [W/A] = line luminosity [W],
+    attenuated, redshifted and projected by ``_project_integrated_local_line_filters``
+    into mJy; the disc goes through the ordinary SED projection into mJy. In a
+    top-hat band the ratio is sum_i(L_i f_i) / integral(L_lambda dlambda), with
+    f_i the fraction of line i's Gaussian profile inside the band.
     """
+    from math import erf, sqrt
+
+    captured = _spy_extrapolation(monkeypatch)
     cfg = _joint_config(anchor="continuum_ew", emline_type=0.0)
     context, tr = _trace(cfg)
     line_flux = float(np.asarray(tr["spectral_extrapolated_broad_photometry"]["value"])[0])
     disk_flux = float(np.asarray(tr["disk_fluxes"]["value"])[0])
+    broad, _, width_kms, _ = (np.asarray(x) for x in captured["out"])
+    continuum = np.asarray(captured["kwargs"]["agn_continuum_at_lines"])
 
     rest = np.asarray(context.rest_wave, dtype=float)
     disk_rest = np.asarray(tr["disk_rest_sed"]["value"], dtype=float)
     wave = np.asarray(context.templates.line_wave)
     blagn = np.asarray(context.templates.line_blagn)
-    disc_at_lines = np.exp(np.interp(np.log(wave), np.log(rest), np.log(disk_rest)))
     ew_matrix, _ = qsogen_line_ew_matrix(wave, blagn)
     grid = load_qsogen_line_ew_table().emline_type_grid
     ew = np.array([np.interp(0.0, grid, row) for row in ew_matrix])
     in_band = (wave > BAND_REST[0]) & (wave < BAND_REST[1]) & (blagn > 0.0)
     assert set(np.round(wave[in_band])) == {1486.0, 1549.0, 1640.0, 1663.0}
-    band = np.linspace(*BAND_REST, 2001)
-    expected_ratio = np.sum(ew[in_band] * disc_at_lines[in_band]) / np.trapezoid(
-        np.exp(np.interp(np.log(band), np.log(rest), np.log(disk_rest))), band
+    np.testing.assert_allclose(broad[in_band], ew[in_band] * continuum[in_band], rtol=1e-10)
+    sigma = wave * float(width_kms) / 299792.458 / 2.354820045
+    lo, hi = BAND_REST
+    fraction = np.array(
+        [0.5 * (erf((hi - w) / (sqrt(2.0) * s)) - erf((lo - w) / (sqrt(2.0) * s))) for w, s in zip(wave, sigma)]
     )
-    # QSOGEN: C IV + N IV] + He II + O III] ~ 53 A over a 250 A band.
-    assert expected_ratio == pytest.approx((_ew("CIV") + _ew("HeII+OIII]")) / (BAND_REST[1] - BAND_REST[0]), rel=0.1)
-    assert line_flux / disk_flux == pytest.approx(expected_ratio, rel=0.02)
+    band = np.linspace(*BAND_REST, 2001)
+    disc_band = np.trapezoid(np.exp(np.interp(np.log(band), np.log(rest), np.log(disk_rest))), band)
+    expected_ratio = np.sum(broad * fraction) / disc_band
+    # QSOGEN: C IV + N IV] + He II + O III] ~ 53 A over the band.
+    in_band_ratio = np.sum(ew[in_band] * continuum[in_band]) / disc_band
+    assert in_band_ratio == pytest.approx((_ew("CIV") + _ew("HeII+OIII]")) / (hi - lo), rel=0.1)
+    assert line_flux / disk_flux == pytest.approx(expected_ratio, rel=0.01)
 
 
 def test_default_anchor_is_bit_identical_to_explicit_fitted_lines(fake_ssp):
