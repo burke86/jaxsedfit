@@ -156,7 +156,12 @@ profile (without IGM absorption), and one whose centre lies just outside is
 taken from the template although its wing still constrains the spectral fit.
 With a fitted redshift a transition counts as ``w`` (fitted) plus ``1 - w``
 (template). Gaps inside the spectrum are not modelled, and a fitted component
-whose amplitude is exactly zero counts as absent.
+whose amplitude is exactly zero counts as absent. A fitted line whose nearest
+template line is a different transition shares that line's decision: fitted
+[N II] 6549.85 has no 6548 template line, so it follows H-alpha (it is dropped
+for spectra ending between 6550 and 6563 Å although inside the data, and it
+enters the narrow anchor against H-alpha's narrow weight); this only matters
+at z below about 0.4.
 
 With the host-capture model the photometry contains only the host-captured
 fraction of the native narrow SED lines; when the spectral model replaces the

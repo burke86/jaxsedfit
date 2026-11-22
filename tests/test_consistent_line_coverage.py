@@ -245,7 +245,9 @@ def _template_counts(context, state, spec_rest):
 @pytest.mark.parametrize(
     "spec_rest",
     [(start, 2900.0) for start in (1200.0, 1210.0, 1215.0, 1216.0, 1227.5, 1236.0, 1241.0, 1250.5, 1300.0, 1396.0, 1401.0, 1405.0, 1416.0)]
-    + [(1300.0, end) for end in (2790.0, 2798.5, 2800.0, 2826.4, 4858.0, 4862.0, 4910.5)],
+    + [(1300.0, end) for end in (2790.0, 2798.5, 2800.0, 2826.4, 4858.0, 4862.0, 4910.5)]
+    # H-alpha / [N II] / [S II] edges.
+    + [(1300.0, end) for end in (6530.0, 6550.0, 6556.0, 6562.5, 6563.5, 6570.0, 6583.5, 6590.0, 6716.5, 6725.0, 6731.5, 6740.0)],
 )
 def test_every_template_line_counted_once_across_spectrum_edges(fake_ssp, monkeypatch, spec_rest):
     context, _, cap = _run(_config(spec_rest=spec_rest), monkeypatch)
@@ -259,6 +261,13 @@ def test_every_template_line_counted_once_across_spectrum_edges(fake_ssp, monkey
     # lines are extrapolated outside the data and absent inside it.
     np.testing.assert_array_equal(total[has_counterpart], 1.0)
     np.testing.assert_array_equal(extrapolated[~has_counterpart], (~_inside(line_wave, spec_rest)[~has_counterpart]).astype(float))
+    # Unmatched fitted components follow their own centre, without a margin.
+    nominal = _nominal(state)
+    covered = np.asarray(_coverage(context, state).component_covered)
+    own_inside = _inside(nominal, spec_rest)
+    np.testing.assert_array_equal(covered[~within], own_inside[~within].astype(float))
+    # Matched components follow their template line exactly.
+    np.testing.assert_array_equal(covered[within], _inside(line_wave[nearest[within]], spec_rest).astype(float))
 
 
 def test_anchor_numerator_and_denominator_use_the_same_lines(fake_ssp, monkeypatch):
@@ -492,3 +501,88 @@ def test_narrow_mode_is_normalized_in_validate():
     cfg.agn.narrow_line_extrapolation = "uv"
     with pytest.raises(ValueError, match="narrow_line_extrapolation"):
         cfg.validate()
+
+
+def test_fitted_redshift_weights_sum_to_one(fake_ssp, monkeypatch):
+    """With a fitted redshift the data edges are smoothed; each transition still counts once."""
+    import copy
+
+    spec_rest = (1216.0, 2900.0)  # Ly-alpha sits on the smoothed blue edge
+    context, _, cap = _run(_config(spec_rest=spec_rest), monkeypatch)
+    cfg = copy.deepcopy(context.fit_config)
+    cfg.observation.redshift_mode = "fit"
+    assert cfg.observation.fits_redshift
+    state = cap["state"]
+    line_wave = np.asarray(context.templates.line_wave)
+    cov = _consistent_line_coverage(
+        context, cfg, state, REDSHIFT, line_wave,
+        np.asarray(context.templates.line_blagn), np.asarray(context.templates.line_sy2),
+    )
+    covered = np.asarray(cov.component_covered)
+    outside = np.asarray(cov.template_outside)
+    nominal = _nominal(state)
+    rel = np.abs(nominal[None, :] / line_wave[:, None] - 1.0)
+    nearest, within = np.argmin(rel, axis=0), np.min(rel, axis=0) < 0.005
+    weights = covered[within]
+    assert np.any((weights > 0.01) & (weights < 0.99)), "need a partially covered line"
+    for c in np.flatnonzero(within):
+        assert covered[c] + outside[nearest[c]] == pytest.approx(1.0, abs=1e-12)
+    broad = np.asarray(state["line_broad_mask_per_component"]) > 0.5
+    blagn = np.asarray(context.templates.line_blagn)
+    live = np.asarray(state["line_amp_per_component"]) != 0.0
+    anchored = within & broad & live & (blagn[nearest] > 0.0)
+    # The anchor weight equals the counted weight (not its square).
+    np.testing.assert_allclose(np.asarray(cov.broad_anchor_weight)[anchored], covered[anchored], rtol=1e-12)
+
+
+def test_zero_amplitude_component_leaves_its_line_out_of_the_denominator(fake_ssp, monkeypatch):
+    context, _, _ = _run(_config(), monkeypatch)
+    line_wave = np.asarray(context.templates.line_wave)
+    blagn = np.asarray(context.templates.line_blagn)
+    picks = [1549.0, 1909.0, 2798.0]
+    idx = [int(np.flatnonzero(np.abs(line_wave - w) < 1.0)[0]) for w in picks]
+    nominal = line_wave[idx]
+    sigs = np.full(len(idx), 0.004)
+    amps = blagn[idx] * nominal * (1.0 + REDSHIFT) / sigs
+    amps[1] = 0.0  # C III] fitted with zero amplitude: absent
+    state = {
+        "line_amp_per_component": jnp.asarray(amps),
+        "line_mu_per_component": jnp.asarray(np.log(nominal)),
+        "line_ln_lambda0_per_component": jnp.asarray(np.log(nominal)),
+        "line_sig_per_component": jnp.asarray(sigs),
+        "line_broad_mask_per_component": jnp.ones(len(idx)),
+    }
+    cov = _coverage(context, state)
+    assert float(np.asarray(cov.broad_template_covered)[idx[1]]) == 0.0
+    broad, _, _, _ = model_module._spectral_family_extrapolation(
+        context, context.fit_config, state, REDSHIFT, 1.0e26, 0.0, jnp.ones_like(context.rest_wave_jax),
+        jnp.asarray(line_wave), jnp.asarray(blagn), jnp.asarray(context.templates.line_sy2), coverage=cov,
+    )
+    broad = np.asarray(broad)
+    extrapolated = (np.asarray(cov.template_outside) > 0.0) & (blagn > 0.0)
+    conversion = 1.0e-10 / 299792458.0 * 1.0e29
+    lumin0 = amps[0] * np.sqrt(2.0 * np.pi) * sigs[0] / (conversion * nominal[0] * (1.0 + REDSHIFT)) * 4.0 * np.pi * 1.0e52
+    np.testing.assert_allclose(broad[extrapolated] / blagn[extrapolated], lumin0 / blagn[idx[0]], rtol=1e-10)
+
+
+def test_unmatched_components_follow_their_own_centre(fake_ssp, monkeypatch):
+    """Fitted lines without a template counterpart are counted only when their centre is in the data."""
+    context, _, _ = _run(_config(spec_rest=(1300.0, 2900.0)), monkeypatch)
+    # Si III] 1892 and Al III 1857 (no template line) inside; H-delta 4102.89 and
+    # an 1817 A line placed outside by the spectrum range below/above.
+    nominal = np.array([1892.03, 1857.40, 4102.89, 1250.0])
+    state = {
+        "line_amp_per_component": jnp.ones(4),
+        "line_mu_per_component": jnp.asarray(np.log(nominal)),
+        "line_ln_lambda0_per_component": jnp.asarray(np.log(nominal)),
+        "line_sig_per_component": jnp.full(4, 0.004),
+        "line_broad_mask_per_component": jnp.asarray([0.0, 0.0, 1.0, 1.0]),
+    }
+    cov = _coverage(context, state)
+    line_wave = np.asarray(context.templates.line_wave)
+    rel = np.abs(nominal[None, :] / line_wave[:, None] - 1.0)
+    assert np.all(np.min(rel, axis=0)[:3] >= 0.005)  # the first three are unmatched
+    np.testing.assert_array_equal(np.asarray(cov.component_covered)[:3], [1.0, 1.0, 0.0])
+    # Unmatched components never enter the anchors.
+    assert np.all(np.asarray(cov.broad_anchor_weight)[:3] == 0.0)
+    assert np.all(np.asarray(cov.narrow_anchor_weight)[:3] == 0.0)
