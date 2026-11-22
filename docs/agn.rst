@@ -74,7 +74,16 @@ spectrum). ``line_extrapolation_anchor`` chooses how their luminosities are set:
    to the anchored lines. Narrow lines use QSOGEN's narrow-line template
    ([O III] 5007 about 13 Å at typical luminosity); QSOGEN has no narrow UV or
    near-IR lines (its broad Ly-alpha already includes any core), so those get
-   zero. Narrow lines remain subject to host capture.
+   zero. Narrow lines remain subject to host capture. The split between narrow
+   H-alpha (9.0 Å) and [N II] 6583 (3.0 Å) is an artefact of QSOGEN's 10.7 Å
+   sampling there; their total (about 12-13 Å) is the meaningful number.
+
+   The torus is the counterpart of QSOGEN's hot-dust blackbody, but at the
+   catalog-median parameters of a large SDSS sample its hot dust at 1-2 µm is
+   much weaker than QSOGEN's, while the disk is brighter there relative to
+   5100 Å (about 1.8x at 1.08 µm, i.e. flatter in :math:`L_\lambda`). Relative
+   to QSOGEN the near-IR lines therefore come out about 1.5x high for He I
+   10830 and about 0.5x low for Pa-alpha; this depends on each fit.
 
    ``line_extrapolation_ew_scope`` selects which uncovered lines use this
    anchor: ``"all"`` (default) lines on both sides of the spectrum;

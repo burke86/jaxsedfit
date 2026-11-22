@@ -4016,7 +4016,7 @@ def _blueward_of_spectral_coverage(context: ModelContext, cfg: FitConfig, line_w
     """Return True for lines whose centre lies blueward of the first valid spectral pixel.
 
     Lines inside the observed range never qualify, independently of how the
-    caller masks covered lines (e.g. with ``consistent_line_coverage``).
+    caller decides which lines are extrapolated.
     """
     spec_wave = jnp.asarray(context.spec_wave_obs, dtype=jnp.float64)
     valid = jnp.asarray(context.spec_mask, dtype=bool) & jnp.isfinite(spec_wave) & (spec_wave > 0.0)

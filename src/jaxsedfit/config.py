@@ -358,9 +358,10 @@ class AGNConfig:
     narrow_line_extrapolation: str = "template"
     # Luminosity anchor for broad lines outside the spectral coverage, which
     # are still needed by the photometry. "fitted_lines" scales the fixed-ratio
-    # broad template to the fitted covered lines; "continuum_ew" ties each line
-    # to the fitted disc continuum through QSOGEN rest equivalent widths (see
-    # jaxsedfit.line_extrapolation). Narrow lines and Fe II are unaffected.
+    # broad (and narrow) templates to the fitted covered lines; "continuum_ew"
+    # ties each broad and narrow line to the fitted AGN continuum (disc +
+    # torus) through QSOGEN rest equivalent widths (see
+    # jaxsedfit.line_extrapolation). Fe II is unaffected.
     line_extrapolation_anchor: str = "fitted_lines"
     # Fixed QSOGEN emline_type for "continuum_ew"; None follows QSOGEN's
     # luminosity (Baldwin-effect) relation evaluated on the fitted disc.

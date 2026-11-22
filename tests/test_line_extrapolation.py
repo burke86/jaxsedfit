@@ -429,3 +429,35 @@ def test_blueward_scope_excludes_lines_inside_the_spectrum(fake_ssp):
     blue = np.asarray(_blueward_of_spectral_coverage(context, context.fit_config, waves, REDSHIFT))
     # Spectrum covers rest 2000-3000 A: only lines blueward of 2000 A qualify.
     assert blue.tolist() == [True, True, False, False, False, False]
+
+
+def _narrow_out(monkeypatch, scope, mode):
+    captured = _spy_extrapolation(monkeypatch)
+    cfg = _joint_config(anchor="continuum_ew", emline_type=0.0, scope=scope)
+    cfg.agn.narrow_line_extrapolation = mode
+    context, _ = _trace(cfg)
+    return context, np.asarray(captured["out"][1])
+
+
+def test_continuum_ew_scope_all_overrides_every_narrow_mode(fake_ssp, monkeypatch):
+    outs = {mode: _narrow_out(monkeypatch, "all", mode)[1] for mode in ("template", "optical_only", "none")}
+    np.testing.assert_array_equal(outs["optical_only"], outs["template"])
+    np.testing.assert_array_equal(outs["none"], outs["template"])
+    context, _ = _narrow_out(monkeypatch, "all", "template")
+    wave = np.asarray(context.templates.line_wave)
+    o3 = int(np.flatnonzero(np.abs(wave - 5007.0) < 1.0)[0])
+    assert outs["none"][o3] > 0.0  # QSOGEN [O III] still extrapolated with mode "none"
+
+
+def test_continuum_ew_blueward_leaves_redward_narrow_lines_to_the_mode(fake_ssp, monkeypatch):
+    # Spectrum at rest 2000-3000 A: [O III] 5007 is redward, C IV blueward.
+    context, template = _narrow_out(monkeypatch, "blueward", "template")
+    _, none = _narrow_out(monkeypatch, "blueward", "none")
+    _, optical = _narrow_out(monkeypatch, "blueward", "optical_only")
+    wave = np.asarray(context.templates.line_wave)
+    o3 = int(np.flatnonzero(np.abs(wave - 5007.0) < 1.0)[0])
+    civ = int(np.flatnonzero(np.abs(wave - 1549.0) < 1.0)[0])
+    assert template[o3] > 0.0 and none[o3] == 0.0
+    assert optical[o3] == template[o3]  # optical line kept by "optical_only"
+    # Blueward lines use the EW anchor whatever the mode (no narrow UV in QSOGEN).
+    assert template[civ] == none[civ] == optical[civ] == 0.0
