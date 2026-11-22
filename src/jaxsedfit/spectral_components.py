@@ -50,6 +50,62 @@ from .spectral_custom_components import (
 from .spectral_contract import normalize_line_definitions
 
 
+def _lognormal_from_median(prior, default):
+    """Return a LogNormal from a (median, natural-log sigma) pair or the default pair."""
+    median, sigma = default if prior is None else prior
+    return dist.LogNormal(jnp.log(float(median)), float(sigma))
+
+
+def _apply_balmer_ratio_prior(
+    site_prefix,
+    cfg,
+    *,
+    balmer_norm_observed,
+    balmer_norm_base_prior,
+    balmer_norm,
+    balmer_tau,
+    wave_rest,
+    disk_continuum_mjy,
+    reference_continuum_mjy=None,
+):
+    """Replace the absolute BC amplitude prior by a prior on BC/disc continuum.
+
+    The ratio ``R`` is the unbroadened Balmer continuum over the disc
+    continuum, both f_nu at rest ``cfg.balmer_ratio_reference_rest``. ``R`` is
+    proportional to the sampled amplitude at fixed continuum, optical depth and
+    spectrum scale, so adding ``log N(ln R) - log N_base(ln amplitude)`` turns
+    the amplitude prior into the conditional log-normal ``ln R ~ N(ln median,
+    sigma)``. This conditional prior is normalised for every value of the
+    other parameters and leaves their priors unchanged. Velocity broadening is
+    ignored at the reference wavelength, which lies well blueward of the edge.
+    """
+    from .spectral_model import _balmer_static_terms_jax
+
+    reference = float(cfg.balmer_ratio_reference_rest)
+    median, sigma = (float(v) for v in cfg.balmer_ratio_prior)
+    bb, tau_shape, _ = _balmer_static_terms_jax(jnp.asarray([reference], dtype=jnp.float64), 15000.0)
+    balmer_flambda_ref = balmer_norm * (1.0 - jnp.exp(-balmer_tau * tau_shape[0])) * bb[0]
+    pivot = cfg.balmer_fnu_pivot_rest
+    fnu_factor = 1.0 if pivot is None else (reference / float(pivot)) ** 2
+    balmer_ref = balmer_flambda_ref * fnu_factor
+    if reference_continuum_mjy is None:
+        order = jnp.argsort(wave_rest)
+        reference_continuum_mjy = jnp.interp(
+            reference,
+            wave_rest[order],
+            jnp.asarray(disk_continuum_mjy, dtype=jnp.float64)[order],
+        )
+    continuum_ref = jnp.maximum(jnp.asarray(reference_continuum_mjy, dtype=jnp.float64).reshape(()), 1.0e-30)
+    ratio = jnp.maximum(balmer_ref, 1.0e-300) / continuum_ref
+    log_prior = dist.Normal(jnp.log(median), sigma).log_prob(jnp.log(ratio))
+    base_log_prior = dist.Normal(balmer_norm_base_prior.loc, balmer_norm_base_prior.scale).log_prob(
+        jnp.log(balmer_norm_observed)
+    )
+    numpyro.factor(f"{site_prefix}_balmer_ratio_prior", log_prior - base_log_prior)
+    numpyro.deterministic(f"{site_prefix}_balmer_ratio_reference", ratio)
+    return ratio
+
+
 def _sample_standardizable_feature_prior(site_name: str, prior):
     """Sample a physical feature prior and advertise an exact NUTS axis."""
     return numpyro.sample(
@@ -111,6 +167,12 @@ class SpectralComponentConfig:
     # Fe II velocity shift limit (v/c); about 3000 km/s, as in PyQSOFit.
     feii_shift_max: float = 0.01
     balmer_velocity_kms_default: float = 3000.0
+    # Optional (median, natural-log sigma) log-normal Balmer-continuum priors;
+    # see ``AGNConfig.balmer_ratio_prior``. None keeps the default priors.
+    balmer_ratio_prior: tuple[float, float] | None = None
+    balmer_ratio_reference_rest: float = 3000.0
+    balmer_tau_prior: tuple[float, float] | None = None
+    balmer_vel_prior: tuple[float, float] | None = None
     broadening_convolution: str = "fft"
     feii_fnu_pivot_rest: float | None = None
     balmer_fnu_pivot_rest: float | None = 3000.0
@@ -785,6 +847,7 @@ def evaluate_joint_spectral_components(
     bal_continuum_mjy=None,
     instrument_index=None,
     pixel_padding=None,
+    balmer_reference_continuum_mjy=None,
 ):
     """Evaluate shared spectral components around an external continuum.
 
@@ -823,6 +886,12 @@ def evaluate_joint_spectral_components(
         Rest-frame Fe II template sampled as an f_lambda-shaped relative
         spectrum. The evaluated Fe II component is converted to f_nu shape
         before being added to the mJy continuum.
+    balmer_reference_continuum_mjy
+        Optional disc continuum (mJy, same intrinsic coordinate as
+        ``continuum_mjy``) at rest ``config.balmer_ratio_reference_rest``,
+        used by ``config.balmer_ratio_prior``. If omitted, the disc
+        continuum (``bal_continuum_mjy``, else ``continuum_mjy``) is
+        interpolated at that wavelength, clamped to the fitted pixels.
 
     config : SpectralComponentConfig or None
         Component configuration; None uses defaults.
@@ -919,19 +988,39 @@ def evaluate_joint_spectral_components(
 
     balmer_model = jnp.zeros_like(wave_obs)
     if cfg.use_balmer_continuum:
+        balmer_norm_base_prior = dist.LogNormal(jnp.log(1.0e-3), 2.0)
         balmer_norm_observed = _sample_standardizable_feature_prior(
             f"{site_prefix}_balmer_norm",
-            dist.LogNormal(jnp.log(1.0e-3), 2.0),
+            balmer_norm_base_prior,
         )
         balmer_norm = balmer_norm_observed / feature_amplitude_scale
         balmer_tau = _sample_standardizable_feature_prior(
             f"{site_prefix}_balmer_tau",
-            dist.LogNormal(jnp.log(1.0), 0.5),
+            _lognormal_from_median(cfg.balmer_tau_prior, (1.0, 0.5)),
         )
         balmer_vel = _sample_standardizable_feature_prior(
             f"{site_prefix}_balmer_vel",
-            dist.LogNormal(jnp.log(max(cfg.balmer_velocity_kms_default, 1.0)), 0.4),
+            _lognormal_from_median(
+                cfg.balmer_vel_prior,
+                (max(cfg.balmer_velocity_kms_default, 1.0), 0.4),
+            ),
         )
+        if cfg.balmer_ratio_prior is not None:
+            _apply_balmer_ratio_prior(
+                site_prefix,
+                cfg,
+                balmer_norm_observed=balmer_norm_observed,
+                balmer_norm_base_prior=balmer_norm_base_prior,
+                balmer_norm=balmer_norm,
+                balmer_tau=balmer_tau,
+                wave_rest=wave_rest,
+                disk_continuum_mjy=(
+                    continuum_mjy
+                    if bal_continuum_mjy is None
+                    else jnp.asarray(bal_continuum_mjy, dtype=jnp.float64)
+                ),
+                reference_continuum_mjy=balmer_reference_continuum_mjy,
+            )
         # Balmer broadening is a velocity sigma; add the instrumental sigma in quadrature.
         balmer_flambda_shape = _broaden_per_instrument(
             lambda sigma_inst: _balmer_continuum_jax(

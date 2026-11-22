@@ -338,6 +338,19 @@ class AGNConfig:
     fit_feii: bool = False
     fit_feii_broadening: bool = False
     fit_balmer_continuum: bool = False
+    # Optional informative priors for the joint-spectrum Balmer continuum, for
+    # spectra that do not cover the Balmer edge. ``balmer_ratio_prior`` is the
+    # (median, natural-log sigma) of a log-normal prior on the ratio of the
+    # unbroadened Balmer continuum to the attenuated accretion-disc continuum,
+    # both in f_nu at rest ``balmer_ratio_reference_rest`` Angstrom; it replaces
+    # the default absolute-amplitude prior. ``balmer_tau_prior`` and
+    # ``balmer_vel_prior`` are (median, natural-log sigma) log-normal priors
+    # replacing the default optical-depth and velocity priors. None (the
+    # default) keeps the default priors.
+    balmer_ratio_prior: tuple[float, float] | None = None
+    balmer_ratio_reference_rest: float = 3000.0
+    balmer_tau_prior: tuple[float, float] | None = None
+    balmer_vel_prior: tuple[float, float] | None = None
     fit_lines: bool = True
     tied_lines: bool = True
     use_smart_line_priors: bool = True
@@ -398,6 +411,18 @@ class AGNConfig:
             if not (np.isfinite(lo) and np.isfinite(hi) and 0.0 < lo < hi):
                 raise ValueError("AGNConfig.line_activation_rest must be an increasing pair of positive wavelengths.")
             self.line_activation_rest = (lo, hi)
+        for name in ("balmer_ratio_prior", "balmer_tau_prior", "balmer_vel_prior"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            median, sigma = (float(v) for v in value)
+            if not (np.isfinite(median) and np.isfinite(sigma) and median > 0.0 and sigma > 0.0):
+                raise ValueError(f"AGNConfig.{name} must be a (median, sigma) pair of positive finite values.")
+            setattr(self, name, (median, sigma))
+        reference = float(self.balmer_ratio_reference_rest)
+        if not (np.isfinite(reference) and 0.0 < reference < 3646.0):
+            raise ValueError("AGNConfig.balmer_ratio_reference_rest must lie blueward of the 3646 Angstrom Balmer edge.")
+        self.balmer_ratio_reference_rest = reference
 
     def validate(self) -> None:
         """Validate inline template units and array shapes."""

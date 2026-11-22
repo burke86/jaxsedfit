@@ -3573,6 +3573,7 @@ def _evaluate_spectral_components(
     instrument_index=None,
     pixel_padding=None,
     line_amp_groups=None,
+    balmer_reference_continuum_mjy=None,
 ):
     """Evaluate the built-in detailed spectral components.
 
@@ -3619,6 +3620,9 @@ def _evaluate_spectral_components(
     line_amp_groups : numpy.ndarray, optional
         Per-group (init, min, max) line amplitudes, shape (3, n_groups), replacing the
         line table's.
+    balmer_reference_continuum_mjy : jax.Array, optional
+        Disc continuum at rest ``cfg.agn.balmer_ratio_reference_rest`` in mJy,
+        used by ``cfg.agn.balmer_ratio_prior``.
     """
     try:
         from .spectral_custom_components import is_bal_absorption_component
@@ -3663,6 +3667,10 @@ def _evaluate_spectral_components(
         feii_shift_max=FEII_SHIFT_MAX,
         feii_fnu_pivot_rest=4575.0,
         balmer_velocity_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
+        balmer_ratio_prior=getattr(spectral_cfg, "balmer_ratio_prior", None),
+        balmer_ratio_reference_rest=float(getattr(spectral_cfg, "balmer_ratio_reference_rest", 3000.0)),
+        balmer_tau_prior=getattr(spectral_cfg, "balmer_tau_prior", None),
+        balmer_vel_prior=getattr(spectral_cfg, "balmer_vel_prior", None),
         broadening_convolution=spectral_cfg.broadening_convolution,
         fixed_narrow_fwhm_kms=fixed_narrow_fwhm_kms,
         fixed_narrow_amp_scale=fixed_narrow_amp_scale,
@@ -3683,9 +3691,25 @@ def _evaluate_spectral_components(
         bal_continuum_mjy=bal_continuum_mjy,
         instrument_index=instrument_index,
         pixel_padding=pixel_padding,
+        balmer_reference_continuum_mjy=balmer_reference_continuum_mjy,
     )
     result["component_config"] = component_cfg
     return result
+
+
+def _balmer_reference_disk_mjy(cfg, rest_wave, disk_rest_lum, redshift, luminosity_distance_m):
+    """Return the attenuated disc f_nu (mJy) at the Balmer-ratio reference, or None.
+
+    Only computed when ``cfg.agn.balmer_ratio_prior`` is set, so default fits
+    are unchanged.
+    """
+    if getattr(cfg.agn, "balmer_ratio_prior", None) is None or not cfg.agn.fit_balmer_continuum:
+        return None
+    reference_obs = jnp.asarray(
+        [float(cfg.agn.balmer_ratio_reference_rest)], dtype=jnp.float64
+    ) * (1.0 + redshift)
+    flux_lambda = _redshift_to_obs(rest_wave, disk_rest_lum, reference_obs, redshift, luminosity_distance_m)
+    return _flambda_to_mjy(reference_obs, flux_lambda)[0]
 
 
 def _simple_feii_fnu_shape(wave_obs, redshift, template_wave_rest, template_flux, pivot_rest=4575.0):
@@ -5122,6 +5146,9 @@ def evaluate_photometric_state(
                 instrument_index=context.spec_spectrum_index,
                 pixel_padding=context.spec_padding if context.spec_padding.size else None,
                 line_amp_groups=context.spec_line_amp_groups if context.spec_line_amp_groups.size else None,
+                balmer_reference_continuum_mjy=_balmer_reference_disk_mjy(
+                    cfg, rest_wave, disk_att_rest * igm, redshift, luminosity_distance_m
+                ),
             )
             spectral_cfg = cfg.agn
             if host_capture_enabled and bool(

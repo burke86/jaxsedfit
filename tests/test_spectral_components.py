@@ -634,3 +634,88 @@ def test_standardized_line_amplitudes_match_per_complex_transform():
             high=amp_max[ids],
         ).icdf(dist.Normal(0.0, 1.0).cdf(eps))
         np.testing.assert_allclose(amp_group[ids], expected, rtol=1e-12)
+
+
+def _balmer_ratio_trace(cfg, params, *, continuum=2.0, scale=1.0, reference=None):
+    wave_obs = np.linspace(4000.0, 9000.0, 256)
+    fn = substitute(
+        seed(evaluate_joint_spectral_components, jax.random.PRNGKey(19)),
+        data=params,
+    )
+    return trace(fn).get_trace(
+        wave_obs=wave_obs,
+        redshift=1.0,
+        continuum_mjy=np.full_like(wave_obs, continuum),
+        config=cfg,
+        feature_amplitude_scale=scale,
+        balmer_reference_continuum_mjy=reference,
+    )
+
+
+def test_balmer_ratio_prior_is_opt_in():
+    cfg = SpectralComponentConfig(use_lines=False, use_balmer_continuum=True, broadening_convolution="direct")
+    params = {"spectral_balmer_norm": 0.1, "spectral_balmer_tau": 1.0, "spectral_balmer_vel": 3000.0}
+    tr = _balmer_ratio_trace(cfg, params)
+    assert "spectral_balmer_ratio_prior" not in tr
+    assert "spectral_balmer_ratio_reference" not in tr
+    assert tr["spectral_balmer_tau"]["fn"].loc == np.log(1.0)
+    assert tr["spectral_balmer_tau"]["fn"].scale == 0.5
+
+
+def test_balmer_ratio_prior_turns_amplitude_prior_into_ratio_lognormal():
+    from jaxsedfit.spectral_model import _balmer_static_terms_jax
+
+    median, sigma = 0.16, 0.7
+    cfg = SpectralComponentConfig(
+        use_lines=False,
+        use_balmer_continuum=True,
+        broadening_convolution="direct",
+        balmer_ratio_prior=(median, sigma),
+        balmer_tau_prior=(1.25, 0.3),
+        balmer_vel_prior=(12000.0, 0.5),
+    )
+    tau, continuum, scale = 1.3, 2.0, 1.7
+    bb, shape, _ = _balmer_static_terms_jax(jnp.asarray([3000.0]), 15000.0)
+    unit_ratio = float((1.0 - jnp.exp(-tau * shape[0])) * bb[0]) / continuum
+    for norm in (0.05, 0.3, 1.0):
+        params = {"spectral_balmer_norm": norm, "spectral_balmer_tau": tau, "spectral_balmer_vel": 9000.0}
+        tr = _balmer_ratio_trace(cfg, params, continuum=continuum, scale=scale)
+        ratio = norm / scale * unit_ratio
+        np.testing.assert_allclose(tr["spectral_balmer_ratio_reference"]["value"], ratio, rtol=1e-10)
+        total = float(
+            tr["spectral_balmer_norm"]["fn"].log_prob(norm)
+            + tr["spectral_balmer_ratio_prior"]["fn"].log_prob(tr["spectral_balmer_ratio_prior"]["value"]).sum()
+        )
+        expected = float(dist.Normal(np.log(median), sigma).log_prob(np.log(ratio))) - np.log(norm)
+        np.testing.assert_allclose(total, expected, rtol=1e-10)
+    np.testing.assert_allclose(tr["spectral_balmer_tau"]["fn"].loc, np.log(1.25))
+    np.testing.assert_allclose(tr["spectral_balmer_tau"]["fn"].scale, 0.3)
+    np.testing.assert_allclose(tr["spectral_balmer_vel"]["fn"].loc, np.log(12000.0))
+    np.testing.assert_allclose(tr["spectral_balmer_vel"]["fn"].scale, 0.5)
+
+
+def test_balmer_ratio_prior_uses_supplied_reference_continuum():
+    cfg = SpectralComponentConfig(
+        use_lines=False, use_balmer_continuum=True, broadening_convolution="direct", balmer_ratio_prior=(0.16, 0.7)
+    )
+    params = {"spectral_balmer_norm": 0.2, "spectral_balmer_tau": 1.0, "spectral_balmer_vel": 3000.0}
+    pixel = _balmer_ratio_trace(cfg, params, continuum=2.0)
+    supplied = _balmer_ratio_trace(cfg, params, continuum=2.0, reference=4.0)
+    np.testing.assert_allclose(
+        supplied["spectral_balmer_ratio_reference"]["value"],
+        0.5 * pixel["spectral_balmer_ratio_reference"]["value"],
+        rtol=1e-10,
+    )
+
+
+def test_agn_config_validates_balmer_priors():
+    import pytest
+    from jaxsedfit import AGNConfig
+
+    cfg = AGNConfig(balmer_ratio_prior=[0.16, 0.7], balmer_vel_prior=(12000, 0.5))
+    assert cfg.balmer_ratio_prior == (0.16, 0.7)
+    assert cfg.balmer_vel_prior == (12000.0, 0.5)
+    with pytest.raises(ValueError):
+        AGNConfig(balmer_ratio_prior=(0.0, 0.7))
+    with pytest.raises(ValueError):
+        AGNConfig(balmer_ratio_reference_rest=4000.0)
