@@ -10,7 +10,7 @@ from __future__ import annotations
 import gc
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import h5py
 import jax
@@ -2543,7 +2543,12 @@ class JAXSEDFit:
         return resolved
 
     @classmethod
-    def load(cls, path: str | Path | None = None) -> "JAXSEDFit":
+    def load(
+        cls,
+        path: str | Path | None = None,
+        *,
+        config_transform: Callable[[FitConfig], FitConfig] | None = None,
+    ) -> "JAXSEDFit":
         """Load a posterior bundle written by :meth:`save`.
 
         Parameters
@@ -2551,6 +2556,12 @@ class JAXSEDFit:
         path
             Path to a ``*_samples.h5`` file, or a directory containing exactly
             one such file. Defaults to the current directory.
+        config_transform
+            Optional callable applied to the restored :class:`FitConfig` before
+            the model context is built, e.g. to change a prediction-only option
+            such as ``agn.line_extrapolation_anchor``. The saved posterior draws
+            are reused unchanged, so only options that do not alter the sampled
+            parameter set are meaningful here.
 
         Returns
         -------
@@ -2585,6 +2596,10 @@ class JAXSEDFit:
         config = payload["config"]
         if not isinstance(config, FitConfig):
             config = fit_config_from_mapping(config)
+        if config_transform is not None:
+            config = config_transform(config)
+            if not isinstance(config, FitConfig):
+                raise TypeError("config_transform must return a FitConfig.")
         fitter = cls(config)
         samples = payload.get("samples")
         fitter.samples = None if samples is None else {k: np.asarray(v) for k, v in samples.items()}

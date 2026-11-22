@@ -45,6 +45,38 @@ In joint fits, the lines covered by the spectrum use the detailed spectral line
 model; the SED-scale corrections still apply to filters outside the spectral
 coverage.
 
+Lines outside the spectral coverage
+-----------------------------------
+
+The photometry still needs the lines the spectrum does not cover (for example
+Ly-alpha when the fit starts at rest 1250 Å). ``line_extrapolation_anchor``
+chooses how their broad-line luminosities are set:
+
+``"fitted_lines"`` (default)
+   The fixed-ratio broad template is scaled to the summed fitted luminosity of
+   the covered broad lines. The anchor therefore depends on which lines the
+   spectrum happens to cover.
+
+``"continuum_ew"``
+   Each uncovered broad line gets :math:`L = {\rm EW} \times
+   L_\lambda^{\rm disk}(\lambda_{\rm line})`, with the unattenuated fitted disk
+   and rest equivalent widths from the QSOGEN emission-line template (Temple,
+   Hewett & Banerji 2021), tabulated in
+   ``resources/templates/qsogen_line_ew.txt`` by
+   ``tools/generate_qsogen_line_ew.py``. Line strengths follow QSOGEN's
+   luminosity relation, :math:`{\rm emline\_type} = 0.183\,[M_i(z{=}2) + 27]`,
+   with :math:`M_i(z{=}2)` computed from the disk :math:`L_\nu(2500\,\text{Å})`
+   (Richards et al. 2006, eq. 4); ``line_extrapolation_emline_type`` fixes it
+   instead. Lines without a QSOGEN counterpart keep their template ratio to the
+   anchored lines.
+
+Both anchors return intrinsic luminosities that are attenuated, IGM-absorbed
+and projected through the filters identically. Narrow lines and the Fe II
+extrapolation always use the fitted anchor. The anchor changes no sampled
+parameter, so it can also be changed on a saved posterior with
+``JAXSEDFit.load(path, config_transform=...)``; the draws were then sampled
+with the anchor stored in the bundle.
+
 Accretion disk and torus
 ------------------------
 

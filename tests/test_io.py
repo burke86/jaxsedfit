@@ -406,3 +406,32 @@ def test_load_from_samples_requires_unique_posterior_file(monkeypatch, tmp_path)
 
     with pytest.raises(FileNotFoundError, match="Multiple"):
         JAXSEDFit.load(tmp_path)
+
+
+def test_load_config_transform_applies_before_context_and_round_trips_anchor(monkeypatch, tmp_path):
+    built = []
+    monkeypatch.setattr(
+        "jaxsedfit.core.build_model_context",
+        lambda config: built.append(config.agn.line_extrapolation_anchor) or SimpleNamespace(mw_ebv=0.03),
+    )
+    fitter = JAXSEDFit(_minimal_config())
+    fitter.samples = {"log_stellar_mass": np.array([10.0, 10.2])}
+    saved_path = fitter.save(tmp_path)
+
+    plain = JAXSEDFit.load(saved_path)
+    assert plain.config.agn.line_extrapolation_anchor == "fitted_lines"
+
+    def use_continuum_ew(config):
+        config.agn.line_extrapolation_anchor = "continuum_ew"
+        return config
+
+    built.clear()
+    loaded = JAXSEDFit.load(saved_path, config_transform=use_continuum_ew)
+    assert built == ["continuum_ew"]
+    assert loaded.config.agn.line_extrapolation_anchor == "continuum_ew"
+    np.testing.assert_allclose(loaded.samples["log_stellar_mass"], [10.0, 10.2])
+
+    resaved = loaded.save(tmp_path / "again")
+    assert JAXSEDFit.load(resaved).config.agn.line_extrapolation_anchor == "continuum_ew"
+    with pytest.raises(TypeError, match="config_transform"):
+        JAXSEDFit.load(saved_path, config_transform=lambda config: None)

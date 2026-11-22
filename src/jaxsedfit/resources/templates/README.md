@@ -14,3 +14,10 @@ Vendored files:
   Source: `GRAHSP/database_builder/activate/agn/mor_netzer_2012/emission_line_table.formatted`
 
 The `dale2014/` subdirectory has its own provenance note.
+
+`qsogen_line_ew.txt` is not from GRAHSP. It holds broad-line rest equivalent
+widths derived from the QSOGEN emission-line template
+(`qsosed_emlines_20210625.dat`, Temple, Hewett & Banerji 2021,
+https://github.com/MJTemple/qsogen, MIT licence:
+[QSOGEN-MIT.txt](../../../../LICENSES/QSOGEN-MIT.txt)) by
+`tools/generate_qsogen_line_ew.py`.
