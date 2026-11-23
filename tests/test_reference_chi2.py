@@ -198,3 +198,160 @@ def test_reference_floors_do_not_change_likelihood_or_existing_sites(_fake_ssp):
                 err_msg=name,
             )
     assert _v(tr_a, "spectroscopy_chi2_ref") != pytest.approx(_v(tr_b, "spectroscopy_chi2_ref"))
+
+
+def _agn_scale_cfg(
+    phot_fluxes=(1.0, 1.2, 0.9),
+    phot_errors=(0.1, 0.1, 0.05),
+    fit_host=True,
+    spec_fluxes=None,
+    spec_errors=None,
+    **likelihood_kwargs,
+):
+    rng = np.random.default_rng(0)
+    wave = np.linspace(5000.0, 5040.0, 41)
+    return FitConfig(
+        observation=Observation(object_id="obj", redshift=0.1),
+        photometry=PhotometryData(
+            filter_names=["f1", "f2", "f3"], fluxes=list(phot_fluxes), errors=list(phot_errors)
+        ),
+        filters=FilterSet(
+            curves=[
+                FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0]),
+                FilterCurve(name="f2", wave=[3000.0, 4000.0, 5000.0], transmission=[0.0, 1.0, 0.0]),
+                FilterCurve(name="f3", wave=[5000.0, 6000.0, 7000.0], transmission=[0.0, 1.0, 0.0]),
+            ]
+        ),
+        galaxy=GalaxyConfig(
+            dsps_ssp_fn="fake_refchi2_agn.h5", n_wave=16, fit_host=fit_host, fit_host_kinematics=fit_host
+        ),
+        agn=AGNConfig(fit_agn=True, fit_lines=False),
+        nebular=NebularConfig(enabled=False),
+        likelihood=LikelihoodConfig(
+            variability_uncertainty=False, fit_spectrum_scale=True, **likelihood_kwargs
+        ),
+        spectroscopy=SpectroscopyData(
+            wave_obs=wave.tolist(),
+            fluxes=list(spec_fluxes) if spec_fluxes is not None else (2.0 + 0.3 * rng.standard_normal(41)).tolist(),
+            errors=list(spec_errors) if spec_errors is not None else (0.1 + 0.05 * rng.random(41)).tolist(),
+            instrument="sdss",
+            resolving_power=2000.0,
+        ),
+        inference=InferenceConfig(map_steps=2),
+        prior_config=PriorConfig(stellar_mass=dist.Normal(8.0, 1.0e-6)),
+    )
+
+
+def _agn_latents(context, **overrides):
+    tr = trace(seed(grahsp_photometric_model, jax.random.PRNGKey(7))).get_trace(
+        context, include_components=False
+    )
+    latents = {
+        k: np.asarray(v["value"])
+        for k, v in tr.items()
+        if v["type"] == "sample" and not v.get("is_observed", False)
+    }
+    latents.update({k: np.asarray(v) for k, v in overrides.items()})
+    return latents
+
+
+def test_reference_sed_matches_independent_calculation_with_agn(_fake_ssp):
+    """Fixed floors multiply the total and the AGN band flux; fitted widths do not enter."""
+    # AGN-only model, with photometry placed near the model so that every
+    # variance term matters.
+    probe_context = build_model_context(_agn_scale_cfg(fit_host=False))
+    latents = _agn_latents(
+        probe_context,
+        log_agn_systematics_width=np.log(0.4),
+        log_systematics_width=np.log(0.12),
+    )
+    probe = np.asarray(_trace(probe_context, latents)["pred_fluxes"]["value"])
+    cfg = _agn_scale_cfg(
+        phot_fluxes=probe * np.array([1.3, 0.8, 1.1]),
+        phot_errors=0.05 * probe,
+        fit_host=False,
+    )
+    context = build_model_context(cfg)
+    tr = _trace(context, latents)
+    pred = np.asarray(tr["pred_fluxes"]["value"])
+    np.testing.assert_allclose(pred, probe, rtol=1e-12)
+    agn = np.asarray(tr["variable_agn_fluxes"]["value"])
+    assert np.all(np.abs(agn) > 0.0), "test needs a non-zero AGN band flux"
+    obs = np.asarray(cfg.photometry.fluxes)
+    err = np.asarray(cfg.photometry.errors)
+    variance = err**2 + (0.10 * pred) ** 2 + (0.15 * agn) ** 2
+    expected = np.sum((obs - pred) ** 2 / variance)
+    assert _v(tr, "sed_chi2_ref") == pytest.approx(expected, rel=1e-10)
+    assert _v(tr, "sed_reduced_chi2_ref") == pytest.approx(expected / 3.0, rel=1e-10)
+    fitted = err**2 + (0.12 * pred) ** 2 + (0.4 * agn) ** 2
+    assert _v(tr, "sed_chi2") == pytest.approx(np.sum((obs - pred) ** 2 / fitted), rel=1e-10)
+    # Changing only the fitted AGN width leaves the reference unchanged.
+    other = _trace(context, {**latents, "log_agn_systematics_width": np.log(0.05)})
+    assert _v(other, "sed_chi2_ref") == pytest.approx(_v(tr, "sed_chi2_ref"), rel=1e-12)
+    assert _v(other, "sed_chi2") != pytest.approx(_v(tr, "sed_chi2"), rel=1e-6)
+
+
+def test_reference_spectrum_uses_scaled_model_and_raw_errors(_fake_ssp, monkeypatch):
+    """The reference uses the scaled spectral model and the quoted errors only."""
+    import jaxsedfit.model as model_module
+
+    calls = []
+    original = model_module.reference_spectroscopic_chi2
+
+    def _capture(pred, obs, err, mask, floor):
+        calls.append(
+            {"pred": np.asarray(pred), "obs": np.asarray(obs), "err": np.asarray(err),
+             "mask": np.asarray(mask), "floor": float(floor)}
+        )
+        return original(pred, obs, err, mask, floor)
+
+    monkeypatch.setattr(model_module, "reference_spectroscopic_chi2", _capture)
+    probe_context = build_model_context(_agn_scale_cfg(reference_spectrum_floor=0.06))
+    base = _agn_latents(probe_context, log_spectrum_scale=np.asarray(0.0))
+    probe = np.asarray(_trace(probe_context, base)["pred_spectrum_fluxes"]["value"])
+    noise = 1.0 + 0.05 * np.random.default_rng(1).standard_normal(probe.size)
+    cfg = _agn_scale_cfg(
+        reference_spectrum_floor=0.06, spec_fluxes=1.6 * probe * noise, spec_errors=0.05 * probe
+    )
+    context = build_model_context(cfg)
+    calls.clear()
+    unit = _trace(context, {**base, "log_spectrum_scale": np.asarray(0.0)})
+    scaled = _trace(
+        context,
+        {**base, "log_spectrum_scale": np.asarray(np.log(2.0)), "frac_jitter_std": np.asarray(3.0)},
+    )
+    assert len(calls) == 2
+    for call in calls:
+        np.testing.assert_array_equal(call["err"], np.asarray(cfg.spectroscopy.errors))
+        np.testing.assert_array_equal(call["obs"], np.asarray(cfg.spectroscopy.fluxes))
+        assert call["floor"] == pytest.approx(0.06)
+    np.testing.assert_allclose(calls[1]["pred"], 2.0 * calls[0]["pred"], rtol=1e-12)
+    pred = np.asarray(scaled["pred_spectrum_fluxes"]["value"])
+    np.testing.assert_allclose(pred, calls[1]["pred"], rtol=1e-12)
+    obs = np.asarray(cfg.spectroscopy.fluxes)
+    err = np.asarray(cfg.spectroscopy.errors)
+    expected = np.sum((obs - pred) ** 2 / (err**2 + (0.06 * pred) ** 2))
+    assert _v(scaled, "spectroscopy_chi2_ref") == pytest.approx(expected, rel=1e-10)
+    assert _v(unit, "spectroscopy_chi2_ref") != pytest.approx(expected, rel=1e-6)
+
+
+def test_reference_spectrum_ignores_every_jitter_term(_fake_ssp):
+    """add_jitter, frac_fe_jitter and frac_jitter do not enter the reference."""
+    cfg = _agn_scale_cfg()
+    context = build_model_context(cfg)
+    base = _agn_latents(context)
+    ref = _trace(context, base)
+    for extra in ({"frac_jitter_std": np.asarray(4.0)},):
+        tr = _trace(context, {**base, **extra})
+        assert _v(tr, "spectroscopy_chi2") != pytest.approx(_v(ref, "spectroscopy_chi2"), rel=1e-6)
+        assert _v(tr, "spectroscopy_chi2_ref") == pytest.approx(_v(ref, "spectroscopy_chi2_ref"), rel=1e-12)
+    # The total jitter variance (frac, Fe II and additive terms) is visible as
+    # spectrum_sigma_tot; the reference equals the formula with the quoted
+    # errors, so none of those terms can leak in.
+    sigma_tot = np.asarray(ref["spectrum_sigma_tot"]["value"])
+    err = np.asarray(cfg.spectroscopy.errors)
+    assert np.all(sigma_tot >= err)
+    pred = np.asarray(ref["pred_spectrum_fluxes"]["value"])
+    obs = np.asarray(cfg.spectroscopy.fluxes)
+    expected = np.sum((obs - pred) ** 2 / (err**2 + (0.08 * pred) ** 2))
+    assert _v(ref, "spectroscopy_chi2_ref") == pytest.approx(expected, rel=1e-10)

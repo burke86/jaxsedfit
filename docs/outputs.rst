@@ -340,7 +340,7 @@ Aperture, calibration, and likelihood outputs
      - Valid spectral pixels, and photometric detections plus valid pixels, behind the reference values.
    * - ``sed_reduced_chi2_ref``, ``spectroscopy_reduced_chi2_ref``, ``joint_reduced_chi2_ref``
      - dimensionless
-     - Reference chi2 divided by its count. Suited to quality cuts that should keep the same meaning across noise models and signal-to-noise.
+     - Reference chi2 divided by its count. Suited to quality cuts that should keep the same meaning across noise models and signal-to-noise. Only the spectral value has the definition of an earlier statistic (fixed 8% floor); the photometric and joint values are new statistics (see :doc:`likelihood`).
    * - ``transmitted_fraction_fluxes``
      - fraction per measurement
      - Band-projected attenuated/intrinsic direct-light ratio. Lightweight paths may return unity when this ratio is not needed.

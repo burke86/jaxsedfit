@@ -93,9 +93,26 @@ every valid pixel with no likelihood weight; for the photometry,
 :math:`w_{\rm AGN}` fixed to ``reference_photometry_floor`` (0.10) and
 ``reference_agn_floor`` (0.15) instead of their fitted values, the other terms
 unchanged; and for the joint value the unweighted sum of the two over the sum of
-their counts. The defaults reproduce the chi-square of earlier versions that used a
-fixed 8% spectral floor and a photometric systematic width near 0.10, except that
-those versions down-weighted the spectral term in the joint value.
+their counts.
+
+Only the spectral reference has the same definition as an earlier statistic: the
+spectral chi-square of versions that used a fixed 8% spectral floor (same variance,
+same pixels, no weight). The photometric reference is a new statistic: earlier
+versions, like the current one, fitted the systematic and AGN-mismatch widths, so
+their photometric chi-square used the fitted widths, not fixed floors. The joint
+reference is new as well: earlier versions reported
+:math:`(\chi^2_{\rm sed} + w\,\chi^2_{\rm spec}) / (n_{\rm sed} + w\,n_{\rm spec})`
+with the fitted-width photometric term and a spectral weight :math:`w`, while the
+reference joint value is unweighted and uses the fixed-floor photometric term. A
+threshold set on an earlier statistic therefore has to be re-assessed for the
+photometric and joint references. Even for the spectrum, the same definition does not
+make the values equal to what an earlier version would have reported for the same
+data: the posterior is conditioned on the current likelihood and spectral model.
+
+The AGN floor multiplies the AGN band fluxes, which are evaluated only when an AGN
+term of the likelihood needs them (variability, or a fitted or non-zero
+``agn_systematics_width``). With AGN fitting on but none of those terms active, the
+AGN band fluxes are zero and ``reference_agn_floor`` has no effect.
 
 Calibration and error-model terms
 ---------------------------------
