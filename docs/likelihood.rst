@@ -76,6 +76,27 @@ likelihood term, so invalid regions of parameter space are rejected. The reporte
 :math:`\sum r^2 / \sigma_{\rm eff}^2` over the detections and valid pixels, with
 the same variances (see :doc:`outputs`).
 
+Because these variances contain fitted noise terms (the spectral jitter and the
+photometric systematic widths), the stored chi-square depends on how much noise
+the fit chose to add, and so on the data's signal-to-noise and on the noise model
+of the jaxsedfit version. For quality cuts that must keep one meaning, the fit also
+reports *reference* chi-square values (``*_chi2_ref``) with a fixed variance that
+does not enter the likelihood:
+
+.. math::
+
+   \sigma_{{\rm ref},p}^2 = e_p^2 + \left( w_{\rm ref,spec}\, s M_p \right)^2,
+
+with :math:`w_{\rm ref,spec}` = ``reference_spectrum_floor`` (0.08), summed over
+every valid pixel with no likelihood weight; for the photometry,
+:math:`\sigma_{{\rm eff},b}^2` above with :math:`w_{\rm sys}` and
+:math:`w_{\rm AGN}` fixed to ``reference_photometry_floor`` (0.10) and
+``reference_agn_floor`` (0.15) instead of their fitted values, the other terms
+unchanged; and for the joint value the unweighted sum of the two over the sum of
+their counts. The defaults reproduce the chi-square of earlier versions that used a
+fixed 8% spectral floor and a photometric systematic width near 0.10, except that
+those versions down-weighted the spectral term in the joint value.
+
 Calibration and error-model terms
 ---------------------------------
 

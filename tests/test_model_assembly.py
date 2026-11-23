@@ -1231,6 +1231,14 @@ def test_predict_supports_lightweight_and_median_modes(monkeypatch):
         "joint_chi2",
         "joint_n_eff",
         "joint_reduced_chi2",
+        "sed_chi2_ref",
+        "sed_reduced_chi2_ref",
+        "spectroscopy_chi2_ref",
+        "spectroscopy_n_ref",
+        "spectroscopy_reduced_chi2_ref",
+        "joint_chi2_ref",
+        "joint_n_ref",
+        "joint_reduced_chi2_ref",
     } <= set(phot)
     assert "total_obs_sed" not in phot
     assert phot["pred_fluxes"].shape[0] == 2

@@ -332,6 +332,15 @@ Aperture, calibration, and likelihood outputs
    * - ``sed_reduced_chi2``, ``spectroscopy_reduced_chi2``, ``joint_reduced_chi2``
      - dimensionless
      - Corresponding chi2 divided by n_eff. These do not subtract the number of fitted parameters; they are diagnostics, not formal chi-square significance tests.
+   * - ``sed_chi2_ref``, ``spectroscopy_chi2_ref``, ``joint_chi2_ref``
+     - dimensionless
+     - Reference chi2 with a fixed variance that does not depend on any fitted noise parameter: spectra use err**2 + (reference_spectrum_floor * model)**2; photometry uses the photometric variance with the systematic and AGN widths fixed to reference_photometry_floor and reference_agn_floor; joint is their unweighted sum. Diagnostics only; they do not enter the likelihood (see :doc:`likelihood`).
+   * - ``spectroscopy_n_ref``, ``joint_n_ref``
+     - count
+     - Valid spectral pixels, and photometric detections plus valid pixels, behind the reference values.
+   * - ``sed_reduced_chi2_ref``, ``spectroscopy_reduced_chi2_ref``, ``joint_reduced_chi2_ref``
+     - dimensionless
+     - Reference chi2 divided by its count. Suited to quality cuts that should keep the same meaning across noise models and signal-to-noise.
    * - ``transmitted_fraction_fluxes``
      - fraction per measurement
      - Band-projected attenuated/intrinsic direct-light ratio. Lightweight paths may return unity when this ratio is not needed.
