@@ -544,9 +544,13 @@ def make_batched_fitter(
             if method == "map":
                 out["samples"] = {k: v[:, None] for k, v in values.items()}
             elif method == "laplace":
-                draws, min_eig = jax.vmap(
-                    lambda v, a, z, k: laplace_draws(full, (a, z), v, transforms, num_samples, k, hessian=hessian)
-                )(values, arrays, redshift, post_keys)
+                # One object at a time: under vmap the Hessian of every object in the chunk
+                # is held at once (5.6 GB for 8 Chimera joint fits, against 0.7 GB in a
+                # loop), and the loop also ran about 4x faster on CPU.
+                draws, min_eig = jax.lax.map(
+                    lambda t: laplace_draws(full, (t[1], t[2]), t[0], transforms, num_samples, t[3], hessian=hessian),
+                    (values, arrays, redshift, post_keys),
+                )
                 out["samples"], out["hessian_min_eigenvalue"] = draws, min_eig
             else:
                 draws, losses = jax.vmap(

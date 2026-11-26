@@ -98,9 +98,11 @@ def laplace_draws(
     hessian : {"exact", "finite_difference"}
         ``"exact"`` uses ``jax.hessian``. ``"finite_difference"`` takes central
         differences of the gradient along each unconstrained coordinate (steps of
-        1e-5, relative for coordinates above one). It compiles faster and uses less
-        memory; on the jaxqsofit spectral model it matched the exact Hessian to about
-        1e-8 relative, and the implied posterior widths to 1e-5.
+        1e-5, relative for coordinates above one). It compiles faster. On the
+        jaxqsofit spectral model it matched the exact Hessian to about 1e-8 relative,
+        and the implied posterior widths to 1e-5. It evaluates all 2d gradients at
+        once, so it can use more memory than ``"exact"``. On the Chimera joint model
+        (68 parameters) it needed about 2.4 times as much.
 
     Returns
     -------
