@@ -1,5 +1,5 @@
 {
-  "_comment": "Per run, quantity and AGN-luminosity bin. Limits are the reference run's RMS x 1.15 and outlier fraction + 0.05: photometry-only stellar mass from cc16499, everything else from fcf3b9c (#137). Update them in the same PR as an intended change to the recovery.",
+  "_comment": "Per run, quantity and AGN-luminosity bin. Limits are the reference run's RMS x 1.15 and outlier fraction + 0.05: photometry-only stellar mass from cc16499, joint stellar mass at 44 <= log L < 45 from e1eeb64 (#160, RMS 0.595), everything else from fcf3b9c (#137). Update them in the same PR as an intended change to the recovery.",
   "photometry": {
     "log_stellar_mass": {
       "0": {"max_outlier_fraction": 0.078, "max_rms": 0.220},
@@ -25,7 +25,7 @@
       "0": {"max_outlier_fraction": 0.079, "max_rms": 0.269},
       "1": {"max_outlier_fraction": 0.070, "max_rms": 0.245},
       "2": {"max_outlier_fraction": 0.112, "max_rms": 0.291},
-      "3": {"max_outlier_fraction": 0.197, "max_rms": 0.461}
+      "3": {"max_outlier_fraction": 0.197, "max_rms": 0.684}
     },
     "log_lbol_agn": {
       "0": {"max_outlier_fraction": 1.000, "max_rms": 3.067},
