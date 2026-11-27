@@ -546,6 +546,8 @@ def test_evaluate_joint_spectral_components_converts_feii_template_to_fnu_shape(
             "spectral_feii_norm": 1.0,
             "spectral_feii_fwhm": 1.0,
             "spectral_feii_shift": 0.0,
+            # Keep the template's optical-to-UV ratio so the flat template stays flat.
+            "spectral_feii_log_op_over_uv": 0.0,
         },
     )
 
