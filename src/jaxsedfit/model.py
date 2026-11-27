@@ -63,6 +63,16 @@ DEFAULT_BROAD_LINE_WIDTH_KMS = 3000.0
 FEII_FWHM_KMS_MAX = 10000.0
 # Fe II velocity shift limit (v/c), about 3000 km/s.
 FEII_SHIFT_MAX = 0.01
+_FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+# The Balmer-continuum width ``balmer_vel`` is a Gaussian sigma [km/s], not a
+# FWHM. The default is the sigma of the default broad-line FWHM (about
+# 1274 km/s). The upper limit is the sigma of the Fe II FWHM limit (about
+# 4247 km/s), so a very broad Balmer continuum cannot erase the edge.
+DEFAULT_BALMER_VEL_KMS = DEFAULT_BROAD_LINE_WIDTH_KMS * _FWHM_TO_SIGMA
+BALMER_VEL_KMS_MAX = FEII_FWHM_KMS_MAX * _FWHM_TO_SIGMA
+# Rest wavelength [Angstrom] that splits the Fe II template into UV and optical
+# pieces. Keep equal to spectral_model.FEII_UV_OPTICAL_SPLIT_A.
+FEII_UV_OPTICAL_SPLIT_A = 3600.0
 DEFAULT_NARROW_LINE_WIDTH_KMS = 500.0
 DEFAULT_NARROW_LINES_STRENGTH = 1.0
 DEFAULT_BALMER_CONTINUUM_STRENGTH = 1.0e-3
@@ -1182,7 +1192,8 @@ def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     balmer_tau : float or jax.Array
         Optical depth at the Balmer edge.
     balmer_vel : float or jax.Array
-        Velocity broadening of the edge in km/s (Gaussian sigma).
+        Velocity broadening of the edge in km/s. This is a Gaussian sigma, not
+        a FWHM. A 3000 km/s FWHM corresponds to about 1274 km/s.
     """
     lam_be = 3646.0
     h_c_per_k_B = 1.439e8
@@ -3662,7 +3673,8 @@ def _evaluate_spectral_components(
         feii_fwhm_kms_max=FEII_FWHM_KMS_MAX,
         feii_shift_max=FEII_SHIFT_MAX,
         feii_fnu_pivot_rest=4575.0,
-        balmer_velocity_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
+        balmer_velocity_kms_default=DEFAULT_BALMER_VEL_KMS,
+        balmer_velocity_kms_max=BALMER_VEL_KMS_MAX,
         broadening_convolution=spectral_cfg.broadening_convolution,
         fixed_narrow_fwhm_kms=fixed_narrow_fwhm_kms,
         fixed_narrow_amp_scale=fixed_narrow_amp_scale,
@@ -4361,13 +4373,17 @@ def evaluate_photometric_state(
                     prior_config,
                     value_key="balmer_vel",
                     log_key="log_balmer_vel",
-                    default_value_distribution=dist.LogNormal(np.log(DEFAULT_BROAD_LINE_WIDTH_KMS), 0.4),
-                    default_log_distribution=dist.Normal(np.log(DEFAULT_BROAD_LINE_WIDTH_KMS), 0.4),
+                    default_value_distribution=TruncatedLogNormal(
+                        np.log(DEFAULT_BALMER_VEL_KMS), 0.4, BALMER_VEL_KMS_MAX
+                    ),
+                    default_log_distribution=dist.TruncatedNormal(
+                        np.log(DEFAULT_BALMER_VEL_KMS), 0.4, high=np.log(BALMER_VEL_KMS_MAX)
+                    ),
                 )
             else:
                 balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
                 balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
-                balmer_vel = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
+                balmer_vel = jnp.asarray(DEFAULT_BALMER_VEL_KMS, dtype=jnp.float64)
         else:
             broad_lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
             narrow_lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
@@ -4375,7 +4391,7 @@ def evaluate_photometric_state(
             narrow_line_width = jnp.asarray(DEFAULT_NARROW_LINE_WIDTH_KMS, dtype=jnp.float64)
             balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
             balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
-            balmer_vel = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
+            balmer_vel = jnp.asarray(DEFAULT_BALMER_VEL_KMS, dtype=jnp.float64)
             balmer_enabled = False
         l_agn_lambda_5100 = agn_amp / 5100.0
         agn_bol_luminosity = agn_amp * AGN_BOLOMETRIC_CORRECTION_5100
@@ -4417,6 +4433,15 @@ def evaluate_photometric_state(
                 default_log_distribution=dist.Uniform(np.log(0.63), np.log(31.6)),
             )
             l_feii = feii_norm * l_broadlines
+            # Free optical-to-UV Fe II ratio. The template fixes that ratio, but
+            # optical Fe II strength varies much more between quasars than UV
+            # Fe II. The optical piece (redward of FEII_UV_OPTICAL_SPLIT_A) is
+            # scaled by exp(log_feii_op_over_uv) before broadening, so width
+            # and shift stay shared.
+            log_feii_op_over_uv = _sample_prior(prior_config, "log_feii_op_over_uv", dist.Normal(0.0, 1.0))
+            feii_template_on_rest = feii_template_on_rest * jnp.where(
+                rest_wave >= FEII_UV_OPTICAL_SPLIT_A, jnp.exp(log_feii_op_over_uv), 1.0
+            )
             if cfg.agn.fit_feii_broadening:
                 feii_fwhm = _sample_positive_distribution(
                     prior_config,
@@ -4474,7 +4499,7 @@ def evaluate_photometric_state(
         narrow_line_width = jnp.asarray(DEFAULT_NARROW_LINE_WIDTH_KMS, dtype=jnp.float64)
         balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
         balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
-        balmer_vel = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
+        balmer_vel = jnp.asarray(DEFAULT_BALMER_VEL_KMS, dtype=jnp.float64)
         l_agn_lambda_5100 = jnp.asarray(0.0, dtype=jnp.float64)
         agn_bol_luminosity = jnp.asarray(0.0, dtype=jnp.float64)
         line_bl_rest = jnp.zeros_like(rest_wave)

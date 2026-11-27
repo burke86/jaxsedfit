@@ -214,6 +214,9 @@ and joint spectral amplitudes have different normalizations.
    * - ``feii_shift``
      - dimensionless
      - Native Fe II shift coordinate; applied as velocity c times shift in ln wavelength. Default prior: Normal(0, 0.01), limited to ±0.01 (about ±3000 km/s).
+   * - ``log_feii_op_over_uv``
+     - ln ratio
+     - Natural log of the optical Fe II scale relative to the template's optical-to-UV ratio. The template is split at 3600 Å rest. The UV piece keeps the ``feii_norm`` scale and the optical piece is multiplied by ``exp(log_feii_op_over_uv)`` before broadening, so the two pieces share one width and one shift. Default prior: Normal(0, 1).
    * - ``balmer_norm``
      - dimensionless
      - Native Balmer-continuum strength relative to the disk L_lambda normalization.
@@ -222,7 +225,7 @@ and joint spectral amplitudes have different normalizations.
      - Balmer optical depth at the continuum edge.
    * - ``balmer_vel``
      - km / s
-     - Balmer-continuum broadening velocity scale.
+     - Balmer-continuum broadening, as a Gaussian velocity sigma (not a FWHM). Default prior: log-normal around 1274 km/s (the sigma of a 3000 km/s FWHM), limited to 4247 km/s.
    * - ``agn_variability_nev``
      - dimensionless
      - Luminosity-dependent normalized excess variance used by the AGN variability likelihood.
@@ -530,10 +533,13 @@ per-spectrum calibration and aperture capture.
      - Observed normalization at the configured f_nu pivot, transformed to the shared source coordinate using spectral_feature_amplitude_scale.
    * - ``spectral_feii_fwhm``, ``spectral_balmer_vel``
      - km / s
-     - Fe II FWHM and Balmer broadening scale. The default Fe II width prior is log-normal around 3000 km/s with an upper limit of 10,000 km/s, so a very broad, featureless template cannot stand in for continuum.
+     - Fe II FWHM and Balmer-continuum Gaussian sigma. The default Fe II width prior is log-normal around 3000 km/s with an upper limit of 10,000 km/s, so a very broad, featureless template cannot stand in for continuum. The default Balmer prior is log-normal around 1274 km/s (the sigma of a 3000 km/s FWHM) with an upper limit of 4247 km/s (the sigma of the Fe II limit), for the same reason.
    * - ``spectral_feii_shift``
      - dimensionless
      - Fe II ln-wavelength shift coordinate (velocity approximately c times shift). Default prior: Normal(0, 0.01), limited to ±0.01 (about ±3000 km/s).
+   * - ``spectral_feii_log_op_over_uv``
+     - ln ratio
+     - Natural log of the optical Fe II scale relative to the template's optical-to-UV ratio, with the template split at 3600 Å rest. The UV piece keeps the ``spectral_feii_norm`` scale. With the optical pivot, the Fe II amplitude at the pivot is ``spectral_feii_norm`` times ``exp(spectral_feii_log_op_over_uv)``. Default prior: Normal(0, 1).
    * - ``spectral_balmer_tau``
      - dimensionless
      - Balmer edge optical depth.
@@ -682,7 +688,9 @@ Standalone continuum parameters include ``PL_norm`` (f_lambda normalization),
 ``log_frac_host`` (ln fraction). ``Fe_uv_norm`` / ``Fe_op_norm`` and
 ``Balmer_norm`` normalize their templates (in the standalone flux-density convention);
 ``Balmer_Tau`` is the dimensionless edge optical depth and ``Balmer_vel``
-the broadening scale in km/s. Their ``log_*`` variants use ln; ``Fe_FWHM``, ``Fe_uv_FWHM``,
+the Gaussian broadening sigma in km/s (not a FWHM). The default ``Balmer_vel``
+prior is centered on 1274 km/s, the sigma of a 3000 km/s FWHM, and limited to
+4247 km/s, the sigma of the 10,000 km/s Fe II FWHM limit. Their ``log_*`` variants use ln; ``Fe_FWHM``, ``Fe_uv_FWHM``,
 ``Fe_op_FWHM`` use km/s, while ``Fe_shift``, ``Fe_uv_shift``, and
 ``Fe_op_shift`` are ln-wavelength shift coordinates. Template and polynomial
 parameter names depend on the supplied prior mapping. ``fsps_weights`` are

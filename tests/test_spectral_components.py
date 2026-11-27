@@ -349,6 +349,7 @@ def test_joint_feii_balmer_sites_advertise_nuts_standardization_only():
         "spectral_feii_norm",
         "spectral_feii_fwhm",
         "spectral_feii_shift",
+        "spectral_feii_log_op_over_uv",
         "spectral_balmer_norm",
         "spectral_balmer_tau",
         "spectral_balmer_vel",
@@ -634,3 +635,51 @@ def test_standardized_line_amplitudes_match_per_complex_transform():
             high=amp_max[ids],
         ).icdf(dist.Normal(0.0, 1.0).cdf(eps))
         np.testing.assert_allclose(amp_group[ids], expected, rtol=1e-12)
+
+
+def test_joint_feii_optical_to_uv_ratio_scales_only_optical_piece():
+    # A template with separated UV and optical blocks, so broadening never
+    # mixes the two pieces across the 3600 Angstrom split.
+    template_wave = np.linspace(2000.0, 6000.0, 801)
+    template_flux = np.where((template_wave > 2600.0) & (template_wave < 3000.0), 1.0, 0.0)
+    template_flux += np.where((template_wave > 4400.0) & (template_wave < 4800.0), 0.5, 0.0)
+    wave_obs = np.linspace(2200.0, 5800.0, 400)
+    config = SpectralComponentConfig(use_lines=False, use_feii=True, broadening_convolution="direct")
+
+    def feii_model(log_ratio):
+        values = {
+            "spectral_feii_norm": 1.0,
+            "spectral_feii_fwhm": 2000.0,
+            "spectral_feii_shift": 0.0,
+            "spectral_feii_log_op_over_uv": log_ratio,
+        }
+        tr = trace(
+            substitute(seed(evaluate_joint_spectral_components, jax.random.PRNGKey(0)), data=values)
+        ).get_trace(
+            wave_obs=wave_obs,
+            redshift=0.0,
+            continuum_mjy=np.zeros_like(wave_obs),
+            config=config,
+            feii_template_wave_rest=template_wave,
+            feii_template_flux=template_flux,
+        )
+        return np.asarray(tr["spectral_feii_model"]["value"])
+
+    base = feii_model(0.0)
+    scaled = feii_model(np.log(3.0))
+    uv = wave_obs < 3400.0
+    optical = (wave_obs > 4500.0) & (wave_obs < 4700.0)
+
+    np.testing.assert_allclose(scaled[uv], base[uv], rtol=1e-10, atol=1e-14)
+    np.testing.assert_allclose(scaled[optical], 3.0 * base[optical], rtol=1e-10)
+
+    state = {"feii_norm": 1.0, "feii_fwhm": 2000.0, "feii_shift": 0.0, "feii_log_op_over_uv": np.log(3.0)}
+    rendered = render_joint_feature_state(
+        wave_obs,
+        0.0,
+        state,
+        config=config,
+        feii_template_wave_rest=template_wave,
+        feii_template_flux=template_flux,
+    )
+    np.testing.assert_allclose(np.asarray(rendered["feii"]), scaled, rtol=1e-10, atol=1e-14)

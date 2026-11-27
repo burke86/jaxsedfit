@@ -10,7 +10,14 @@ import numpyro.distributions as dist
 
 from .spectral_config import PriorConfig
 from .spectral_custom_components import CustomComponentSpec, make_custom_component
-from .spectral_model import FE_FWHM_KMS_MAX, FE_SHIFT_MAX, gaussian_bal_optical_depth_component
+from .spectral_model import (
+    BALMER_VEL_KMS_DEFAULT,
+    BALMER_VEL_KMS_MAX,
+    FE_FWHM_KMS_MAX,
+    FE_SHIFT_MAX,
+    FWHM_TO_SIGMA,
+    gaussian_bal_optical_depth_component,
+)
 from .spectral_reparameterization import TruncatedLogNormal
 
 MINSCA_DEFAULT = 0.0
@@ -724,7 +731,14 @@ def _build_default_prior_config(
         "Fe_shift": dist.TruncatedNormal(0.0, 1e-3, low=-FE_SHIFT_MAX, high=FE_SHIFT_MAX),
         "Balmer_norm": dist.LogNormal(np.log(max(1e-3 * fscale, AMPLITUDE_FLOOR)), 0.5),
         "Balmer_Tau": dist.LogNormal(np.log(0.5), 0.25),
-        "log_Balmer_vel": dist.TruncatedNormal(np.log(3000.0), 0.3, low=np.log(1000.0), high=np.log(15000.0)),
+        # Balmer_vel is a Gaussian sigma. The bounds are the sigmas of a 1000 km/s
+        # FWHM and of the 10,000 km/s Fe II FWHM limit.
+        "log_Balmer_vel": dist.TruncatedNormal(
+            np.log(BALMER_VEL_KMS_DEFAULT),
+            0.3,
+            low=np.log(1000.0 * FWHM_TO_SIGMA),
+            high=np.log(BALMER_VEL_KMS_MAX),
+        ),
         "poly_c2": dist.Normal(0.0, 0.03),
         "poly_c3": dist.Normal(0.0, 0.03),
         "poly_c4": dist.Normal(0.0, 0.03),

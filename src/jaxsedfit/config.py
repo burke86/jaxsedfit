@@ -797,6 +797,7 @@ class AGNPriorConfig:
     feii_fwhm: Any | None = None
     log_feii_fwhm: Any | None = None
     feii_shift: Any | None = None
+    log_feii_op_over_uv: Any | None = None
 
     def to_mapping(self) -> dict[str, Any]:
         """Convert AGN prior settings into model-site keys."""

@@ -50,6 +50,50 @@ NARROW_LINE_COVERAGE_FWHM_KMS = 1200.0
 FE_FWHM_KMS_MAX = 10000.0
 # Fe II velocity shift limit (v/c), about 3000 km/s.
 FE_SHIFT_MAX = 0.01
+FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+# The Balmer-continuum width ``Balmer_vel`` is a Gaussian velocity sigma, not a
+# FWHM. The default prior is centered on the sigma of a 3000 km/s FWHM broad
+# line (about 1274 km/s), so the edge is broadened like the Fe II and broad
+# lines. The upper limit is the sigma of the 10,000 km/s Fe II FWHM limit
+# (about 4247 km/s). Without the limit, a very broad Balmer continuum loses
+# the 3646 Angstrom edge and can stand in for continuum misfit.
+BALMER_VEL_KMS_DEFAULT = 3000.0 * FWHM_TO_SIGMA
+BALMER_VEL_KMS_MAX = FE_FWHM_KMS_MAX * FWHM_TO_SIGMA
+# Rest wavelength [Angstrom] that splits a single combined Fe II template into a
+# UV piece and an optical piece. The Bruhweiler & Verner (2008) template is
+# close to zero between about 3560 and 3710 Angstrom, so a split at 3600
+# Angstrom does not cut through strong Fe II lines.
+FEII_UV_OPTICAL_SPLIT_A = 3600.0
+
+
+def feii_optical_scale(wave_rest, log_op_over_uv, split_wave_rest=FEII_UV_OPTICAL_SPLIT_A):
+    """Return the per-wavelength factor that rescales the optical Fe II piece.
+
+    Single combined Fe II templates fix the optical-to-UV Fe II ratio, but the
+    observed optical Fe II strength (R_FeII) varies much more between quasars
+    than the UV Fe II strength. The returned factor is 1 blueward of
+    ``split_wave_rest`` and ``exp(log_op_over_uv)`` redward of it. Multiply the
+    template by this factor before broadening, so the UV and optical pieces
+    share one width and one velocity shift and the split adds no artificial
+    edge.
+
+    Parameters
+    ----------
+    wave_rest : array_like
+        Rest-frame wavelengths of the template in Angstrom.
+    log_op_over_uv : float or jax.Array
+        Natural log of the optical Fe II scale relative to the template's
+        own optical-to-UV ratio. A value of 0 keeps the template unchanged.
+    split_wave_rest : float
+        Rest wavelength in Angstrom that separates the UV and optical pieces.
+
+    Returns
+    -------
+    jax.Array
+        Multiplicative factor with the shape of ``wave_rest``.
+    """
+    wave_rest = jnp.asarray(wave_rest, dtype=jnp.float64)
+    return jnp.where(wave_rest >= split_wave_rest, jnp.exp(log_op_over_uv), 1.0)
 _SFD_QUERY_CACHE: Dict[str, Any] = {}
 _LUMINOSITY_H0 = 70.0
 _LUMINOSITY_OM0 = 0.3
@@ -1658,7 +1702,8 @@ def _balmer_continuum_jax(
     balmer_tau : float or jax.Array
         Optical depth at the Balmer edge; tau scales as (wave / 3646)**3.
     balmer_vel : float or jax.Array
-        Gaussian velocity sigma in km/s used to broaden the edge.
+        Gaussian velocity sigma in km/s used to broaden the edge. This is a
+        sigma, not a FWHM. A 3000 km/s FWHM corresponds to about 1274 km/s.
     balmer_static_terms : tuple of jax.Array or None
         Precomputed ``(bb, tau_shape, below_edge)`` on ``wave`` from :func:`_balmer_static_terms_jax`.
     convolution_method : str
@@ -2687,7 +2732,7 @@ def reconstruct_posterior_components(
     )[sl]
     balmer_norm = np.asarray(samples.get('Balmer_norm', np.zeros(n_total)), dtype=float)[sl]
     balmer_tau = np.asarray(samples.get('Balmer_Tau', np.full(n_total, 0.5)), dtype=float)[sl]
-    balmer_vel = np.asarray(samples.get('Balmer_vel', np.full(n_total, 3000.0)), dtype=float)[sl]
+    balmer_vel = np.asarray(samples.get('Balmer_vel', np.full(n_total, BALMER_VEL_KMS_DEFAULT)), dtype=float)[sl]
 
     if prior_config.get("PL_pivot", None) is None and np.any(np.asarray(pl_norm, dtype=float) != 0.0):
         raise ValueError(
@@ -4235,14 +4280,18 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             prior_config,
             value_key='Balmer_vel',
             log_key='log_Balmer_vel',
-            default_value_distribution=dist.LogNormal(np.log(3000.0), 0.25),
-            default_log_distribution=dist.Normal(np.log(3000.0), 0.25),
+            default_value_distribution=TruncatedLogNormal(
+                np.log(BALMER_VEL_KMS_DEFAULT), 0.25, BALMER_VEL_KMS_MAX
+            ),
+            default_log_distribution=dist.TruncatedNormal(
+                np.log(BALMER_VEL_KMS_DEFAULT), 0.25, high=np.log(BALMER_VEL_KMS_MAX)
+            ),
         )
     else:
         balmer_norm = jnp.asarray(0.0)
         balmer_te = jnp.asarray(15000.0)
         balmer_tau = jnp.asarray(0.5)
-        balmer_vel = jnp.asarray(3000.0)
+        balmer_vel = jnp.asarray(BALMER_VEL_KMS_DEFAULT)
 
     if fit_pl:
         pl_model_intrinsic = _powerlaw_jax(
