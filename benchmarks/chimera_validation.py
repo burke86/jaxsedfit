@@ -22,7 +22,14 @@ run
 report
     Write one compact Markdown report (``output``) for the photometry-only and,
     optionally, the joint run, with the change from main's metrics when given, and
-    exit non-zero if any bin fails its threshold.
+    exit non-zero if any bin fails its threshold or the model cost grew by more than
+    ``MAX_MODEL_COST_INCREASE`` over main's.
+
+Model cost. Wall-clock time on shared CI runners varies by tens of percent, so
+each run also records XLA's cost estimate (FLOPs and bytes accessed) of the
+compiled log-density value and gradient, the work of one optimizer step, for one
+fixed object of the run's sample. The estimate is deterministic for a given JAX
+version, so a small increase over main's is a real change in the model's cost.
 """
 from __future__ import annotations
 
@@ -71,6 +78,8 @@ QUANTITIES = {
     ),
 }
 SFR_MIN_LOG_SSFR = -11.0
+# Largest allowed increase of the model cost (FLOPs per value + gradient) over main's.
+MAX_MODEL_COST_INCREASE = 0.10
 COMMENT_MARKER = "jaxsedfit Chimera validation"
 RUN_TITLES = {"photometry": "Photometry only", "joint": "Photometry + spectra"}
 SHORT_TITLES = {"log_stellar_mass": "M★", "log_lbol_agn": "L<sub>bol</sub> dered.",
@@ -243,6 +252,66 @@ def fit_sample(rows, *, dsps_ssp_fn, chunk, steps, learning_rate, spectra=None):
     return results, time.time() - t0
 
 
+def model_cost(rows, dsps_ssp_fn, spectra=None) -> dict:
+    """XLA cost estimate of the log-density value and gradient for one object.
+
+    The object is the median-redshift row of ``rows`` (ties broken by id), fit with
+    the same configuration as the run. The parameters are the prior medians.
+    """
+    from functools import partial
+
+    import jax
+    from numpyro import handlers
+    from numpyro.infer import init_to_median
+    from numpyro.infer.util import log_density
+
+    from jaxsedfit.model import grahsp_photometric_model
+    from jaxsedfit.preload import build_model_context
+
+    row = sorted(rows, key=lambda r: (r["redshift"], r["id"]))[len(rows) // 2]
+    cfg = _configs([row], dsps_ssp_fn, steps=1, learning_rate=1.0e-3, spectra=spectra)[0]
+    model = partial(grahsp_photometric_model, build_model_context(cfg), include_components=False)
+    trace = handlers.trace(
+        handlers.substitute(handlers.seed(model, 0), substitute_fn=lambda site: init_to_median(site, num_samples=15))
+    ).get_trace()
+    params = {name: site["value"] for name, site in trace.items() if site["type"] == "sample" and not site["is_observed"]}
+    compiled = jax.jit(jax.value_and_grad(lambda p: log_density(model, (), {}, p)[0])).lower(params).compile()
+    cost = compiled.cost_analysis()
+    if isinstance(cost, (list, tuple)):  # older JAX returns one dict per device
+        cost = cost[0]
+    return {
+        "object_id": row["id"],
+        "flops": float(cost.get("flops", np.nan)),
+        "bytes_accessed": float(cost.get("bytes accessed", np.nan)),
+        "jax": jax.__version__,
+    }
+
+
+def check_model_cost(cost, base) -> list[str]:
+    """Fail a model-cost increase over main's beyond ``MAX_MODEL_COST_INCREASE``.
+
+    Only comparable estimates are gated: the same object and the same JAX version.
+    """
+    if not cost or not base or cost.get("object_id") != base.get("object_id") or cost.get("jax") != base.get("jax"):
+        return []
+    increase = cost["flops"] / base["flops"] - 1.0
+    if increase > MAX_MODEL_COST_INCREASE:
+        return [f"model cost is {100 * increase:.0f}% higher than main's "
+                f"({cost['flops'] / 1e6:.1f} vs {base['flops'] / 1e6:.1f} MFLOP per value + gradient, "
+                f"limit {100 * MAX_MODEL_COST_INCREASE:.0f}%)"]
+    return []
+
+
+def _cost_text(cost, base) -> str:
+    if not cost:
+        return "no estimate"
+    text = f"{cost['flops'] / 1e6:.1f} MFLOP"
+    if base and base.get("object_id") == cost.get("object_id"):
+        text += f" ({100 * (cost['flops'] / base['flops'] - 1.0):+.0f}% vs main"
+        text += ")" if base.get("jax") == cost.get("jax") else f", JAX {base.get('jax')} → {cost.get('jax')}, not gated)"
+    return text
+
+
 # --------------------------------------------------------------------------- #
 # Metrics, plot, comment
 # --------------------------------------------------------------------------- #
@@ -413,6 +482,8 @@ def render_report(runs, thresholds, *, sha, baseline=None, baseline_sha=None,
     failures = [f"{RUN_TITLES[name]}: no results (the fit did not finish; see the workflow run)" for name in missing]
     failures += [f"{RUN_TITLES[name]}: {f}" for name, m in runs.items()
                  for f in check_metrics(_quantity_metrics(m), thresholds.get(name, {}))]
+    failures += [f"{RUN_TITLES[name]}: {f}" for name, m in runs.items()
+                 for f in check_model_cost(m.get("model_cost"), ((baseline or {}).get(name) or {}).get("model_cost"))]
     status = "✅ passed" if not failures else "❌ failed"
     sizes = " · ".join(f"{RUN_TITLES[name].lower()}: {sum(b['n'] for b in m['log_stellar_mass'])} Chimeras "
                        f"in {m['elapsed_s'] / 60:.0f} min" for name, m in runs.items())
@@ -427,6 +498,12 @@ def render_report(runs, thresholds, *, sha, baseline=None, baseline_sha=None,
         "AGN log luminosity [erg/s]"
         + ("; change from main in parentheses" if baseline else "")
         + "; ❌ marks a value past its limit.",
+        "",
+        "Model cost per value + gradient: " + " · ".join(
+            f"{RUN_TITLES[name].lower()}: "
+            + _cost_text(m.get("model_cost"), ((baseline or {}).get(name) or {}).get("model_cost"))
+            for name, m in runs.items()
+        ) + f" (fails above +{100 * MAX_MODEL_COST_INCREASE:.0f}%).",
     ]
     for name, m in runs.items():
         lines += ["", f"**{RUN_TITLES[name]}**", ""] + _summary_table(
@@ -468,6 +545,8 @@ def run(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
     print(f"[chimera] fitting {len(rows)} objects" + (" with spectra" if spectra else ""), flush=True)
 
+    cost = model_cost(rows, args.dsps_ssp_fn, spectra)
+    print(f"[chimera] model cost: {cost['flops'] / 1e6:.1f} MFLOP per value + gradient ({cost['object_id']})", flush=True)
     fit_kwargs = dict(dsps_ssp_fn=args.dsps_ssp_fn, chunk=args.chunk, steps=args.steps, learning_rate=args.learning_rate)
     results, elapsed = fit_sample(rows, spectra=spectra, **fit_kwargs)
     metrics = {name: compute_metrics(results, name) for name in QUANTITIES}
@@ -478,7 +557,7 @@ def run(args) -> int:
         (out / "results_photometry_only.json").write_text(json.dumps(phot_results, indent=1))
         comparison = {name: compute_metrics(phot_results, name) for name in QUANTITIES}
     (out / "results.json").write_text(json.dumps(results, indent=1))
-    (out / "metrics.json").write_text(json.dumps({**metrics, "elapsed_s": elapsed, "sha": args.sha,
+    (out / "metrics.json").write_text(json.dumps({**metrics, "elapsed_s": elapsed, "sha": args.sha, "model_cost": cost,
                                                   **({"photometry_only": comparison} if comparison else {})}, indent=2))
     for name, q in QUANTITIES.items():
         plot_results(results, metrics[name], name, out / q["plot"])

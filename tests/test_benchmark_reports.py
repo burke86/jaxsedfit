@@ -55,3 +55,32 @@ def test_perf_report_fails_only_slowdowns_beyond_the_noise():
     assert failures == []
     _, failures = bench.render_report(base, records([1.0, 1.0, 1.0, 1.0, 1.0], compile_s=3.0))
     assert any("compile" in f for f in failures)
+
+
+def test_chimera_report_gates_model_cost_increases_over_main():
+    cv = _load("chimera_validation")
+    limits = {str(b): {"max_outlier_fraction": 0.2, "max_rms": 0.5} for b in range(4)}
+    thresholds = {"photometry": {name: limits for name in cv.QUANTITIES}}
+
+    def run(flops, jax="0.6.2", object_id="obj"):
+        return {**_metrics(0.4, 0.1), "model_cost": {"object_id": object_id, "flops": flops,
+                                                      "bytes_accessed": 1.0, "jax": jax}}
+
+    base = {"photometry": run(40.0e6)}
+    text, failures = cv.render_report({"photometry": run(42.0e6)}, thresholds, sha="abc", baseline=base, baseline_sha="main")
+    assert failures == [] and "42.0 MFLOP (+5% vs main)" in text
+
+    text, failures = cv.render_report({"photometry": run(48.0e6)}, thresholds, sha="abc", baseline=base, baseline_sha="main")
+    assert len(failures) == 1 and "model cost is 20% higher" in failures[0]
+
+    # Estimates from another JAX version or another object are shown but not gated.
+    _, failures = cv.render_report({"photometry": run(48.0e6, jax="0.7.0")}, thresholds, sha="abc",
+                                   baseline=base, baseline_sha="main")
+    assert failures == []
+    _, failures = cv.render_report({"photometry": run(48.0e6, object_id="other")}, thresholds, sha="abc",
+                                   baseline=base, baseline_sha="main")
+    assert failures == []
+    # Main's metrics from before the cost estimate existed.
+    text, failures = cv.render_report({"photometry": run(48.0e6)}, thresholds, sha="abc",
+                                      baseline={"photometry": _metrics(0.4, 0.1)}, baseline_sha="main")
+    assert failures == [] and "48.0 MFLOP" in text
