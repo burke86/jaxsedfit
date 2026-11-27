@@ -316,15 +316,23 @@ marked "fixed" is not fitted unless you give it a prior.
    * - ``feii_fwhm``, ``feii_shift`` (``fit_feii_broadening``)
      - Log-normal around 3000 km/s with width 0.3 (ln), and Normal(0, 0.01) in v/c;
        otherwise fixed at 3000 km/s and 0
+   * - ``log_feii_op_over_uv``
+     - Normal(0, 1). Scales the optical Fe II piece (redward of 3600 Å) by
+       ``exp(log_feii_op_over_uv)`` relative to the template's optical-to-UV
+       ratio. The UV piece keeps ``feii_norm``
    * - ``balmer_norm``, ``balmer_tau``, ``balmer_vel``
-     - Log-normal around 10\ :sup:`-3`, 1 and 3000 km/s, with widths 1, 0.5 and
-       0.4 (ln)
-   * - spectral Fe II (joint fits): ``spectral_feii_norm``, ``_fwhm``, ``_shift``
+     - Log-normal around 10\ :sup:`-3`, 1 and 1274 km/s, with widths 1, 0.5 and
+       0.4 (ln). ``balmer_vel`` is a Gaussian sigma. 1274 km/s is the sigma of a
+       3000 km/s FWHM. The ``balmer_vel`` prior is limited to 4247 km/s, the sigma
+       of the 10,000 km/s Fe II FWHM limit, so a very broad Balmer continuum
+       cannot erase the 3646 Å edge
+   * - spectral Fe II (joint fits): ``spectral_feii_norm``, ``_fwhm``, ``_shift``, ``_log_op_over_uv``
      - Log-normal around 10\ :sup:`-3` with width 2 (ln); log-normal around
-       3000 km/s with width 0.4 (ln); Normal(0, 0.01) in v/c
+       3000 km/s with width 0.4 (ln); Normal(0, 0.01) in v/c; Normal(0, 1) for
+       the ln optical-to-UV Fe II scale (optical piece redward of 3600 Å)
    * - spectral Balmer continuum: ``spectral_balmer_norm``, ``_tau``, ``_vel``
-     - Log-normal around 10\ :sup:`-3`, 1 and 3000 km/s, with widths 2, 0.5 and
-       0.4 (ln)
+     - Log-normal around 10\ :sup:`-3`, 1 and 1274 km/s, with widths 2, 0.5 and
+       0.4 (ln). ``_vel`` is a Gaussian sigma, limited to 4247 km/s as above
    * - spectral emission lines
      - From the line table (see :doc:`agn`)
 

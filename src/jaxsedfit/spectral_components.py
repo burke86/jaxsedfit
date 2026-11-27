@@ -20,6 +20,8 @@ import numpyro.distributions as dist
 
 from .spectral_defaults import _build_default_prior_config
 from .spectral_model import (
+    BALMER_VEL_KMS_DEFAULT,
+    BALMER_VEL_KMS_MAX,
     C_KMS,
     _balmer_continuum_jax,
     _line_meta_array,
@@ -28,6 +30,7 @@ from .spectral_model import (
     _np_to_jnp,
     _positive_multiplicative_calibration,
     _sample_tied_line_groups,
+    feii_optical_scale,
     _split_many_gauss_lnlam,
     build_tied_line_meta_from_linelist,
     tied_line_coverage_mask,
@@ -72,7 +75,10 @@ class SpectralComponentConfig:
     Fe II and Balmer-continuum templates are native f_lambda shapes; before they
     are added to the mJy continuum, their shapes are converted to f_nu by
     multiplying by ``(lambda / pivot)^2``. The sampled Fe/Balmer normalizations
-    therefore remain mJy-like amplitudes at the configured pivot. Their six
+    therefore remain mJy-like amplitudes at the configured pivot. The optical
+    Fe II piece (redward of 3600 Angstrom) is additionally scaled by
+    ``exp(feii_log_op_over_uv)``, so with an optical pivot the Fe II amplitude
+    at the pivot is ``feii_norm * exp(feii_log_op_over_uv)``. Their seven
     Normal/LogNormal sample sites advertise optional exact standard-Normal
     NUTS coordinates. Runners that do not enable that reparameterization keep
     the original physical sites and standalone behavior unchanged.
@@ -110,7 +116,12 @@ class SpectralComponentConfig:
     feii_fwhm_kms_max: float = 10000.0
     # Fe II velocity shift limit (v/c); about 3000 km/s, as in PyQSOFit.
     feii_shift_max: float = 0.01
-    balmer_velocity_kms_default: float = 3000.0
+    # Balmer-continuum width prior, as a Gaussian velocity sigma (not a FWHM).
+    # The default is the sigma of a 3000 km/s FWHM line. The upper limit is the
+    # sigma of the Fe II FWHM limit, so a very broad Balmer continuum cannot
+    # erase the 3646 Angstrom edge and stand in for continuum misfit.
+    balmer_velocity_kms_default: float = BALMER_VEL_KMS_DEFAULT
+    balmer_velocity_kms_max: float = BALMER_VEL_KMS_MAX
     broadening_convolution: str = "fft"
     feii_fnu_pivot_rest: float | None = None
     balmer_fnu_pivot_rest: float | None = 3000.0
@@ -721,10 +732,14 @@ def render_joint_feature_state(
         and feii_template_flux is not None
         and "feii_norm" in state
     ):
+        render_template_wave = jnp.asarray(feii_template_wave_rest, dtype=jnp.float64)
+        render_template_flux = jnp.asarray(feii_template_flux, dtype=jnp.float64) * feii_optical_scale(
+            render_template_wave, state.get("feii_log_op_over_uv", 0.0)
+        )
         feii_flambda = _fe_template_component(
             wave_rest,
-            jnp.asarray(feii_template_wave_rest, dtype=jnp.float64),
-            jnp.asarray(feii_template_flux, dtype=jnp.float64),
+            render_template_wave,
+            render_template_flux,
             state["feii_norm"],
             state["feii_fwhm"],
             state["feii_shift"],
@@ -896,12 +911,23 @@ def evaluate_joint_spectral_components(
             f"{site_prefix}_feii_shift",
             dist.TruncatedNormal(0.0, 0.01, low=-cfg.feii_shift_max, high=cfg.feii_shift_max),
         )
+        # Free optical-to-UV Fe II ratio. The UV piece keeps the template scale
+        # and the optical piece (redward of FEII_UV_OPTICAL_SPLIT_A) is scaled by
+        # exp(feii_log_op_over_uv). Width and shift stay shared.
+        feii_log_op_over_uv = _sample_standardizable_feature_prior(
+            f"{site_prefix}_feii_log_op_over_uv",
+            dist.Normal(0.0, 1.0),
+        )
+        sampled_template_wave = jnp.asarray(feii_template_wave_rest, dtype=jnp.float64)
+        sampled_template_flux = jnp.asarray(feii_template_flux, dtype=jnp.float64) * feii_optical_scale(
+            sampled_template_wave, feii_log_op_over_uv
+        )
         # Fe II widths are FWHM; add the instrumental FWHM in quadrature.
         feii_flambda_shape = _broaden_per_instrument(
             lambda sigma_inst: _fe_template_component(
                 wave_rest,
-                jnp.asarray(feii_template_wave_rest, dtype=jnp.float64),
-                jnp.asarray(feii_template_flux, dtype=jnp.float64),
+                sampled_template_wave,
+                sampled_template_flux,
                 feii_norm,
                 _add_in_quadrature(feii_fwhm, 2.354820045 * C_KMS * sigma_inst),
                 feii_shift,
@@ -930,7 +956,9 @@ def evaluate_joint_spectral_components(
         )
         balmer_vel = _sample_standardizable_feature_prior(
             f"{site_prefix}_balmer_vel",
-            dist.LogNormal(jnp.log(max(cfg.balmer_velocity_kms_default, 1.0)), 0.4),
+            TruncatedLogNormal(
+                jnp.log(max(cfg.balmer_velocity_kms_default, 1.0)), 0.4, cfg.balmer_velocity_kms_max
+            ),
         )
         # Balmer broadening is a velocity sigma; add the instrumental sigma in quadrature.
         balmer_flambda_shape = _broaden_per_instrument(
@@ -1007,7 +1035,12 @@ def evaluate_joint_spectral_components(
     numpyro.deterministic(f"{site_prefix}_bal_decrement", absorbed["bal_decrement"])
     numpyro.deterministic(f"{site_prefix}_total_model", total)
     if cfg.use_feii and feii_template_wave_rest is not None and feii_template_flux is not None:
-        feature_state.update(feii_norm=feii_norm, feii_fwhm=feii_fwhm, feii_shift=feii_shift)
+        feature_state.update(
+            feii_norm=feii_norm,
+            feii_fwhm=feii_fwhm,
+            feii_shift=feii_shift,
+            feii_log_op_over_uv=feii_log_op_over_uv,
+        )
     if cfg.use_balmer_continuum:
         feature_state.update(balmer_norm=balmer_norm, balmer_tau=balmer_tau, balmer_vel=balmer_vel)
     return {
