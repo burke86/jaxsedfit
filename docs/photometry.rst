@@ -69,12 +69,12 @@ Photometry from different apertures
 SED photometry often mixes measurements that see different amounts of an extended
 host: SDSS PSF fluxes, 2MASS point-source photometry, fixed apertures, catalog
 model or ``AUTO`` fluxes, and sometimes a fiber or slit spectrum. ``jaxsedfit``
-handles this with an empirical host-capture model. It is off by default; enable it
-when the measurements do not all see the same aperture:
-
-.. code-block:: python
-
-   cfg.likelihood.use_host_capture_model = True
+handles this with an empirical host-capture model. It is on by default
+(``cfg.likelihood.use_host_capture_model``) and acts only on measurements with
+aperture or PSF metadata. Bands without a ``photometry_method`` label, or labeled
+``catalog`` or ``unknown``, and without a PSF or aperture size are treated as total
+flux. Only bands labeled ``psf``, ``aperture`` or ``fiber`` without a size get a
+free captured fraction.
 
 The model builds the intrinsic source first, then gives each measurement its own
 captured fraction :math:`\eta` of the **extended** components: stellar light, host

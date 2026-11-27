@@ -466,6 +466,7 @@ def _joint_dense_mass_blocks(
         "dust_alpha", "dust_umin",
         "log_host_capture_scale_arcsec", "host_capture_scale_arcsec",
         "spectral_continuum_tilt",
+        "spectrum_agn_variability_z", "agn_variability_index",
         "fcov", "log_fcov", "si", "cool_lam", "log_cool_lam",
         "cool_width", "log_cool_width", "hot_lam", "log_hot_lam",
         "hot_width", "log_hot_width", "hot_fcov", "log_hot_fcov",
@@ -495,6 +496,9 @@ def _joint_dense_mass_blocks(
         in {"redshift", "gal_v_kms", "gal_sigma_kms", "log_gal_sigma_kms"}
     )
     add_group(lambda name: "systematics_width" in name)
+    # AGN variability responsivities trade off against one another through the
+    # shared per-spectrum amplitude.
+    add_group(lambda name: name.startswith("agn_responsivity_"))
     return blocks
 
 
@@ -931,6 +935,7 @@ class JAXSEDFit:
             "pred_fluxes",
             "variable_agn_fluxes",
             "constant_agn_fluxes",
+            "variability_component_fluxes",
             SpectralSites.MODEL_FLUX,
             SpectralSites.CONTINUUM_FLUX,
             SpectralSites.HOST_FLUX,
@@ -940,6 +945,7 @@ class JAXSEDFit:
             SpectralSites.SPECTRUM_INDEX,
             SpectralSites.SCALE,
             "log_spectrum_scale_fit",
+            "spectrum_agn_log_amplitude",
             "spectral_feature_amplitude_scale",
             "spectrum_host_capture_fraction",
             "spectroscopy_loglike",

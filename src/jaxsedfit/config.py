@@ -64,7 +64,8 @@ class PhotometryData:
     host light. If a non-total measurement has no usable spatial scale, the
     model infers an independent host-capture fraction on ``[0, 1]`` instead of
     assuming total host capture. ``catalog``, ``unknown``, and missing labels
-    use the same scale-based behavior when a spatial scale is supplied. Use ``psf`` for point-source/PSF-like
+    use the same scale-based behavior when a spatial scale is supplied, and are
+    treated as total-flux measurements when none is. Use ``psf`` for point-source/PSF-like
     measurements, ``profile`` for profile-fit photometry, ``aperture`` for
     explicit fixed apertures, ``auto`` for Kron/AUTO-like photometry,
     ``model``/``cmodel``/``petrosian`` for extended-source model measurements,
@@ -119,7 +120,22 @@ class PhotometryData:
 
 @dataclass
 class SpectroscopyData:
-    """Observed spectral measurements on an observed-frame wavelength grid."""
+    """Observed spectral measurements on an observed-frame wavelength grid.
+
+    ``aperture_diameter_arcsec`` and ``psf_fwhm_arcsec`` describe the fiber or
+    slit and the seeing. With the host capture model on, the extended host and
+    the AGN narrow lines enter the spectrum with the fraction of their light
+    that falls in the aperture after the seeing blur. With only one of the two
+    given, that one sets the capture radius.
+
+    ``flux_calibration`` says how the spectrum was flux calibrated when both
+    the aperture and the seeing are given. ``"point_source"`` (default) is the
+    SDSS, BOSS and DESI convention: standard stars observed through the same
+    fibers correct the fiber loss of a point source, so the AGN enters at full
+    flux and the host at its captured fraction divided by the point-source
+    fraction. ``"aperture"`` means the flux in the aperture without any loss
+    correction, so the AGN also enters with its point-source fraction.
+    """
     wave_obs: Sequence[float]
     fluxes: Sequence[float]
     errors: Sequence[float]
@@ -127,6 +143,7 @@ class SpectroscopyData:
     instrument: str | None = None
     aperture_diameter_arcsec: float | None = None
     psf_fwhm_arcsec: float | None = None
+    flux_calibration: str = "point_source"
     epoch_mjd: float | None = None
     resolving_power: float | None = None
 
@@ -141,6 +158,8 @@ class SpectroscopyData:
             not np.isfinite(float(self.resolving_power)) or float(self.resolving_power) <= 0.0
         ):
             raise ValueError("spectroscopy resolving_power must be positive and finite.")
+        if str(self.flux_calibration).lower() not in ("point_source", "aperture"):
+            raise ValueError("spectroscopy flux_calibration must be 'point_source' or 'aperture'.")
 
 
 @dataclass
@@ -441,7 +460,10 @@ class LikelihoodConfig:
     agn_nev: float = 0.1
     attenuation_model_uncertainty: bool = False
     lyman_break_uncertainty: bool = False
-    use_host_capture_model: bool = False
+    # Aperture capture of the extended host (see ``PhotometryData`` and
+    # ``SpectroscopyData``). It has an effect only when the data carry aperture,
+    # PSF or partial-photometry metadata.
+    use_host_capture_model: bool = True
     use_fast_photometry_projection: bool = True
     use_local_line_photometry: bool = True
     local_nebular_line_uncertainty_dex: float = 0.3
@@ -460,6 +482,72 @@ class LikelihoodConfig:
     spectrum_student_t_df: float = 5.0
     fit_spectrum_scale: bool | None = None
     spectrum_scale_prior_sigma_dex: float = 0.1
+    # AGN variability model shared by the photometry and the spectra. Every AGN
+    # part except the narrow lines varies; the galaxy (stars, nebular emission,
+    # dust) does not. One log amplitude ln A per epoch, defined at the rest-frame
+    # pivot, drives all parts.
+    #
+    # - Disk: the log flux ratio is ln A * (lambda_rest / pivot)**(-index), so
+    #   a brighter state is also a bluer state. The index is 0.5 by default,
+    #   matching the structure-function wavelength dependence (MacLeod+2010,
+    #   SF ~ lambda^-0.48) and the Wilhite+2005 composite difference spectrum.
+    # - Broad lines, Fe II, Balmer continuum and torus: the log flux ratio is
+    #   eta * ln A, with eta the responsivity relative to the 5100 A continuum
+    #   (the reverberation-mapping convention). Broad-line pixels and bands use
+    #   the family of their rest wavelength: "broad_uv" below 2000 A (C IV,
+    #   C III], Ly alpha), "broad_mgii" from 2000 to 3500 A, "broad_balmer" above.
+    #   ``agn_variability_responsivity`` maps each part to the (mean, sigma) of a
+    #   Normal prior truncated to [0, 1.5]. The means follow two-epoch SDSS
+    #   ensemble slopes (Huang+2025, ApJ 994, 183, 24,847 DR7/DR16 quasars) and
+    #   reverberation campaigns. The widths cover the spread between studies and
+    #   the decline of the responsivity with luminosity (Huang+2025, Table 3).
+    #     broad_uv 0.4 +- 0.2: C IV 0.36 +- 0.01 (Huang+2025), 0.36 from the
+    #       intrinsic Baldwin effect (Kinney+1990), 0.73 (Kong+2006).
+    #     broad_mgii 0.45 +- 0.2: 0.45 (Huang+2025), 0.46 (Zhu+2017),
+    #       0.47 (Yang+2020), 0.35-0.58 (Homan+2020).
+    #     broad_balmer 0.65 +- 0.2: H beta 0.60 and H alpha 0.78 (Huang+2025),
+    #       H beta 0.53-0.65 in NGC 5548 (Gilbert & Peterson 2003), 0.69
+    #       (Goad+2004), photoionization 0.64/0.52 (Korista & Goad 2004).
+    #     feii 0.4 +- 0.2: optical Fe II varies with 50-75% of the H beta
+    #       amplitude (Vestergaard & Peterson 2005; Barth+2013), about 90% in
+    #       NLS1s (Hu+2015); Kokubo+2014 adopt 0.2.
+    #     balmer_continuum 0.6 +- 0.2: varies like the Balmer lines (Kokubo+2014;
+    #       Patel+2025); the BLR diffuse continuum responds from about half the
+    #       H beta radius (Chelouche+2019).
+    #     torus 0.3 +- 0.2: no direct measurement. Hot dust lags the optical by
+    #       tens to hundreds of days (Koshida+2014) and smooths the variations,
+    #       so the dust emission follows a coadd or spectrum epoch only weakly.
+    #
+    # The photometric variance term adds nev * (sum over parts of response *
+    # part_flux)**2 in each band, the per-band marginal of the same model used
+    # for the spectra, with bands treated as independent epochs (catalog coadds
+    # from different surveys).
+    agn_variability_pivot_rest_a: float = 5100.0
+    agn_variability_index: float = 0.5
+    agn_variability_responsivity: dict[str, tuple[float, float]] = field(
+        default_factory=lambda: {
+            "broad_uv": (0.4, 0.2),
+            "broad_mgii": (0.45, 0.2),
+            "broad_balmer": (0.65, 0.2),
+            "feii": (0.4, 0.2),
+            "balmer_continuum": (0.6, 0.2),
+            "torus": (0.3, 0.2),
+        }
+    )
+    # The index and the responsivities are sampled only when the spectral
+    # variability term is on (photometry alone barely constrains them);
+    # otherwise they are fixed at their prior means.
+    fit_agn_variability_index: bool = True
+    agn_variability_index_prior_sigma: float = 0.2
+    fit_agn_variability_responsivity: bool = True
+    # Per-spectrum AGN variability relative to the photometry. When enabled,
+    # each spectrum gets its own ln A_i, applied to the AGN parts as above;
+    # the host and the narrow lines are not rescaled. ``ln A_i`` has a Normal
+    # prior with width sqrt(ln(1 + nev)) from the Simm+2016 luminosity relation
+    # (``agn_nev`` cap), unless ``spectrum_agn_variability_prior_sigma_dex``
+    # sets a fixed width.
+    fit_spectrum_agn_variability: bool = False
+    spectrum_agn_variability_prior_sigma_dex: float | None = None
 
 @dataclass
 class InferenceConfig:
@@ -858,6 +946,7 @@ class LikelihoodPriorConfig:
     log_host_capture_slope: Any | None = None
     spectrum_scale: Any | None = None
     log_spectrum_scale: Any | None = None
+    agn_variability_index: Any | None = None
 
     def to_mapping(self) -> dict[str, Any]:
         """Convert likelihood prior settings into model-site keys."""

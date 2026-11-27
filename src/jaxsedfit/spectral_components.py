@@ -785,6 +785,7 @@ def evaluate_joint_spectral_components(
     bal_continuum_mjy=None,
     instrument_index=None,
     pixel_padding=None,
+    variability_factors=None,
 ):
     """Evaluate shared spectral components around an external continuum.
 
@@ -819,6 +820,13 @@ def evaluate_joint_spectral_components(
     pixel_padding
         Optional boolean array marking padding pixels appended to give spectra a
         common length (batched fits); they are left out of the tilt pivot.
+    variability_factors
+        Optional mapping of per-pixel multiplicative factors for the epoch of
+        each pixel, with keys ``line_broad``, ``feii`` and ``balmer``. They scale
+        the evaluated components (AGN variability relative to the sampled
+        reference state). The sampled amplitudes in ``state`` stay at the
+        reference state, and the unscaled Fe II is returned as
+        ``feii_reference``.
     feii_template_wave_rest, feii_template_flux
         Rest-frame Fe II template sampled as an f_lambda-shaped relative
         spectrum. The evaluated Fe II component is converted to f_nu shape
@@ -985,9 +993,14 @@ def evaluate_joint_spectral_components(
     custom_continuum_model = absorbed["custom_continuum"]
     line_broad_model = absorbed["line_broad"]
     line_narrow_model = absorbed["line_narrow"]
-    line_model = line_broad_model + line_narrow_model
     feii_model = absorbed["feii"]
+    feii_reference_model = feii_model
     balmer_model = absorbed["balmer"]
+    if variability_factors is not None:
+        line_broad_model = variability_factors.get("line_broad", 1.0) * line_broad_model
+        feii_model = variability_factors.get("feii", 1.0) * feii_model
+        balmer_model = variability_factors.get("balmer", 1.0) * balmer_model
+    line_model = line_broad_model + line_narrow_model
     continuum_model = continuum_model + custom_continuum_model
     total = continuum_model + line_model + feii_model + balmer_model
     for component in (*cfg.custom_components, *cfg.custom_line_components):
@@ -1017,6 +1030,7 @@ def evaluate_joint_spectral_components(
         "line_broad": line_broad_model,
         "line_narrow": line_narrow_model,
         "feii": feii_model,
+        "feii_reference": feii_reference_model,
         "balmer": balmer_model,
         "custom_continuum": custom_continuum_model,
         "custom": custom_models,

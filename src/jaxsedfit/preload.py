@@ -319,6 +319,11 @@ class ModelContext:
     spec_spectrum_index: np.ndarray
     spec_effective_spatial_scale_arcsec: np.ndarray
     spec_aperture_diameter_arcsec: np.ndarray
+    # Host capture fraction of each spectrum on SPEC_CAPTURE_LOG_R_GRID (ln host
+    # scale in arcsec), shape (n_spectra, n_grid), and the AGN (point-source)
+    # capture fraction of each spectrum.
+    spec_host_capture_table: np.ndarray
+    spec_agn_capture_fraction: np.ndarray
     spec_instruments: tuple[str, ...]
     spec_resolving_power: np.ndarray
     spectral_prior_config: Mapping[str, Any] | None
@@ -353,6 +358,84 @@ _FIXED_LOCAL_LINE_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.n
 _FIXED_LOCAL_NEBULAR_LINE_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
 _FILTER_MAX_OUTSIDE_FRACTION = 0.01
 C_KMS = 299792.458
+
+
+# ln host capture scale (arcsec) grid of ``ModelContext.spec_host_capture_table``.
+SPEC_CAPTURE_LOG_R_GRID = np.linspace(np.log(1.0e-3), np.log(1.0e3), 241)
+
+
+def _seeing_aperture_capture(host_scale_arcsec, aperture_radius_arcsec, psf_fwhm_arcsec, n_quad=256):
+    """Fraction of the host light inside a circular aperture after Gaussian seeing.
+
+    The host has the profile of the capture law, Sigma ~ (1 + (r/R)^2)^-2, whose
+    enclosed fraction is r^2 / (r^2 + R^2). A point at radius r blurred by a
+    Gaussian of width sigma lands inside radius a with probability
+    ncx2.cdf(a^2/sigma^2, 2, r^2/sigma^2), and this is integrated over the
+    profile with Gauss-Legendre quadrature in u = r^2 / (r^2 + R^2).
+
+    Parameters
+    ----------
+    host_scale_arcsec : array_like
+        Host capture scales R (arcsec).
+    aperture_radius_arcsec, psf_fwhm_arcsec : float
+        Aperture radius and seeing FWHM (arcsec).
+    """
+    from scipy.stats import ncx2
+
+    sigma = float(psf_fwhm_arcsec) / 2.354820045
+    nodes, weights = np.polynomial.legendre.leggauss(n_quad)
+    u = 0.5 * (nodes + 1.0)
+    w = 0.5 * weights
+    host = np.asarray(host_scale_arcsec, dtype=float)[:, None]
+    r2 = host**2 * u / (1.0 - u)
+    p_in = ncx2.cdf((float(aperture_radius_arcsec) / sigma) ** 2, 2, r2 / sigma**2)
+    return np.sum(w * p_in, axis=1)
+
+
+def spectral_aperture_capture_tables(aperture_diameter_arcsec, psf_fwhm_arcsec, flux_calibration):
+    """Host capture tables and AGN capture fractions of each spectrum.
+
+    Parameters
+    ----------
+    aperture_diameter_arcsec, psf_fwhm_arcsec : array_like
+        Per-spectrum aperture diameter and seeing FWHM (arcsec, NaN if unknown).
+    flux_calibration : sequence of str
+        Per-spectrum ``SpectroscopyData.flux_calibration``.
+
+    Returns
+    -------
+    host_table : numpy.ndarray
+        Host capture fraction on ``SPEC_CAPTURE_LOG_R_GRID``, shape
+        (n_spectra, n_grid). With both the aperture and the seeing, the exact
+        seeing-blurred capture, divided by the point-source capture for
+        point-source calibrated spectra. With only one, the capture law with that
+        radius (the aperture radius, or sqrt(2) sigma of the PSF). With neither, 1.
+    agn_capture : numpy.ndarray
+        Point-source capture fraction, below 1 only for ``"aperture"`` calibrated
+        spectra with both the aperture and the seeing.
+    """
+    aperture = np.asarray(aperture_diameter_arcsec, dtype=float)
+    fwhm = np.asarray(psf_fwhm_arcsec, dtype=float)
+    host_scale = np.exp(SPEC_CAPTURE_LOG_R_GRID)
+    host_table = np.ones((aperture.size, host_scale.size), dtype=float)
+    agn_capture = np.ones(aperture.size, dtype=float)
+    for i in range(aperture.size):
+        has_aperture = bool(np.isfinite(aperture[i]) and aperture[i] > 0.0)
+        has_psf = bool(np.isfinite(fwhm[i]) and fwhm[i] > 0.0)
+        if has_aperture and has_psf:
+            radius = 0.5 * aperture[i]
+            sigma = fwhm[i] / 2.354820045
+            point = 1.0 - np.exp(-(radius**2) / (2.0 * sigma**2))
+            host = _seeing_aperture_capture(host_scale, radius, fwhm[i])
+            if str(flux_calibration[i]).lower() == "aperture":
+                host_table[i] = host
+                agn_capture[i] = point
+            else:
+                host_table[i] = np.clip(host / point, 0.0, 1.0)
+        elif has_aperture or has_psf:
+            radius = 0.5 * aperture[i] if has_aperture else np.sqrt(2.0) * fwhm[i] / 2.354820045
+            host_table[i] = radius**2 / (radius**2 + host_scale**2)
+    return host_table, agn_capture
 
 
 def clear_per_object_caches() -> None:
@@ -2199,10 +2282,14 @@ def build_model_context(cfg: FitConfig, spec_pad_to: Sequence[int] | None = None
         else [None] * len(fluxes),
         dtype=object,
     )
+    # Total-flux methods capture the whole host. Unlabeled, "catalog" and
+    # "unknown" bands without a spatial scale are also taken as total flux; only
+    # bands labeled psf/aperture/fiber without a scale get a free capture fraction.
+    has_phot_scale = np.isfinite(effective_spatial_scale_arcsec) & (effective_spatial_scale_arcsec > 0.0)
     photometry_total_capture = np.isin(
         photometry_methods,
         ("profile", "auto", "model", "cmodel", "petrosian"),
-    )
+    ) | (~np.isin(photometry_methods, ("psf", "aperture", "fiber")) & ~has_phot_scale)
     fluxes = np.nan_to_num(fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     errors = np.nan_to_num(errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     errors = np.clip(np.abs(errors), 1.0e-30, 1.0e30)
@@ -2244,6 +2331,11 @@ def build_model_context(cfg: FitConfig, spec_pad_to: Sequence[int] | None = None
         np.isfinite(spec_aperture_diameter_arcsec) & (spec_aperture_diameter_arcsec > 0.0),
         0.5 * spec_aperture_diameter_arcsec,
         spec_psf_effective_radius_arcsec,
+    )
+    spec_host_capture_table, spec_agn_capture_fraction = spectral_aperture_capture_tables(
+        spec_aperture_diameter_arcsec,
+        spec_psf_fwhm_arcsec,
+        [str(spectrum.flux_calibration).lower() for spectrum in spectra],
     )
     if spectra:
         spec_wave_chunks = []
@@ -2310,6 +2402,8 @@ def build_model_context(cfg: FitConfig, spec_pad_to: Sequence[int] | None = None
         spec_padding = np.array([], dtype=bool)
         spec_effective_spatial_scale_arcsec = np.array([], dtype=float)
         spec_aperture_diameter_arcsec = np.array([], dtype=float)
+        spec_host_capture_table = np.zeros((0, SPEC_CAPTURE_LOG_R_GRID.size), dtype=float)
+        spec_agn_capture_fraction = np.array([], dtype=float)
         spec_instruments = ()
         spec_resolving_power = np.array([], dtype=float)
 
@@ -2502,6 +2596,8 @@ def build_model_context(cfg: FitConfig, spec_pad_to: Sequence[int] | None = None
         spec_spectrum_index=np.asarray(spec_spectrum_index, dtype=int),
         spec_effective_spatial_scale_arcsec=np.asarray(spec_effective_spatial_scale_arcsec, dtype=float),
         spec_aperture_diameter_arcsec=np.asarray(spec_aperture_diameter_arcsec, dtype=float),
+        spec_host_capture_table=np.asarray(spec_host_capture_table, dtype=float),
+        spec_agn_capture_fraction=np.asarray(spec_agn_capture_fraction, dtype=float),
         spec_instruments=spec_instruments,
         spec_resolving_power=spec_resolving_power,
         spectral_prior_config=spectral_prior_config,

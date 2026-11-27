@@ -47,12 +47,14 @@ normal density and cumulative distribution. The effective variance is
    \sigma_{{\rm eff},b}^2 = \sigma_b^2
    + \left( w_{\rm sys} F_b \right)^2
    + \left( w_{\rm AGN} F_b^{\rm AGN} \right)^2
-   + {\rm NEV}(L_{\rm bol}) \left( F_b^{\rm AGN} \right)^2
+   + {\rm NEV}(L_{\rm bol}) \left( F_b^{\rm var} \right)^2
    + \left( s_{\rm neb} F_b^{\rm neb} \right)^2
    \; [ + \text{optional terms} ],
 
 where :math:`F_b^{\rm AGN}` is the AGN part of the model flux (disk, torus and AGN
-emission features) and :math:`F_b^{\rm neb}` the host nebular-line flux in the band.
+emission features), :math:`F_b^{\rm var}` its variable part weighted by the
+response of each AGN part (see ``variability_uncertainty`` below) and
+:math:`F_b^{\rm neb}` the host nebular-line flux in the band.
 `Photometric likelihood`_ describes each term.
 
 **Spectra.** For pixels :math:`p` of all spectra, with observed flux :math:`D_p`,
@@ -160,6 +162,18 @@ The variance terms in `Full likelihood`_:
    - 45)}` with :math:`L_{\rm bol}` in erg s\ :sup:`-1`, smoothly capped at
    ``agn_nev`` (0.1): :math:`{\rm NEV} = \left( {\rm NEV}_{\rm S16}^{-8} +
    {\rm agn\_nev}^{-8} \right)^{-1/8}`. On by default.
+
+   The AGN parts do not vary by the same fraction. With :math:`\ln A` the log
+   amplitude at 5100 Å rest, the disk varies by
+   :math:`\ln A\,(\lambda_{\rm rest}/5100\,{\rm Å})^{-\delta}` (bluer when brighter,
+   ``agn_variability_index`` :math:`\delta` = 0.5), and the broad lines, Fe II,
+   Balmer continuum and torus by :math:`\eta_c \ln A`, with responsivities
+   :math:`\eta_c` from ``agn_variability_responsivity``. The narrow lines do not
+   vary. The variance term uses
+   :math:`F_b^{\rm var} = (\lambda_b/5100\,{\rm Å})^{-\delta} F_b^{\rm disk}
+   + \sum_c \eta_c F_b^{c}`, at the rest wavelength :math:`\lambda_b` of the band,
+   which treats each band as a separate epoch (catalog coadds). The responsivity
+   defaults and sources are listed in ``LikelihoodConfig``.
 
 ``local_nebular_line_uncertainty_dex`` (:math:`s_{\rm neb}`)
    With ``use_local_line_photometry`` (default) and nebular emission on, the host

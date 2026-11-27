@@ -3029,6 +3029,7 @@ def photometric_loglike(
     local_nebular_line_uncertainty_dex=0.0,
     agn_systematics_width=0.0,
     return_diagnostics=False,
+    variability_component=None,
 ):
     """Evaluate the broadband photometric log-likelihood for one model state.
 
@@ -3080,11 +3081,19 @@ def photometric_loglike(
         If True, also return standardized-residual chi-square diagnostics.
         These diagnostics exclude censored upper limits and use the effective
         variance constructed by this likelihood.
+    variability_component : jax.Array, optional
+        Band fluxes whose square, times the normalized excess variance, gives the
+        variability variance. Defaults to ``agn_component`` (the legacy gray term).
     """
     pred_fluxes = jnp.asarray(pred_fluxes, dtype=jnp.float64)
     obs_fluxes = jnp.asarray(obs_fluxes, dtype=jnp.float64)
     obs_errors = jnp.asarray(obs_errors, dtype=jnp.float64)
     agn_component = jnp.asarray(agn_component, dtype=jnp.float64)
+    variability_component = (
+        agn_component
+        if variability_component is None
+        else jnp.asarray(variability_component, dtype=jnp.float64)
+    )
     transmitted_fraction = jnp.asarray(transmitted_fraction, dtype=jnp.float64)
     active = jnp.asarray(data_mask, dtype=bool) | jnp.asarray(upper_limits, dtype=bool)
     input_valid = (
@@ -3095,7 +3104,7 @@ def photometric_loglike(
     )
     auxiliary_valid = jnp.ones_like(input_valid)
     if variability_uncertainty:
-        auxiliary_valid = auxiliary_valid & jnp.isfinite(agn_component)
+        auxiliary_valid = auxiliary_valid & jnp.isfinite(agn_component) & jnp.isfinite(variability_component)
     if attenuation_model_uncertainty:
         auxiliary_valid = auxiliary_valid & jnp.isfinite(transmitted_fraction)
     if nebular_line_component is not None:
@@ -3105,10 +3114,11 @@ def photometric_loglike(
     obs_fluxes = jnp.nan_to_num(obs_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     obs_errors = jnp.nan_to_num(obs_errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     agn_component = jnp.nan_to_num(agn_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
+    variability_component = jnp.nan_to_num(variability_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     transmitted_fraction = jnp.nan_to_num(transmitted_fraction, nan=1.0e-4, posinf=1.0, neginf=1.0e-4)
     obs_variance = obs_errors**2
     variability_nev = _agn_variability_nev(agn_bol_lum_w, agn_nev)
-    var_variance = jnp.where(variability_uncertainty, variability_nev * agn_component**2, 0.0)
+    var_variance = jnp.where(variability_uncertainty, variability_nev * variability_component**2, 0.0)
     # Model-uncertainty terms scale with the model flux, as in GRAHSP
     # (dualsampler.chi2_with_norm: sys_variance = (sys_error * model_fluxes)**2).
     # The AGN-template mismatch is an independent contribution.
@@ -3310,6 +3320,177 @@ def spectroscopic_loglike(
         "chi2": chi2,
         "n_eff": n_eff,
         "reduced_chi2": reduced_chi2,
+    }
+
+
+def _spectrum_agn_variability_factor(log_amplitude, variability_index, rest_wave, pivot_rest_a):
+    """Return the multiplicative factor on the AGN disk flux of a variable epoch.
+
+    The log flux ratio to the reference (photometric) state is
+    ``log_amplitude * (rest_wave / pivot_rest_a) ** (-variability_index)``.
+    For ``variability_index > 0`` the fractional change grows toward the blue,
+    so a brighter epoch is also a bluer epoch, and the factor stays positive
+    at every wavelength.
+
+    Parameters
+    ----------
+    log_amplitude : float or jax.Array
+        Natural-log flux ratio at ``pivot_rest_a``, per pixel or scalar.
+    variability_index : float or jax.Array
+        Power-law index of the fractional variability amplitude with wavelength.
+    rest_wave : jax.Array
+        Rest-frame wavelength in Angstrom.
+    pivot_rest_a : float
+        Rest-frame pivot wavelength in Angstrom.
+    """
+    rest_wave = jnp.maximum(jnp.asarray(rest_wave, dtype=jnp.float64), 1.0)
+    shape = (rest_wave / pivot_rest_a) ** (-jnp.asarray(variability_index, dtype=jnp.float64))
+    return jnp.exp(jnp.asarray(log_amplitude, dtype=jnp.float64) * shape)
+
+
+def _sample_agn_variability_index(cfg, prior_config):
+    """Sample (or fix) the wavelength index of the AGN fractional variability.
+
+    The index is shared by the spectral variability term and the
+    photometric variance term.
+    """
+    lcfg = cfg.likelihood
+    if bool(lcfg.fit_agn_variability_index):
+        return numpyro.sample(
+            "agn_variability_index",
+            _prior_distribution(
+                prior_config,
+                "agn_variability_index",
+                dist.TruncatedNormal(
+                    float(lcfg.agn_variability_index),
+                    float(lcfg.agn_variability_index_prior_sigma),
+                    low=0.0,
+                ),
+            ),
+        )
+    return jnp.asarray(float(lcfg.agn_variability_index), dtype=jnp.float64)
+
+
+AGN_VARIABILITY_RESPONSIVITY_PARTS = (
+    "broad_uv",
+    "broad_mgii",
+    "broad_balmer",
+    "feii",
+    "balmer_continuum",
+    "torus",
+)
+# Rest-frame edges (Angstrom) between the broad-line responsivity families:
+# UV (C IV, C III], Ly alpha) | Mg II | Balmer.
+AGN_BROAD_LINE_FAMILY_EDGES_A = (2000.0, 3500.0)
+
+
+def _agn_variability_responsivities(cfg, prior_config, sample_parts=()):
+    """Return the AGN variability responsivity of each part.
+
+    Parts in ``sample_parts`` are sampled as ``agn_responsivity_<part>`` from a
+    Normal prior truncated to [0, 1.5] (overridable through ``prior_config``)
+    when ``fit_agn_variability_responsivity`` is set. Every other part is fixed
+    at its prior mean.
+    """
+    lcfg = cfg.likelihood
+    table = dict(lcfg.agn_variability_responsivity)
+    unknown = set(table) - set(AGN_VARIABILITY_RESPONSIVITY_PARTS)
+    if unknown:
+        raise ValueError(f"Unknown agn_variability_responsivity parts: {sorted(unknown)}")
+    out = {}
+    for part in AGN_VARIABILITY_RESPONSIVITY_PARTS:
+        mean, sigma = table.get(part, (0.0, 0.0))
+        if bool(lcfg.fit_agn_variability_responsivity) and part in sample_parts and float(sigma) > 0.0:
+            site = f"agn_responsivity_{part}"
+            out[part] = numpyro.sample(
+                site,
+                _prior_distribution(
+                    prior_config,
+                    site,
+                    dist.TruncatedNormal(float(mean), float(sigma), low=0.0, high=1.5),
+                ),
+            )
+        else:
+            out[part] = jnp.asarray(float(mean), dtype=jnp.float64)
+    return out
+
+
+def _broad_line_responsivity(responsivity, rest_wave):
+    """Return the broad-line responsivity at each rest wavelength (Angstrom)."""
+    rest_wave = jnp.asarray(rest_wave, dtype=jnp.float64)
+    uv_edge, mgii_edge = AGN_BROAD_LINE_FAMILY_EDGES_A
+    return jnp.where(
+        rest_wave < uv_edge,
+        responsivity["broad_uv"],
+        jnp.where(rest_wave < mgii_edge, responsivity["broad_mgii"], responsivity["broad_balmer"]),
+    )
+
+
+def _sample_spectrum_agn_variability(
+    cfg,
+    prior_config,
+    agn_bol_luminosity,
+    spec_wave_obs,
+    redshift,
+    spec_spectrum_index,
+    n_spectra,
+    responsivity_parts=(),
+):
+    """Sample the per-spectrum AGN variability state.
+
+    The per-spectrum log amplitude is non-centered. A standard-Normal
+    ``spectrum_agn_variability_z`` is multiplied by the prior width, which by
+    default follows the Simm+2016 normalized excess variance at the current
+    AGN luminosity. The wavelength index and the responsivities are shared by
+    all spectra.
+
+    Parameters
+    ----------
+    responsivity_parts : sequence of str
+        Responsivity parts active in the spectral model; these are sampled.
+
+    Returns
+    -------
+    dict
+        ``disk`` (multiplicative factor on the disk flux at each pixel),
+        ``pixel_log_amplitude`` (ln A of the spectrum of each pixel),
+        ``log_amplitude`` (one value per spectrum, scalar for one spectrum),
+        ``index`` (shared wavelength index) and ``responsivity`` (by part).
+    """
+    lcfg = cfg.likelihood
+    if lcfg.spectrum_agn_variability_prior_sigma_dex is None:
+        nev = _agn_variability_nev(agn_bol_luminosity, lcfg.agn_nev)
+        sigma_ln = jnp.sqrt(jnp.log1p(nev))
+    else:
+        sigma_ln = jnp.asarray(
+            np.log(10.0) * float(lcfg.spectrum_agn_variability_prior_sigma_dex),
+            dtype=jnp.float64,
+        )
+    z_prior = dist.Normal(0.0, 1.0)
+    z = numpyro.sample(
+        "spectrum_agn_variability_z",
+        z_prior.expand([n_spectra]).to_event(1) if n_spectra > 1 else z_prior,
+    )
+    log_amplitude = sigma_ln * z
+    variability_index = _sample_agn_variability_index(cfg, prior_config)
+    responsivity = _agn_variability_responsivities(cfg, prior_config, responsivity_parts)
+    pixel_log_amplitude = log_amplitude[spec_spectrum_index] if n_spectra > 1 else log_amplitude
+    rest_wave = spec_wave_obs / jnp.maximum(1.0 + redshift, 1.0e-8)
+    disk_factor = _spectrum_agn_variability_factor(
+        pixel_log_amplitude,
+        variability_index,
+        rest_wave,
+        float(lcfg.agn_variability_pivot_rest_a),
+    )
+    numpyro.deterministic("spectrum_agn_log_amplitude", log_amplitude)
+    numpyro.deterministic("spectrum_agn_variability_sigma_ln", sigma_ln)
+    return {
+        "disk": disk_factor,
+        "pixel_log_amplitude": pixel_log_amplitude * jnp.ones_like(rest_wave),
+        "log_amplitude": log_amplitude,
+        "index": variability_index,
+        "responsivity": responsivity,
+        "rest_wave": rest_wave,
     }
 
 
@@ -3573,6 +3754,7 @@ def _evaluate_spectral_components(
     instrument_index=None,
     pixel_padding=None,
     line_amp_groups=None,
+    variability_factors=None,
 ):
     """Evaluate the built-in detailed spectral components.
 
@@ -3619,6 +3801,9 @@ def _evaluate_spectral_components(
     line_amp_groups : numpy.ndarray, optional
         Per-group (init, min, max) line amplitudes, shape (3, n_groups), replacing the
         line table's.
+    variability_factors : dict, optional
+        Per-pixel AGN variability factors on the broad lines, Fe II and Balmer
+        continuum (keys ``line_broad``, ``feii``, ``balmer``).
     """
     try:
         from .spectral_custom_components import is_bal_absorption_component
@@ -3683,6 +3868,7 @@ def _evaluate_spectral_components(
         bal_continuum_mjy=bal_continuum_mjy,
         instrument_index=instrument_index,
         pixel_padding=pixel_padding,
+        variability_factors=variability_factors,
     )
     result["component_config"] = component_cfg
     return result
@@ -4866,10 +5052,14 @@ def evaluate_photometric_state(
             1.0,
             jnp.where(phot_scale_valid, phot_capture_raw, missing_psf_capture),
         )
-        spec_capture_raw = _host_capture_fraction(
-            spec_spatial_scale_arcsec,
-            jnp.exp(log_host_capture_scale_arcsec),
-        )
+        # Per-spectrum host capture, tabulated at preload in ln host scale (the
+        # aperture blurred by the seeing when both are known).
+        from .preload import SPEC_CAPTURE_LOG_R_GRID
+
+        spec_capture_table = jnp.asarray(context.spec_host_capture_table, dtype=jnp.float64)
+        spec_capture_raw = jax.vmap(
+            lambda row: jnp.interp(log_host_capture_scale_arcsec, jnp.asarray(SPEC_CAPTURE_LOG_R_GRID), row)
+        )(spec_capture_table) if spec_capture_table.shape[0] else jnp.ones_like(spec_spatial_scale_arcsec)
         spec_scale_valid = jnp.isfinite(spec_spatial_scale_arcsec) & (spec_spatial_scale_arcsec > 0.0)
         spec_host_capture_fraction_by_spectrum = jnp.where(spec_scale_valid, spec_capture_raw, 1.0)
     else:
@@ -4903,6 +5093,9 @@ def evaluate_photometric_state(
     spec_continuum_model_fluxes = jnp.zeros_like(spec_fluxes)
     spectrum_scale = jnp.asarray(1.0, dtype=jnp.float64)
     log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
+    agn_variability_index = None
+    agn_responsivity = None
+    spec_feature_variability_factors = None
     feature_amplitude_scale = jnp.asarray(1.0, dtype=jnp.float64)
     spec_chi2 = jnp.asarray(jnp.nan, dtype=jnp.float64)
     spec_n_eff = jnp.asarray(0.0, dtype=jnp.float64)
@@ -4912,6 +5105,8 @@ def evaluate_photometric_state(
     spectral_extrapolated_feii_photometry = jnp.zeros_like(pred_fluxes)
     spectral_balmer_photometry = jnp.zeros_like(pred_fluxes)
     spectral_extrapolated_broad_photometry = jnp.zeros_like(pred_fluxes)
+    spectral_broad_photometry = jnp.zeros_like(pred_fluxes)
+    spectral_custom_broad_photometry = jnp.zeros_like(pred_fluxes)
     spectral_extrapolated_narrow_photometry = jnp.zeros_like(pred_fluxes)
     spectral_extrapolated_broad_lumin = jnp.zeros_like(line_wave)
     spectral_extrapolated_narrow_lumin = jnp.zeros_like(line_wave)
@@ -5056,6 +5251,64 @@ def evaluate_photometric_state(
             spec_disk_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_disk_lambda)
             spec_torus_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_torus_lambda)
             spec_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_model_lambda)
+        # AGN variability between each spectrum epoch and the photometry. All AGN
+        # parts except the narrow lines vary: the disk with a bluer-when-brighter
+        # wavelength dependence, the torus here and the broad lines, Fe II and
+        # Balmer continuum inside the spectral engine, each with its responsivity.
+        # The host stays at the photometric state.
+        if fit_agn and bool(cfg.likelihood.fit_spectrum_agn_variability):
+            responsivity_parts = ["torus"]
+            if include_spectral_features:
+                if bool(cfg.agn.fit_lines and include_spectral_lines):
+                    responsivity_parts += ["broad_uv", "broad_mgii", "broad_balmer"]
+                if bool(cfg.agn.fit_feii):
+                    responsivity_parts.append("feii")
+                if bool(cfg.agn.fit_balmer_continuum):
+                    responsivity_parts.append("balmer_continuum")
+            spec_agn_variability = _sample_spectrum_agn_variability(
+                cfg,
+                prior_config,
+                agn_bol_luminosity,
+                spec_wave_obs,
+                redshift,
+                spec_spectrum_index,
+                len(context.spec_instruments),
+                responsivity_parts=tuple(responsivity_parts),
+            )
+            agn_variability_index = spec_agn_variability["index"]
+            agn_responsivity = spec_agn_variability["responsivity"]
+            spec_disk_factor = spec_agn_variability["disk"]
+            spec_pixel_log_amplitude = spec_agn_variability["pixel_log_amplitude"]
+            spec_torus_factor = jnp.exp(agn_responsivity["torus"] * spec_pixel_log_amplitude)
+            spec_model_fluxes = (
+                spec_model_fluxes
+                + (spec_disk_factor - 1.0) * spec_disk_model_fluxes
+                + (spec_torus_factor - 1.0) * spec_torus_model_fluxes
+            )
+            spec_disk_model_fluxes = spec_disk_factor * spec_disk_model_fluxes
+            spec_torus_model_fluxes = spec_torus_factor * spec_torus_model_fluxes
+            spec_feature_variability_factors = {
+                "line_broad": jnp.exp(
+                    _broad_line_responsivity(agn_responsivity, spec_agn_variability["rest_wave"])
+                    * spec_pixel_log_amplitude
+                ),
+                "feii": jnp.exp(agn_responsivity["feii"] * spec_pixel_log_amplitude),
+                "balmer": jnp.exp(agn_responsivity["balmer_continuum"] * spec_pixel_log_amplitude),
+            }
+        # Point-source (AGN) fiber or slit loss for spectra not calibrated for it
+        # (``SpectroscopyData.flux_calibration="aperture"`` with aperture and seeing).
+        agn_capture = np.asarray(context.spec_agn_capture_fraction, dtype=float)
+        if cfg.likelihood.use_host_capture_model and agn_capture.size and np.any(agn_capture < 1.0):
+            pixel_agn_capture = jnp.asarray(agn_capture)[spec_spectrum_index]
+            spec_model_fluxes = spec_model_fluxes + (pixel_agn_capture - 1.0) * (
+                spec_disk_model_fluxes + spec_torus_model_fluxes
+            )
+            spec_disk_model_fluxes = pixel_agn_capture * spec_disk_model_fluxes
+            spec_torus_model_fluxes = pixel_agn_capture * spec_torus_model_fluxes
+            base_factors = spec_feature_variability_factors or {}
+            spec_feature_variability_factors = {
+                key: pixel_agn_capture * base_factors.get(key, 1.0) for key in ("line_broad", "feii", "balmer")
+            }
         spec_continuum_model_fluxes = spec_model_fluxes
         # Gray flux-scale factor of each spectrum.
         fit_spectrum_scale = (
@@ -5122,6 +5375,7 @@ def evaluate_photometric_state(
                 instrument_index=context.spec_spectrum_index,
                 pixel_padding=context.spec_padding if context.spec_padding.size else None,
                 line_amp_groups=context.spec_line_amp_groups if context.spec_line_amp_groups.size else None,
+                variability_factors=spec_feature_variability_factors,
             )
             spectral_cfg = cfg.agn
             if host_capture_enabled and bool(
@@ -5254,7 +5508,7 @@ def evaluate_photometric_state(
                     & (spec_rest_for_feii <= spectral_line_coverage_rest[1])
                 )
             anchor_shape = jnp.where(spec_feii_anchor_mask, simple_spec_feii_shape, 0.0)
-            anchor_spectral = jnp.where(spec_feii_anchor_mask, spectral_components["feii"], 0.0)
+            anchor_spectral = jnp.where(spec_feii_anchor_mask, spectral_components.get("feii_reference", spectral_components["feii"]), 0.0)
             sed_feii_scale = jnp.sum(anchor_shape * anchor_spectral) / jnp.maximum(
                 jnp.sum(anchor_shape * anchor_shape), 1.0e-30
             )
@@ -5595,6 +5849,47 @@ def evaluate_photometric_state(
         agn_fluxes - constant_agn_fluxes,
         jnp.zeros_like(pred_fluxes),
     )
+    # Variable AGN component in the photometric variance term: each AGN part
+    # weighted by its response to ln A (see ``LikelihoodConfig``).
+    if fit_agn and cfg.likelihood.variability_uncertainty:
+        if agn_variability_index is None:
+            agn_variability_index = float(cfg.likelihood.agn_variability_index)
+        if agn_responsivity is None:
+            agn_responsivity = _agn_variability_responsivities(cfg, prior_config)
+        band_rest_wave = jnp.maximum(filter_wavelength / jnp.maximum(1.0 + redshift, 1.0e-8), 1.0)
+        disk_response = (
+            band_rest_wave / float(cfg.likelihood.agn_variability_pivot_rest_a)
+        ) ** (-agn_variability_index)
+        spectral_lines_replace_native = bool(
+            spectral_engine_enabled
+            and include_spectral_features
+            and cfg.agn.fit_lines
+            and include_spectral_lines
+        )
+        if spectral_lines_replace_native:
+            native_broad_band = jnp.zeros_like(pred_fluxes)
+        elif correct_agn_line_photometry:
+            native_broad_band = local_broad_line_fluxes
+        else:
+            native_broad_band = band_fluxes(line_bl_att_rest)
+        broad_band = (
+            native_broad_band
+            + spectral_broad_photometry
+            + spectral_custom_broad_photometry
+            + spectral_extrapolated_broad_photometry
+        )
+        feii_band = band_fluxes(feii_att_rest) + spectral_feii_photometry + spectral_extrapolated_feii_photometry
+        balmer_band = band_fluxes(balmer_att_rest) + spectral_balmer_photometry
+        variability_component = (
+            disk_response * band_fluxes(disk_att_rest)
+            + _broad_line_responsivity(agn_responsivity, band_rest_wave) * broad_band
+            + agn_responsivity["feii"] * feii_band
+            + agn_responsivity["balmer_continuum"] * balmer_band
+            + agn_responsivity["torus"] * band_fluxes(torus_att_rest)
+        )
+    else:
+        variability_component = agn_fluxes
+    numpyro.deterministic("variability_component_fluxes", variability_component)
     logl, sed_chi2_diagnostics = photometric_loglike(
         pred_fluxes=pred_fluxes,
         obs_fluxes=obs_fluxes,
@@ -5606,6 +5901,7 @@ def evaluate_photometric_state(
         likelihood_family=cfg.likelihood.likelihood_family,
         student_t_df=cfg.likelihood.student_t_df,
         agn_component=agn_fluxes,
+        variability_component=variability_component,
         agn_bol_lum_w=agn_bol_luminosity,
         agn_nev=cfg.likelihood.agn_nev,
         variability_uncertainty=cfg.likelihood.variability_uncertainty,

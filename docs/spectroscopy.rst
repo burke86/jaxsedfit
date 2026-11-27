@@ -102,15 +102,26 @@ Set ``fit_spectrum_scale=False`` only when the spectrum is calibrated to the sam
 total flux as the photometry, as for simulated data. The outputs are
 ``log_spectrum_scale`` (natural log) and ``spectrum_scale_fit``.
 
-**Aperture capture.** With ``cfg.likelihood.use_host_capture_model = True``, the
-spectrum captures a fraction :math:`\eta_{\rm spec}` of the extended host, set by
-its ``aperture_diameter_arcsec`` or ``psf_fwhm_arcsec`` through the same capture
-model as the photometry (see :doc:`photometry`). At each pixel the model is
+**Aperture capture.** The spectrum captures a fraction :math:`\eta_{\rm spec}` of
+the extended host (see :doc:`photometry`), set by its ``aperture_diameter_arcsec``
+and ``psf_fwhm_arcsec`` (the seeing). With only one of the two, that one is the
+capture radius. With both, :math:`\eta_{\rm spec}` is the exact fraction of the
+host light inside the aperture after the seeing blur, which is 5-30% lower than the
+aperture alone gives for hosts of 0.3-3 arcsec in 2-3 arcsec fibers. At each pixel
+the model is
 
 .. math::
 
    f^{\rm spec} = s_{\rm spec}
-   \left[ f^{\rm compact} + \eta_{\rm spec} f^{\rm extended} \right].
+   \left[ \eta_{\rm pt} f^{\rm compact} + \eta_{\rm spec} f^{\rm extended} \right].
+
+``SpectroscopyData.flux_calibration`` sets the point-source term. The default,
+``"point_source"``, is the SDSS, BOSS and DESI convention: standard stars observed
+through the same fibers correct the fiber loss of a point source, so
+:math:`\eta_{\rm pt} = 1` and :math:`\eta_{\rm spec}` is the host capture divided
+by the point-source capture. With ``"aperture"`` (flux inside the aperture, no loss
+correction), :math:`\eta_{\rm pt} = 1 - \exp(-a^2 / 2\sigma^2)` for aperture radius
+:math:`a` and seeing width :math:`\sigma`.
 
 **Continuum tilt.** ``cfg.agn.fit_spectrum_tilt = True`` (off by default; also set
 by ``SpectrumConfig(polynomial_tilt_enabled=True)``) multiplies the stellar and AGN
@@ -151,10 +162,15 @@ scale factor :math:`s_{\rm spec}` and, with the capture model, host capture frac
 :math:`\eta_{\rm spec}` (from its aperture). Everything else is shared: one host and
 one AGN, the spectral jitter ``frac_jitter`` and, when enabled, the continuum tilt.
 
-The AGN is therefore assumed to be the same in every spectrum. The
-``variability_uncertainty`` term applies only to photometry (see :doc:`likelihood`),
-and the scale factors absorb only a gray change. If the AGN changed between epochs
-in shape or line strength, fit the spectra separately.
+By default the AGN is assumed to be the same in every spectrum, and the scale
+factors absorb only a gray change. With ``fit_spectrum_agn_variability=True``, each
+spectrum also gets a log amplitude :math:`\ln A_i` relative to the photometry. The
+disk, broad lines, Fe II, Balmer continuum and torus respond to it with the same
+wavelength index and responsivities as the photometric ``variability_uncertainty``
+term (see :doc:`likelihood`). The host and the narrow lines do not change. In
+injection tests on Chimera spectra, this term recovers only about half of an
+injected :math:`\ln A`, because the gray scale absorbs the rest where the quasar
+dominates.
 
 ``result.spectrum.observations[i]`` returns spectrum ``i``'s data, model and
 residuals (see `Reading spectral results`_), and
