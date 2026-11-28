@@ -5,6 +5,25 @@ its parts), the single-object fitter :class:`JAXSEDFit`, :func:`fit_batch` for m
 objects, results, plotting and simulation helpers.
 """
 
+import os as _os
+
+# NUTS's gradient callback (InferenceConfig.nuts_gradient_callback) deadlocks when
+# XLA's CPU thread pool has a single thread, as in a one-CPU batch job: the callback
+# blocks the only pool thread while its own computation waits for one. XLA sizes the
+# pool from PJRT_NPROC, else NPROC, else the usable CPUs, when JAX first runs, so give it
+# at least two threads unless PJRT_NPROC is set explicitly. On larger machines this is
+# the size XLA would pick anyway.
+if "PJRT_NPROC" not in _os.environ:
+    try:
+        _cpus = len(_os.sched_getaffinity(0))
+    except AttributeError:  # macOS and Windows
+        _cpus = _os.cpu_count() or 1
+    try:
+        _cpus = int(_os.environ.get("NPROC", _cpus))
+    except ValueError:
+        pass
+    _os.environ["PJRT_NPROC"] = str(max(2, _cpus))
+
 import jax as _jax
 
 # The model needs float64 throughout (fluxes span tens of orders of magnitude). It
