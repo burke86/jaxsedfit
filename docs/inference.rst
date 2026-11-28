@@ -182,6 +182,7 @@ Nested sampling (``"ns"``)
 
 Nested sampling with ``jaxns`` explores the whole prior volume, so it handles
 multimodal posteriors and returns the Bayesian evidence. It is the slowest option.
+It needs the optional dependency: ``pip install "jaxsedfit[ns]"`` (see :doc:`installation`).
 Its settings are the ``ns_*`` fields of :class:`jaxsedfit.InferenceConfig`.
 
 .. code-block:: python

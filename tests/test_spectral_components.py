@@ -685,3 +685,24 @@ def test_joint_feii_optical_to_uv_ratio_scales_only_optical_piece():
         feii_template_flux=template_flux,
     )
     np.testing.assert_allclose(np.asarray(rendered["feii"]), scaled, rtol=1e-10, atol=1e-14)
+
+
+def test_zero_scale_placeholder_prior_is_replaced_by_flux_scaled_default():
+    import numpy as np
+    import numpyro.distributions as dist
+
+    from jaxsedfit.spectral_custom_components import (
+        custom_component_param_site,
+        inject_default_custom_component_priors,
+        make_custom_component,
+    )
+
+    comp = make_custom_component(
+        name="Blue Tilt",
+        parameter_priors={"c0": {"dist": "Normal", "loc": 0.0, "scale": 0.0}},
+        evaluate=lambda wave, params, metadata: params["c0"] * wave * 0.0,
+    )
+    cfg = inject_default_custom_component_priors({}, np.full(10, 2.0), [comp])
+    prior = cfg[custom_component_param_site(comp, "c0")]
+    assert isinstance(prior, dist.Normal)
+    np.testing.assert_allclose(float(prior.scale), 0.2 * 2.0)

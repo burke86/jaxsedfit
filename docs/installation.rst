@@ -1,11 +1,19 @@
 Installation
 ============
 
-``jaxsedfit`` requires Python 3.10 or newer. Install it from the repository root:
+``jaxsedfit`` requires Python 3.12 or newer. Install it from the repository root:
 
 .. code-block:: bash
 
    python -m pip install .
+
+Nested sampling (``inference.method = "ns"``, see :doc:`inference`) needs the
+optional ``jaxns`` dependency, which brings the TensorFlow Probability nightly
+build:
+
+.. code-block:: bash
+
+   python -m pip install ".[ns]"
 
 SSP templates
 -------------

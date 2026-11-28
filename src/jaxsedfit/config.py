@@ -732,7 +732,11 @@ def _mapping_to_numpyro_distribution(value: Mapping[str, Any]) -> dist.Distribut
     """Restore a distribution from a legacy serialized prior mapping."""
     family = str(value.get("dist", value.get("family", ""))).lower()
     if family in {"normal", "gaussian"}:
-        return dist.Normal(value.get("loc", 0.0), value.get("scale", 1.0))
+        scale = value.get("scale", 1.0)
+        # scale = 0 marks a placeholder prior that ``inject_default_custom_component_priors``
+        # replaces with a flux-scaled width; NumPyro >= 0.22 validates arguments by default.
+        placeholder = np.all(np.asarray(scale, dtype=float) == 0.0)
+        return dist.Normal(value.get("loc", 0.0), scale, validate_args=False if placeholder else None)
     if family in {"truncatednormal", "truncated_normal", "truncnormal", "truncnorm"}:
         return dist.TruncatedNormal(
             value.get("loc", 0.0), value.get("scale", 1.0),

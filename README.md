@@ -21,7 +21,7 @@ The [`jaxqsofit`](https://github.com/burke86/jaxqsofit) package provides a spect
 
 ## Install
 
-`jaxsedfit` requires Python 3.10 or newer. Clone this repository, then:
+`jaxsedfit` requires Python 3.12 or newer. Clone this repository, then:
 
 ```bash
 python -m pip install .
