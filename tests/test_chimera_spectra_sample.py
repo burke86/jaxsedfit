@@ -48,3 +48,25 @@ def test_joint_validation_attaches_each_objects_spectrum(tmp_path):
         assert spec.resolving_power == spectra[row["id"]]["resolving_power"]
         assert cfg.agn.fit_lines and cfg.agn.fit_feii and cfg.likelihood.fit_spectrum_scale is False
     assert all(not cfg.spectroscopy_list for cfg in cv._configs(rows, str(ssp), 10, 5e-3))
+
+
+def test_validation_metrics_drop_catastrophic_fits_from_rms():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "benchmarks" / "chimera_validation.py"
+    spec = importlib.util.spec_from_file_location("chimera_validation", path)
+    cv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cv)
+
+    # Ten fits 0.1 dex off, one 0.8 dex outlier, and one broken fit whose SFR collapsed.
+    residuals = [0.1] * 10 + [0.8, -17.5]
+    results = [
+        {"luminosity_bin_index": 2, "log_sfr_fit": 1.0 + r, "log_sfr_truth": 1.0, "log_stellar_mass_truth": 10.0}
+        for r in residuals
+    ]
+    m = cv.compute_metrics(results, "log_sfr")[2]
+
+    assert m["n"] == 12 and m["n_failed"] == 1
+    np.testing.assert_allclose(m["rms"], np.sqrt((10 * 0.1**2 + 0.8**2) / 11))
+    # The broken fit still counts as an outlier.
+    np.testing.assert_allclose(m["outlier_fraction"], 2 / 12)

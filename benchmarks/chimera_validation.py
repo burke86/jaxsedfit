@@ -42,6 +42,14 @@ DEFAULT_THRESHOLDS = HERE / "chimera_validation_thresholds.json"
 DEFAULT_SPECTRA = HERE / "data" / "chimera_validation_spectra.fits"
 LUMINOSITY_BIN_EDGES = [-np.inf, 42.0, 43.0, 44.0, 45.0]
 OUTLIER_DEX = 0.5
+# A residual this large means the MAP fit broke (for example, the SFR collapsing
+# to the prior floor in a bad local minimum), not that the recovery got worse.
+# Such fits count as failed: they stay in the outlier fraction but are left out
+# of the median, NMAD and RMS, so one broken fit cannot dominate a bin's RMS.
+# Genuine residuals of the gated quantities stay below about 4 dex. The attenuated
+# AGN luminosity is exempt (``catastrophic_dex=None``): it is not gated, and for a
+# heavily obscured AGN its residual can genuinely exceed 5 dex.
+CATASTROPHIC_DEX = 5.0
 # Recovered quantities: fitted site, truth column, offset from the site's units to the
 # truth's, and plot. The AGN truth is the injected (QSO-weighted) SDSS DR7 bolometric
 # luminosity; the host truths are COSMOS2015 LePhare medians. The SDSS luminosities are not
@@ -62,6 +70,7 @@ QUANTITIES = {
         site="log_agn_bol_luminosity_attenuated_fit", truth="log_lbol_chimera_truth", offset=7.0,
         title="AGN bolometric luminosity (attenuated)", label=r"\log_{10}(L_{\rm bol,AGN}/{\rm erg\,s^{-1}})",
         delta=r"$\Delta\log L_{\rm bol,AGN}^{\rm att}$ [dex]", plot="chimera_dlbol_attenuated_vs_lbol.png",
+        catastrophic_dex=None,
     ),
     "log_sfr": dict(
         site="log_sfr_fit", truth="log_sfr_truth", offset=0.0, title="Star formation rate",
@@ -259,7 +268,9 @@ def compute_metrics(results, name) -> list[dict]:
     for b, (lo, hi) in enumerate(zip(LUMINOSITY_BIN_EDGES[:-1], LUMINOSITY_BIN_EDGES[1:])):
         res = np.array([r[f"{name}_fit"] - r[f"{name}_truth"]
                         for r in results if r["luminosity_bin_index"] == b and _in_metrics(r, name)])
-        finite = res[np.isfinite(res)]
+        # Non-finite and catastrophic residuals are failed fits.
+        cut = QUANTITIES[name].get("catastrophic_dex", CATASTROPHIC_DEX)
+        finite = res[np.isfinite(res) & ((np.abs(res) <= cut) if cut is not None else True)]
         metrics.append({
             "bin": b,
             "label": _bin_label(lo, hi),
@@ -268,7 +279,7 @@ def compute_metrics(results, name) -> list[dict]:
             "median": float(np.median(finite)),
             "nmad": float(1.4826 * np.median(np.abs(finite - np.median(finite)))),
             "rms": float(np.sqrt(np.mean(finite**2))),
-            # Failed fits count as outliers.
+            # Failed fits (non-finite or beyond CATASTROPHIC_DEX) count as outliers.
             "outlier_fraction": float((np.sum(np.abs(finite) > OUTLIER_DEX) + res.size - finite.size) / max(res.size, 1)),
         })
     return metrics
@@ -389,13 +400,13 @@ def _detail_tables(metrics, thresholds, image_base_url) -> list[str]:
     for name, bins in metrics.items():
         q = QUANTITIES[name]
         lines += ["", f"**{q['title']}**" + (f" — {q['note']}" if q.get("note") else ""), "",
-                  "| AGN luminosity bin | N | median Δ | NMAD | RMS (limit) | outliers (limit) |",
-                  "|---|---:|---:|---:|---:|---:|"]
+                  "| AGN luminosity bin | N | failed | median Δ | NMAD | RMS (limit) | outliers (limit) |",
+                  "|---|---:|---:|---:|---:|---:|---:|"]
         for m in bins:
             t = thresholds.get(name, {}).get(str(m["bin"]), {})
             rms_limit = f" ({t['max_rms']:.3f})" if t else ""
             out_limit = f" ({100 * t['max_outlier_fraction']:.1f}%)" if t else ""
-            lines.append(f"| {m['label']} | {m['n']} | {m['median']:+.3f} | {m['nmad']:.3f} | "
+            lines.append(f"| {m['label']} | {m['n']} | {m.get('n_failed', 0)} | {m['median']:+.3f} | {m['nmad']:.3f} | "
                          f"{m['rms']:.3f}{rms_limit} | {100 * m['outlier_fraction']:.1f}%{out_limit} |")
         if image_base_url:
             lines += ["", f"![{q['title']} residuals]({image_base_url}/{q['plot']})"]
@@ -426,7 +437,8 @@ def render_report(runs, thresholds, *, sha, baseline=None, baseline_sha=None,
         f"Each cell: RMS of MAP − truth [dex] · fraction of outliers (|Δ| > {OUTLIER_DEX} dex), in bins of injected "
         "AGN log luminosity [erg/s]"
         + ("; change from main in parentheses" if baseline else "")
-        + "; ❌ marks a value past its limit.",
+        + "; ❌ marks a value past its limit. Failed fits (non-finite, or |Δ| > "
+        f"{CATASTROPHIC_DEX:g} dex, except attenuated L<sub>bol</sub>) count as outliers but are left out of the RMS.",
     ]
     for name, m in runs.items():
         lines += ["", f"**{RUN_TITLES[name]}**", ""] + _summary_table(
