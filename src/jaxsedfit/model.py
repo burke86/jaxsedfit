@@ -3260,6 +3260,45 @@ def _sample_spectral_jitter_variance(prior_config, pred_fluxes, feii_fluxes, obs
     )
 
 
+def reference_spectroscopic_chi2(pred_fluxes, obs_fluxes, obs_errors, mask, floor):
+    """Return the fixed-definition spectral chi-square diagnostics.
+
+    The variance is ``obs_errors**2 + (floor * |pred_fluxes|)**2`` on every
+    valid pixel, with no fitted noise term and no likelihood weight; ``n`` is
+    the number of valid pixels. This matches the spectral chi-square of
+    jaxsedfit versions that used a fixed fractional systematic floor, so a
+    cut on it keeps the same meaning whatever spectral noise model is fitted.
+
+    Returns
+    -------
+    dict
+        ``chi2`` (sum), ``n_eff`` (number of valid pixels) and
+        ``reduced_chi2`` (NaN when no pixel is valid).
+    """
+    pred_fluxes = jnp.asarray(pred_fluxes, dtype=jnp.float64)
+    obs_fluxes = jnp.asarray(obs_fluxes, dtype=jnp.float64)
+    obs_errors = jnp.asarray(obs_errors, dtype=jnp.float64)
+    valid = (
+        jnp.asarray(mask, dtype=bool)
+        & jnp.isfinite(pred_fluxes)
+        & jnp.isfinite(obs_fluxes)
+        & jnp.isfinite(obs_errors)
+        & (obs_errors > 0.0)
+    )
+    pred = jnp.where(valid, pred_fluxes, 0.0)
+    obs = jnp.where(valid, obs_fluxes, 0.0)
+    err = jnp.where(valid, obs_errors, 1.0)
+    variance = err**2 + (jnp.maximum(jnp.asarray(floor, dtype=jnp.float64), 0.0) * pred) ** 2
+    n_eff = jnp.sum(valid.astype(jnp.float64))
+    chi2_sum = jnp.sum(jnp.where(valid, (obs - pred) ** 2 / jnp.maximum(variance, 1.0e-60), 0.0))
+    nan = jnp.asarray(jnp.nan, dtype=jnp.float64)
+    return {
+        "chi2": jnp.where(n_eff > 0.0, chi2_sum, nan),
+        "n_eff": n_eff,
+        "reduced_chi2": jnp.where(n_eff > 0.0, chi2_sum / jnp.maximum(n_eff, 1.0), nan),
+    }
+
+
 def spectroscopic_loglike(
     pred_fluxes,
     obs_fluxes,
@@ -5280,6 +5319,9 @@ def evaluate_photometric_state(
     spec_chi2 = jnp.asarray(jnp.nan, dtype=jnp.float64)
     spec_n_eff = jnp.asarray(0.0, dtype=jnp.float64)
     spec_reduced_chi2 = jnp.asarray(jnp.nan, dtype=jnp.float64)
+    spec_chi2_ref = jnp.asarray(jnp.nan, dtype=jnp.float64)
+    spec_n_ref = jnp.asarray(0.0, dtype=jnp.float64)
+    spec_reduced_chi2_ref = jnp.asarray(jnp.nan, dtype=jnp.float64)
     spectral_line_photometry = jnp.zeros_like(pred_fluxes)
     spectral_feii_photometry = jnp.zeros_like(pred_fluxes)
     spectral_extrapolated_feii_photometry = jnp.zeros_like(pred_fluxes)
@@ -5822,6 +5864,16 @@ def evaluate_photometric_state(
         )
         spec_chi2 = spec_chi2_diagnostics["chi2"]
         spec_n_eff = spec_chi2_diagnostics["n_eff"]
+        spec_ref = reference_spectroscopic_chi2(
+            spec_model_fluxes,
+            spec_fluxes,
+            spec_errors,
+            spec_mask,
+            cfg.likelihood.reference_spectrum_floor,
+        )
+        spec_chi2_ref = spec_ref["chi2"]
+        spec_n_ref = spec_ref["n_eff"]
+        spec_reduced_chi2_ref = spec_ref["reduced_chi2"]
         spec_reduced_chi2 = jnp.where(
             spec_n_eff > 0.0,
             spec_chi2 / jnp.maximum(spec_n_eff, 1.0e-30),
@@ -6127,6 +6179,47 @@ def evaluate_photometric_state(
     sed_chi2 = sed_chi2_diagnostics["chi2"]
     sed_n_eff = sed_chi2_diagnostics["n_eff"]
     sed_reduced_chi2 = sed_chi2_diagnostics["reduced_chi2"]
+    # Reference (fixed-definition) photometric chi-square: the same variance
+    # model with the fitted systematic and AGN-mismatch widths replaced by
+    # fixed reference floors; diagnostics only.
+    _, sed_ref = photometric_loglike(
+        pred_fluxes=pred_fluxes,
+        obs_fluxes=obs_fluxes,
+        obs_errors=obs_errors,
+        upper_limits=upper_limits,
+        data_mask=data_mask,
+        systematics_width=jnp.asarray(float(cfg.likelihood.reference_photometry_floor), dtype=jnp.float64),
+        agn_systematics_width=jnp.asarray(
+            float(cfg.likelihood.reference_agn_floor) if fit_agn else 0.0, dtype=jnp.float64
+        ),
+        likelihood_family=cfg.likelihood.likelihood_family,
+        student_t_df=cfg.likelihood.student_t_df,
+        agn_component=agn_fluxes,
+        agn_bol_lum_w=agn_bol_luminosity,
+        agn_nev=cfg.likelihood.agn_nev,
+        variability_uncertainty=cfg.likelihood.variability_uncertainty,
+        attenuation_model_uncertainty=cfg.likelihood.attenuation_model_uncertainty,
+        transmitted_fraction=trans_fluxes,
+        lyman_break_uncertainty=cfg.likelihood.lyman_break_uncertainty,
+        filter_wavelength=filter_wavelength,
+        redshift=redshift,
+        nebular_line_component=local_nebular_line_fluxes,
+        local_nebular_line_uncertainty_dex=cfg.likelihood.local_nebular_line_uncertainty_dex,
+        return_diagnostics=True,
+    )
+    sed_chi2_ref = sed_ref["chi2"]
+    sed_reduced_chi2_ref = sed_ref["reduced_chi2"]
+    sed_n_ref = sed_ref["n_eff"]
+    joint_n_ref = sed_n_ref + spec_n_ref
+    joint_chi2_ref_sum = jnp.where(sed_n_ref > 0.0, sed_chi2_ref, 0.0) + jnp.where(
+        spec_n_ref > 0.0, spec_chi2_ref, 0.0
+    )
+    joint_chi2_ref = jnp.where(joint_n_ref > 0.0, joint_chi2_ref_sum, jnp.asarray(jnp.nan, dtype=jnp.float64))
+    joint_reduced_chi2_ref = jnp.where(
+        joint_n_ref > 0.0,
+        joint_chi2_ref_sum / jnp.maximum(joint_n_ref, 1.0e-30),
+        jnp.asarray(jnp.nan, dtype=jnp.float64),
+    )
     joint_n_eff = sed_n_eff + spec_n_eff
     joint_chi2_sum = jnp.where(sed_n_eff > 0.0, sed_chi2, 0.0) + jnp.where(
         spec_n_eff > 0.0,
@@ -6181,6 +6274,14 @@ def evaluate_photometric_state(
     numpyro.deterministic("joint_chi2", joint_chi2)
     numpyro.deterministic("joint_n_eff", joint_n_eff)
     numpyro.deterministic("joint_reduced_chi2", joint_reduced_chi2)
+    numpyro.deterministic("sed_chi2_ref", sed_chi2_ref)
+    numpyro.deterministic("sed_reduced_chi2_ref", sed_reduced_chi2_ref)
+    numpyro.deterministic("spectroscopy_chi2_ref", spec_chi2_ref)
+    numpyro.deterministic("spectroscopy_n_ref", spec_n_ref)
+    numpyro.deterministic("spectroscopy_reduced_chi2_ref", spec_reduced_chi2_ref)
+    numpyro.deterministic("joint_chi2_ref", joint_chi2_ref)
+    numpyro.deterministic("joint_n_ref", joint_n_ref)
+    numpyro.deterministic("joint_reduced_chi2_ref", joint_reduced_chi2_ref)
     numpyro.deterministic("fracAGN_5100_fit", fracagn_5100)
     numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
     numpyro.deterministic("log_disk_luminosity_fit", _safe_log10(l_agn_lambda_5100))

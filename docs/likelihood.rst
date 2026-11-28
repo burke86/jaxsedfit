@@ -78,6 +78,44 @@ likelihood term, so invalid regions of parameter space are rejected. The reporte
 :math:`\sum r^2 / \sigma_{\rm eff}^2` over the detections and valid pixels, with
 the same variances (see :doc:`outputs`).
 
+Because these variances contain fitted noise terms (the spectral jitter and the
+photometric systematic widths), the stored chi-square depends on how much noise
+the fit chose to add, and so on the data's signal-to-noise and on the noise model
+of the jaxsedfit version. For quality cuts that must keep one meaning, the fit also
+reports *reference* chi-square values (``*_chi2_ref``) with a fixed variance that
+does not enter the likelihood:
+
+.. math::
+
+   \sigma_{{\rm ref},p}^2 = e_p^2 + \left( w_{\rm ref,spec}\, s M_p \right)^2,
+
+with :math:`w_{\rm ref,spec}` = ``reference_spectrum_floor`` (0.08), summed over
+every valid pixel with no likelihood weight; for the photometry,
+:math:`\sigma_{{\rm eff},b}^2` above with :math:`w_{\rm sys}` and
+:math:`w_{\rm AGN}` fixed to ``reference_photometry_floor`` (0.10) and
+``reference_agn_floor`` (0.15) instead of their fitted values, the other terms
+unchanged; and for the joint value the unweighted sum of the two over the sum of
+their counts.
+
+Only the spectral reference has the same definition as an earlier statistic: the
+spectral chi-square of versions that used a fixed 8% spectral floor (same variance,
+same pixels, no weight). The photometric reference is a new statistic: earlier
+versions, like the current one, fitted the systematic and AGN-mismatch widths, so
+their photometric chi-square used the fitted widths, not fixed floors. The joint
+reference is new as well: earlier versions reported
+:math:`(\chi^2_{\rm sed} + w\,\chi^2_{\rm spec}) / (n_{\rm sed} + w\,n_{\rm spec})`
+with the fitted-width photometric term and a spectral weight :math:`w`, while the
+reference joint value is unweighted and uses the fixed-floor photometric term. A
+threshold set on an earlier statistic therefore has to be re-assessed for the
+photometric and joint references. Even for the spectrum, the same definition does not
+make the values equal to what an earlier version would have reported for the same
+data: the posterior is conditioned on the current likelihood and spectral model.
+
+The AGN floor multiplies the AGN band fluxes, which are evaluated only when an AGN
+term of the likelihood needs them (variability, or a fitted or non-zero
+``agn_systematics_width``). With AGN fitting on but none of those terms active, the
+AGN band fluxes are zero and ``reference_agn_floor`` has no effect.
+
 Calibration and error-model terms
 ---------------------------------
 

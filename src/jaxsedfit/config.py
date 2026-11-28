@@ -486,6 +486,17 @@ class LikelihoodConfig:
     # the IGM). 0 evaluates the exact model every step.
     igm_redshift_table_n_grid: int = 2048
     spectrum_student_t_df: float = 5.0
+    # Fixed variance floors of the "reference" chi-square diagnostics
+    # (``*_chi2_ref`` sites). They do not enter the likelihood. The spectral
+    # reference uses err**2 + (reference_spectrum_floor * |model|)**2; the
+    # photometric reference uses the photometric likelihood's variance with
+    # the systematic and AGN-mismatch widths fixed to the values below
+    # instead of their fitted values. Being independent of any fitted noise
+    # parameter, these statistics keep one meaning across model versions and
+    # are suited to quality cuts.
+    reference_spectrum_floor: float = 0.08
+    reference_photometry_floor: float = 0.10
+    reference_agn_floor: float = 0.15
     fit_spectrum_scale: bool | None = None
     spectrum_scale_prior_sigma_dex: float = 0.1
     # AGN variability model shared by the photometry and the spectra. Every AGN
