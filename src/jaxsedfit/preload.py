@@ -194,7 +194,14 @@ class HostBasis:
 
 @dataclass
 class HostBasisJax:
-    """JAX-native host-basis arrays reused by the Diffstar host model."""
+    """JAX-native host-basis arrays reused by the Diffstar host model.
+
+    The SSP spectra are ``rest_llambda * rest_llambda_scale`` in W/Angstrom per
+    Msun. jaxsedfit stores ``rest_llambda`` in float32 divided by its maximum
+    (so values lie in [0, 1]) with the float64 ``rest_llambda_scale``, which
+    halves the memory traffic of the SSP contractions without any float32
+    range limit. Bases built elsewhere may keep float64 and a scale of 1.
+    """
     ssp_lgmet: jnp.ndarray
     ssp_lg_age_gyr: jnp.ndarray
     rest_llambda: jnp.ndarray
@@ -202,6 +209,7 @@ class HostBasisJax:
     n_ly_per_msun: jnp.ndarray
     ly_lum_per_msun: jnp.ndarray
     gal_t_table: jnp.ndarray
+    rest_llambda_scale: Any = 1.0
 
 
 def _empty_ssp_data() -> SSPData:
@@ -1618,10 +1626,15 @@ def _build_host_basis_jax(ssp_data: SSPData, host_basis: HostBasis, gal_t_table:
     gal_t_table : numpy.ndarray
         Cosmic-time grid for SFH evaluation in Gyr, shape (n_t,).
     """
+    # The SSP basis is the largest array read in each model evaluation, so it is
+    # stored in float32, divided by its maximum (see ``HostBasisJax``).
+    scale = float(np.max(np.abs(host_basis.rest_llambda))) if np.size(host_basis.rest_llambda) else 1.0
+    scale = scale if np.isfinite(scale) and scale > 0.0 else 1.0
     return HostBasisJax(
         ssp_lgmet=jnp.asarray(ssp_data.ssp_lgmet, dtype=jnp.float64),
         ssp_lg_age_gyr=jnp.asarray(ssp_data.ssp_lg_age_gyr, dtype=jnp.float64),
-        rest_llambda=jnp.asarray(host_basis.rest_llambda, dtype=jnp.float64),
+        rest_llambda=jnp.asarray(np.asarray(host_basis.rest_llambda) / scale, dtype=jnp.float32),
+        rest_llambda_scale=jnp.asarray(scale, dtype=jnp.float64),
         surviving_frac_by_age=jnp.asarray(host_basis.surviving_frac_by_age, dtype=jnp.float64),
         n_ly_per_msun=jnp.asarray(host_basis.n_ly_per_msun, dtype=jnp.float64),
         ly_lum_per_msun=jnp.asarray(host_basis.ly_lum_per_msun, dtype=jnp.float64),
