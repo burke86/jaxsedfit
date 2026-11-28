@@ -2904,3 +2904,58 @@ def test_zero_scatter_metallicity_weights_interpolate_in_log_z():
         np.asarray(_lgmet_weights(lgmet, 0.2, grid)),
         np.asarray(calc_lgmet_weights_from_lognormal_mdf(lgmet, 0.2, grid)),
     )
+
+
+def test_seeing_aperture_capture_matches_brute_force_and_limits():
+    from jaxsedfit.preload import SPEC_CAPTURE_LOG_R_GRID, _seeing_aperture_capture, spectral_aperture_capture_tables
+
+    # Brute-force reference: the capture-law profile convolved with the seeing on a 2D
+    # grid (3" fiber, 1.5" FWHM), values from a 1024^2 FFT over 64".
+    got = _seeing_aperture_capture(np.array([0.3, 1.0, 2.0, 3.0]), 1.5, 1.5)
+    np.testing.assert_allclose(got, [0.857, 0.569, 0.305, 0.178], rtol=0.01)
+
+    host, agn = spectral_aperture_capture_tables(
+        [3.0, 3.0, 3.0, np.nan], [1.5, 1.5, np.nan, np.nan], ["point_source", "aperture", "point_source", "point_source"]
+    )
+    point = 1.0 - np.exp(-(1.5**2) / (2.0 * (1.5 / 2.354820045) ** 2))
+    np.testing.assert_allclose(agn, [1.0, point, 1.0, 1.0])
+    # A point-like host is fully captured once the spectrum is calibrated for point sources.
+    np.testing.assert_allclose(host[0, 0], 1.0, atol=1e-4)
+    np.testing.assert_allclose(host[1, 0], point, atol=1e-4)
+    # Only an aperture: the capture law at the aperture radius.
+    r = np.exp(SPEC_CAPTURE_LOG_R_GRID)
+    np.testing.assert_allclose(host[2], 2.25 / (2.25 + r**2))
+    np.testing.assert_allclose(host[3], 1.0)
+
+
+def test_unlabeled_photometry_without_scale_is_total_flux(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-1.0, 0.0])
+        ssp_lg_age_gyr = np.array([-1.0, 0.0])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((2, 2, 4))
+
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    methods = [None, "catalog", "unknown", "psf", "aperture", "fiber", "model"]
+    cfg = FitConfig(
+        observation=Observation(object_id="obj", redshift=0.1),
+        photometry=PhotometryData(
+            filter_names=[f"f{i}" for i in range(len(methods))],
+            fluxes=np.ones(len(methods)),
+            errors=np.full(len(methods), 0.1),
+            photometry_method=methods,
+        ),
+        filters=FilterSet(
+            curves=[
+                FilterCurve(name=f"f{i}", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])
+                for i in range(len(methods))
+            ]
+        ),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
+        agn=AGNConfig(),
+        inference=InferenceConfig(map_steps=2),
+    )
+
+    context = build_model_context(cfg)
+
+    assert context.photometry_total_capture.tolist() == [True, True, True, False, False, False, True]

@@ -579,7 +579,10 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
             np.log(10.0) * nebular_line_uncertainty_dex
         )
         sys_variance = sys_variance + (nebular_line_sigma * nebular_lines) ** 2
-    var_variance = np.where(bool(cfg.variability_uncertainty), agn_variability_nev * agn_fluxes**2, 0.0)
+    # The model records the variable component it used (gray total AGN or the
+    # wavelength-scaled disk); older predictive outputs fall back to the total AGN.
+    variability_component = np.asarray(_median_site(pred, "variability_component_fluxes"), dtype=float) if "variability_component_fluxes" in pred else agn_fluxes
+    var_variance = np.where(bool(cfg.variability_uncertainty), agn_variability_nev * variability_component**2, 0.0)
     if cfg.attenuation_model_uncertainty:
         tf = np.clip(transmitted_fraction, 1e-4, 1.0)
         neg_log = -np.log10(tf + 1e-4)

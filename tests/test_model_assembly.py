@@ -1487,3 +1487,179 @@ def test_differential_attenuation_dims_young_light_into_dust(monkeypatch):
     np.testing.assert_allclose(_site(on, "ebv_gal_young_fit"), 0.2 / 0.44)
     assert np.all(_site(on, "pred_fluxes") < _site(off, "pred_fluxes"))
     assert _site(on, "log_dust_luminosity_fit") > _site(off, "log_dust_luminosity_fit")
+
+
+def test_spectrum_agn_variability_factor_is_bluer_when_brighter():
+    from jaxsedfit.model import _spectrum_agn_variability_factor
+
+    rest = np.array([1500.0, 3000.0, 5100.0, 10000.0, 1.0e5])
+    bright = np.asarray(_spectrum_agn_variability_factor(np.log(1.3), 0.5, rest, 5100.0))
+    faint = np.asarray(_spectrum_agn_variability_factor(np.log(0.7), 0.5, rest, 5100.0))
+
+    assert bright[2] == pytest.approx(1.3)
+    assert faint[2] == pytest.approx(0.7)
+    # Fractional change grows toward the blue in both directions, and the factor stays positive.
+    assert np.all(np.diff(bright) < 0.0)
+    assert np.all(np.diff(faint) > 0.0)
+    assert np.all(faint > 0.0)
+    gray = np.asarray(_spectrum_agn_variability_factor(np.log(1.3), 0.0, rest, 5100.0))
+    np.testing.assert_allclose(gray, 1.3)
+
+
+def _variability_cfg(n_spectra):
+    cfg = _cfg(spectroscopy_enabled=True, n_wave=256)
+    cfg.likelihood.fit_spectrum_scale = False
+    cfg.likelihood.fit_spectrum_agn_variability = True
+    cfg.agn.fit_lines = False
+    cfg.agn.use_smart_line_priors = False
+    if n_spectra > 1:
+        cfg.spectroscopy = [
+            SpectroscopyData(wave_obs=[1200.0, 1500.0, 1800.0], fluxes=[1.0] * 3, errors=[0.1] * 3),
+            SpectroscopyData(wave_obs=[1300.0, 1600.0, 1900.0], fluxes=[1.2] * 3, errors=[0.1] * 3),
+        ]
+    return cfg
+
+
+@pytest.mark.parametrize("n_spectra", [1, 2])
+def test_spectrum_agn_variability_rescales_disk_and_torus_not_host(monkeypatch, n_spectra):
+    from jaxsedfit.model import _spectrum_agn_variability_factor
+
+    _patch_ssp(monkeypatch)
+    base_cfg = _variability_cfg(n_spectra)
+    base_cfg.likelihood.fit_spectrum_agn_variability = False
+    base = _deterministic_trace(build_model_context(base_cfg), _fixed_component_data())
+
+    cfg = _variability_cfg(n_spectra)
+    context = build_model_context(cfg)
+    z = np.array([1.5, -1.0][:n_spectra]) if n_spectra > 1 else np.array(1.5)
+    data = {
+        **_fixed_component_data(),
+        "spectrum_agn_variability_z": z,
+        "agn_variability_index": np.array(0.5),
+        "agn_responsivity_torus": np.array(0.3),
+    }
+    tr = _deterministic_trace(context, data)
+
+    assert "spectrum_agn_variability_z" not in base
+    assert np.shape(tr["spectrum_agn_variability_z"]["value"]) == (() if n_spectra == 1 else (n_spectra,))
+    sigma = float(_site(tr, "spectrum_agn_variability_sigma_ln"))
+    np.testing.assert_allclose(_site(tr, "spectrum_agn_log_amplitude"), sigma * z)
+
+    index = np.asarray(context.spec_spectrum_index, dtype=int)
+    rest = np.asarray(context.spec_wave_obs, dtype=float) / (1.0 + 0.05)
+    pixel_log_amp = (sigma * np.atleast_1d(z))[index]
+    factor = np.asarray(_spectrum_agn_variability_factor(pixel_log_amp, 0.5, rest, 5100.0))
+
+    np.testing.assert_allclose(_site(tr, "spec_host_model_fluxes"), _site(base, "spec_host_model_fluxes"))
+    torus_factor = np.exp(0.3 * pixel_log_amp)
+    np.testing.assert_allclose(_site(tr, "spec_torus_model_fluxes"), torus_factor * _site(base, "spec_torus_model_fluxes"), rtol=1e-10)
+    np.testing.assert_allclose(_site(tr, "spec_disk_model_fluxes"), factor * _site(base, "spec_disk_model_fluxes"), rtol=1e-10)
+    np.testing.assert_allclose(
+        _site(tr, "spec_continuum_model_fluxes") - _site(base, "spec_continuum_model_fluxes"),
+        (factor - 1.0) * _site(base, "spec_disk_model_fluxes")
+        + (torus_factor - 1.0) * _site(base, "spec_torus_model_fluxes"),
+        rtol=1e-8,
+        atol=1e-12 * np.max(np.abs(_site(base, "spec_continuum_model_fluxes"))),
+    )
+    # The photometry is the reference state and is unchanged.
+    np.testing.assert_allclose(_site(tr, "pred_fluxes"), _site(base, "pred_fluxes"))
+
+
+@pytest.mark.parametrize("joint", [False, True])
+def test_variability_component_sums_responsive_agn_parts(monkeypatch, joint):
+    from jaxsedfit.model import _broad_line_responsivity
+
+    _patch_ssp(monkeypatch)
+    cfg = _variability_cfg(1) if joint else _cfg()
+    cfg.likelihood.variability_uncertainty = True
+    context = build_model_context(cfg)
+    data = dict(_fixed_component_data())
+    index = 0.5
+    resp = {part: mean for part, (mean, _) in cfg.likelihood.agn_variability_responsivity.items()}
+    if joint:
+        index, resp["torus"] = 0.8, 0.45
+        data.update({
+            "spectrum_agn_variability_z": np.array(0.3),
+            "agn_variability_index": np.array(index),
+            "agn_responsivity_torus": np.array(resp["torus"]),
+        })
+    tr = _deterministic_trace(context, data)
+
+    # Only the spectral term samples the index and responsivities; photometry alone uses the prior means.
+    assert ("agn_variability_index" in tr) == joint
+    assert ("agn_responsivity_torus" in tr) == joint
+    rest = np.array([context.filters[0].effective_wavelength]) / (1.0 + 0.05)
+    expected = (
+        (rest / 5100.0) ** (-index) * _site(tr, "disk_fluxes")
+        + np.asarray(_broad_line_responsivity({k: np.asarray(v) for k, v in resp.items()}, rest)) * _site(tr, "line_bl_fluxes")
+        + resp["feii"] * _site(tr, "feii_fluxes")
+        + resp["balmer_continuum"] * _site(tr, "balmer_fluxes")
+        + resp["torus"] * _site(tr, "torus_fluxes")
+    )
+    np.testing.assert_allclose(_site(tr, "variability_component_fluxes"), expected, rtol=1e-6)
+
+
+def test_broad_line_responsivity_follows_line_families():
+    from jaxsedfit.model import _broad_line_responsivity
+
+    resp = {"broad_uv": 0.3, "broad_mgii": 0.45, "broad_balmer": 0.65}
+    got = np.asarray(_broad_line_responsivity(resp, np.array([1549.0, 2798.0, 4861.0, 6563.0])))
+    np.testing.assert_allclose(got, [0.3, 0.45, 0.65, 0.65])
+
+
+def test_spectral_engine_applies_variability_factors_to_broad_features_only():
+    from numpyro.handlers import seed as nseed, substitute as nsub
+    from jaxsedfit.spectral_components import SpectralComponentConfig, evaluate_joint_spectral_components
+
+    wave = np.linspace(4000.0, 7000.0, 400)
+    cfg = SpectralComponentConfig(use_lines=True, tied_lines=True, use_feii=False, use_balmer_continuum=False)
+
+    def run(factors):
+        fn = nseed(lambda: evaluate_joint_spectral_components(wave, 0.05, np.ones_like(wave), config=cfg,
+                                                              variability_factors=factors), 3)
+        return fn()
+
+    ref = run(None)
+    f = np.linspace(0.8, 1.4, wave.size)
+    var = run({"line_broad": f, "feii": f, "balmer": f})
+    np.testing.assert_allclose(var["line_narrow"], ref["line_narrow"])
+    np.testing.assert_allclose(var["line_broad"], f * ref["line_broad"])
+    np.testing.assert_allclose(var["total"] - ref["total"], (f - 1.0) * (ref["line_broad"] + ref["feii"] + ref["balmer"]), atol=1e-12)
+    np.testing.assert_allclose(var["feii_reference"], ref["feii"])
+
+
+@pytest.mark.parametrize("calibration", ["point_source", "aperture"])
+def test_spectrum_aperture_and_seeing_set_host_and_agn_capture(monkeypatch, calibration):
+    from jaxsedfit.preload import spectral_aperture_capture_tables
+
+    _patch_ssp(monkeypatch)
+    base_cfg = _cfg(spectroscopy_enabled=True, n_wave=256)
+    base_cfg.agn.fit_lines = False
+    base_cfg.likelihood.fit_spectrum_scale = False
+    base = _deterministic_trace(build_model_context(base_cfg), _fixed_component_data())
+
+    cfg = _cfg(spectroscopy_enabled=True, n_wave=256)
+    cfg.agn.fit_lines = False
+    cfg.likelihood.fit_spectrum_scale = False
+    cfg.likelihood.use_host_capture_model = True
+    cfg.photometry.photometry_method = ["model"]
+    cfg.spectroscopy.aperture_diameter_arcsec = 3.0
+    cfg.spectroscopy.psf_fwhm_arcsec = 1.5
+    cfg.spectroscopy.flux_calibration = calibration
+    tr = _deterministic_trace(
+        build_model_context(cfg), {**_fixed_component_data(), "log_host_capture_scale_arcsec": np.array(np.log(2.0))}
+    )
+
+    host_table, agn_capture = spectral_aperture_capture_tables([3.0], [1.5], [calibration])
+    from jaxsedfit.preload import SPEC_CAPTURE_LOG_R_GRID
+
+    expected_host = np.interp(np.log(2.0), SPEC_CAPTURE_LOG_R_GRID, host_table[0])
+    np.testing.assert_allclose(_site(tr, "spectrum_host_capture_fraction"), [expected_host], rtol=1e-8)
+    np.testing.assert_allclose(_site(tr, "spec_host_model_fluxes"), expected_host * _site(base, "spec_host_model_fluxes"), rtol=1e-8)
+    np.testing.assert_allclose(_site(tr, "spec_disk_model_fluxes"), agn_capture[0] * _site(base, "spec_disk_model_fluxes"), rtol=1e-8)
+    # Total-flux photometry is unchanged.
+    np.testing.assert_allclose(_site(tr, "pred_fluxes"), _site(base, "pred_fluxes"), rtol=1e-8)
+    if calibration == "point_source":
+        assert agn_capture[0] == 1.0
+    else:
+        assert 0.9 < agn_capture[0] < 0.95
