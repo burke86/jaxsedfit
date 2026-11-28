@@ -363,11 +363,11 @@ class AGNConfig:
     fit_spectrum_tilt: bool = False
     line_flux_scale_mjy: float = 1.0
     # Velocity margin [km/s] around the spectral coverage used to activate
-    # spectral Fe II / line-table coverage ranges, to bookkeep the native SED
-    # lines replaced by the spectral model, and (fitted redshift only) as the
-    # smoothing width of the data edges. Whether an emission line reaches the
-    # photometry as a fitted line or as an extrapolated template line is
-    # decided by its centre inside the valid pixels, without this margin.
+    # spectral Fe II / line-table coverage ranges and to bookkeep the native SED
+    # lines replaced by the spectral model. Whether an emission line reaches the
+    # photometry as a fitted line or as an extrapolated template line is decided
+    # by whether half of its profile falls on valid (unmasked) pixels, without
+    # this margin.
     line_coverage_margin_kms: float = 3000.0
     # Rest-frame range [A] that fixes the tied-line set instead of each spectrum's
     # coverage; lines the spectra do not cover are then masked (zero amplitude), so

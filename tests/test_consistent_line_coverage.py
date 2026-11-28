@@ -132,9 +132,17 @@ def _coverage(context, state):
     )
 
 
+def _template_outside(cov):
+    """Extrapolation weight per template line; broad and narrow parts agree on a contiguous spectrum."""
+    broad = np.asarray(cov.broad_template_outside)
+    narrow = np.asarray(cov.narrow_template_outside)
+    np.testing.assert_array_equal(broad, narrow)
+    return broad
+
+
 def _coverage_arrays(context, state):
     cov = _coverage(context, state)
-    return np.asarray(cov.component_covered), np.asarray(cov.template_outside)
+    return np.asarray(cov.component_covered), _template_outside(cov)
 
 
 def _site(tr, name):
@@ -239,7 +247,7 @@ def _template_counts(context, state, spec_rest):
     for c in range(nominal.size):
         if within[c] and live[c]:
             fitted[nearest[c]] = max(fitted[nearest[c]], float(np.asarray(cov.component_covered)[c]))
-    return fitted, np.asarray(cov.template_outside), within, nearest
+    return fitted, _template_outside(cov), within, nearest
 
 
 @pytest.mark.parametrize(
@@ -296,7 +304,7 @@ def test_anchor_numerator_and_denominator_use_the_same_lines(fake_ssp, monkeypat
         jnp.asarray(line_wave), jnp.asarray(blagn), jnp.asarray(context.templates.line_sy2), coverage=cov,
     )
     broad = np.asarray(broad)
-    extrapolated = (np.asarray(cov.template_outside) > 0.0) & (blagn > 0.0)
+    extrapolated = (_template_outside(cov) > 0.0) & (blagn > 0.0)
     assert extrapolated.any()
     ratios = broad[extrapolated] / blagn[extrapolated]
     conversion = 1.0e-10 / 299792458.0 * 1.0e29
@@ -438,7 +446,7 @@ def test_removed_switches_are_rejected():
 
 
 def test_fitted_redshift_weights_sum_to_one(fake_ssp, monkeypatch):
-    """With a fitted redshift the data edges are smoothed; each transition still counts once."""
+    """With a fitted redshift the coverage step is smoothed; each transition still counts once."""
     import copy
 
     spec_rest = (1216.0, 2900.0)  # Ly-alpha sits on the smoothed blue edge
@@ -453,15 +461,15 @@ def test_fitted_redshift_weights_sum_to_one(fake_ssp, monkeypatch):
         np.asarray(context.templates.line_blagn), np.asarray(context.templates.line_sy2),
     )
     covered = np.asarray(cov.component_covered)
-    outside = np.asarray(cov.template_outside)
+    broad = np.asarray(state["line_broad_mask_per_component"]) > 0.5
     nominal = _nominal(state)
     rel = np.abs(nominal[None, :] / line_wave[:, None] - 1.0)
     nearest, within = np.argmin(rel, axis=0), np.min(rel, axis=0) < 0.005
     weights = covered[within]
     assert np.any((weights > 0.01) & (weights < 0.99)), "need a partially covered line"
     for c in np.flatnonzero(within):
-        assert covered[c] + outside[nearest[c]] == pytest.approx(1.0, abs=1e-12)
-    broad = np.asarray(state["line_broad_mask_per_component"]) > 0.5
+        outside = cov.broad_template_outside if broad[c] else cov.narrow_template_outside
+        assert covered[c] + float(np.asarray(outside)[nearest[c]]) == pytest.approx(1.0, abs=1e-12)
     blagn = np.asarray(context.templates.line_blagn)
     live = np.asarray(state["line_amp_per_component"]) != 0.0
     anchored = within & broad & live & (blagn[nearest] > 0.0)
@@ -469,11 +477,11 @@ def test_fitted_redshift_weights_sum_to_one(fake_ssp, monkeypatch):
     np.testing.assert_allclose(np.asarray(cov.broad_anchor_weight)[anchored], covered[anchored], rtol=1e-12)
 
 
-def test_fitted_redshift_edges_sit_at_the_data_edges(fake_ssp, monkeypatch):
-    """The smoothed edge is centred on the first/last valid pixel with the documented width."""
+def test_fitted_redshift_coverage_is_one_half_at_the_data_edges(fake_ssp, monkeypatch):
+    """The smoothed step is centred on the first and last valid pixel, for both line families."""
     import copy
 
-    from jaxsedfit.model import C_KMS, _inside_spectral_data
+    from jaxsedfit.model import _inside_spectral_data
 
     spec_rest = (1300.0, 2900.0)
     context, _, _ = _run(_config(spec_rest=spec_rest), monkeypatch)
@@ -481,12 +489,13 @@ def test_fitted_redshift_edges_sit_at_the_data_edges(fake_ssp, monkeypatch):
     cfg.observation.redshift_mode = "fit"
     spec_wave = np.asarray(context.spec_wave_obs)
     spec_min, spec_max = float(spec_wave.min()), float(spec_wave.max())
-    margin = cfg.agn.line_coverage_margin_kms / C_KMS
-    width = margin * 0.5 * (spec_min + spec_max) / 6.0
-    rest = np.array([spec_min, spec_min + width, spec_max, spec_max - width]) / (1.0 + REDSHIFT)
-    w = np.asarray(_inside_spectral_data(context, cfg, rest, REDSHIFT))
-    expected_core = 1.0 / (1.0 + np.exp(-1.0))
-    np.testing.assert_allclose(w, [0.5, expected_core, 0.5, expected_core], atol=1e-6)
+    rest = np.array([spec_min, spec_max, 0.9 * spec_min, 1.1 * spec_max, 2.0 * spec_min]) / (1.0 + REDSHIFT)
+    for family in (0, 1):  # broad, narrow
+        w = np.asarray(_inside_spectral_data(context, cfg, rest, REDSHIFT, family))
+        # The tabulated profile fraction is 0.5 at the edges to within the grid spacing.
+        np.testing.assert_allclose(w[:2], 0.5, atol=0.02)
+        np.testing.assert_allclose(w[2:4], 0.0, atol=1e-6)
+        np.testing.assert_allclose(w[4], 1.0, atol=1e-6)
 
 
 def test_zero_amplitude_component_leaves_its_line_out_of_the_denominator(fake_ssp, monkeypatch):
@@ -513,7 +522,7 @@ def test_zero_amplitude_component_leaves_its_line_out_of_the_denominator(fake_ss
         jnp.asarray(line_wave), jnp.asarray(blagn), jnp.asarray(context.templates.line_sy2), coverage=cov,
     )
     broad = np.asarray(broad)
-    extrapolated = (np.asarray(cov.template_outside) > 0.0) & (blagn > 0.0)
+    extrapolated = (_template_outside(cov) > 0.0) & (blagn > 0.0)
     conversion = 1.0e-10 / 299792458.0 * 1.0e29
     lumin0 = amps[0] * np.sqrt(2.0 * np.pi) * sigs[0] / (conversion * nominal[0] * (1.0 + REDSHIFT)) * 4.0 * np.pi * 1.0e52
     np.testing.assert_allclose(broad[extrapolated] / blagn[extrapolated], lumin0 / blagn[idx[0]], rtol=1e-10)
@@ -544,3 +553,128 @@ def test_unmatched_components_follow_their_own_centre(fake_ssp, monkeypatch):
     # Unmatched components never enter the anchors.
     assert np.all(np.asarray(cov.broad_anchor_weight) == 0.0)
     assert np.all(np.asarray(cov.narrow_anchor_weight) == 0.0)
+
+
+# --------------------------------------------------------------------------- #
+# Gaps and masks inside the spectrum
+# --------------------------------------------------------------------------- #
+CIV_REST = 1549.0
+
+
+def _civ_index(context):
+    line_wave = np.asarray(context.templates.line_wave)
+    return int(np.argmin(np.abs(line_wave - CIV_REST)))
+
+
+def _civ_components(context, state):
+    nominal = _nominal(state)
+    near = np.abs(nominal / CIV_REST - 1.0) < 0.005
+    broad = np.asarray(state["line_broad_mask_per_component"]) > 0.5
+    return near & broad, near & ~broad
+
+
+def _masked_config(half_width_rest, *, drop_pixels=False):
+    cfg = _config()
+    wave = np.asarray(cfg.spectroscopy.wave_obs)
+    hole = np.abs(wave / (1.0 + REDSHIFT) - CIV_REST) < half_width_rest
+    if drop_pixels:  # a gap in the wavelength grid
+        keep = ~hole
+        cfg.spectroscopy.wave_obs = wave[keep].tolist()
+        cfg.spectroscopy.fluxes = np.asarray(cfg.spectroscopy.fluxes)[keep].tolist()
+        cfg.spectroscopy.errors = np.asarray(cfg.spectroscopy.errors)[keep].tolist()
+    else:
+        cfg.spectroscopy.mask = (~hole).tolist()
+    return cfg
+
+
+def test_line_in_a_masked_region_is_extrapolated(fake_ssp, monkeypatch):
+    context, _, cap = _run(_masked_config(40.0), monkeypatch)
+    state = cap["state"]
+    cov = _coverage(context, state)
+    civ = _civ_index(context)
+    broad_c, narrow_c = _civ_components(context, state)
+    assert broad_c.any()
+    assert np.asarray(cov.broad_template_outside)[civ] == 1.0
+    assert np.asarray(cov.narrow_template_outside)[civ] == 1.0
+    assert np.all(np.asarray(cov.component_covered)[broad_c | narrow_c] == 0.0)
+    # A line well away from the mask (Mg II 2798) is still fitted.
+    line_wave = np.asarray(context.templates.line_wave)
+    mgii = int(np.argmin(np.abs(line_wave - 2798.0)))
+    assert np.asarray(cov.broad_template_outside)[mgii] == 0.0
+
+
+def test_line_in_a_wavelength_gap_is_extrapolated(fake_ssp, monkeypatch):
+    context, _, cap = _run(_masked_config(40.0, drop_pixels=True), monkeypatch)
+    state = cap["state"]
+    cov = _coverage(context, state)
+    civ = _civ_index(context)
+    broad_c, narrow_c = _civ_components(context, state)
+    assert np.asarray(cov.broad_template_outside)[civ] == 1.0
+    assert np.all(np.asarray(cov.component_covered)[broad_c | narrow_c] == 0.0)
+
+
+def test_small_mask_at_the_peak_keeps_the_broad_line_and_drops_the_narrow_core(fake_ssp, monkeypatch):
+    # +-3 A rest masks most of a 500 km/s narrow line but about a third of a
+    # 3000 km/s broad line, whose wings still sample the profile.
+    context, _, cap = _run(_masked_config(3.0), monkeypatch)
+    state = cap["state"]
+    cov = _coverage(context, state)
+    civ = _civ_index(context)
+    broad_c, narrow_c = _civ_components(context, state)
+    assert np.asarray(cov.broad_template_outside)[civ] == 0.0
+    assert np.asarray(cov.narrow_template_outside)[civ] == 1.0
+    assert np.all(np.asarray(cov.component_covered)[broad_c] == 1.0)
+    assert np.all(np.asarray(cov.component_covered)[narrow_c] == 0.0)
+    # Exactly once per family: the narrow C IV is extrapolated, not fitted.
+    blagn = np.asarray(context.templates.line_blagn)
+    narrow_t = np.asarray(context.templates.line_sy2)
+    assert blagn[civ] > 0.0 and narrow_t[civ] > 0.0
+    assert np.asarray(cov.broad_template_covered)[civ] == 1.0
+    assert np.asarray(cov.narrow_template_covered)[civ] == 0.0
+
+
+def test_a_second_unmasked_spectrum_covers_the_line(fake_ssp, monkeypatch):
+    cfg = _masked_config(40.0)
+    first = cfg.spectroscopy
+    second = SpectroscopyData(
+        wave_obs=list(first.wave_obs), fluxes=list(first.fluxes), errors=list(first.errors), instrument="boss"
+    )
+    cfg.spectroscopy = [first, second]
+    context, _, cap = _run(cfg, monkeypatch)
+    cov = _coverage(context, cap["state"])
+    assert np.asarray(cov.broad_template_outside)[_civ_index(context)] == 0.0
+
+
+def test_pixel_intervals_tile_the_data_and_stop_at_edges_and_gaps():
+    from jaxsedfit.preload import spectral_pixel_intervals
+
+    wave = np.array([100.0, 101.0, 102.0, 103.0, 110.0, 111.0, 112.0, 200.0, 201.0, 202.0])
+    mask = np.ones(wave.size, dtype=bool)
+    mask[5] = False
+    lo, hi = spectral_pixel_intervals(wave, mask, np.array([0] * 7 + [1] * 3))
+    np.testing.assert_allclose(lo[:4], [100.0, 100.5, 101.5, 102.5])  # first pixel does not extend outward
+    np.testing.assert_allclose(hi[:4], [100.5, 101.5, 102.5, 103.0])  # 103 sits before a 7 A gap
+    np.testing.assert_allclose([lo[4], hi[4]], [110.0, 110.5])  # 110 sits after the gap
+    assert lo[5] == hi[5] == 111.0  # masked pixel: empty interval
+    np.testing.assert_allclose([lo[7], hi[7]], [200.0, 200.5])  # second spectrum starts fresh
+    np.testing.assert_allclose([lo[9], hi[9]], [201.5, 202.0])
+
+
+def test_coverage_table_matches_a_direct_profile_integral():
+    from scipy.special import ndtr
+
+    from jaxsedfit.preload import LINE_COVERAGE_FWHM_KMS, spectral_line_coverage_table, spectral_pixel_intervals
+
+    wave = np.geomspace(4000.0, 6000.0, 1500)
+    mask = np.ones(wave.size, dtype=bool)
+    mask[(wave > 4950.0) & (wave < 4970.0)] = False
+    index = np.zeros(wave.size, dtype=int)
+    grid, table = spectral_line_coverage_table(wave, mask, index)
+    lo, hi = spectral_pixel_intervals(wave, mask, index)
+    for centre in (4000.0, 4500.0, 4960.0, 4975.0, 6000.0, 6010.0):
+        for family, fwhm in enumerate(LINE_COVERAGE_FWHM_KMS):
+            sigma = centre * fwhm / 299792.458 / 2.354820045
+            direct = np.sum(ndtr((hi - centre) / sigma) - ndtr((lo - centre) / sigma))
+            log_grid = grid[0] + grid[1] * np.arange(table.shape[1])
+            tabulated = np.interp(np.log(centre), log_grid, table[family])
+            np.testing.assert_allclose(tabulated, direct, atol=2e-3)

@@ -4106,36 +4106,53 @@ def _project_spectral_line_state_filters(
 # spectral line component (template and spectral tables use slightly different
 # wavelengths and blend definitions, e.g. 1215 vs 1215.67 A, 1400 vs 1396.76/1402.06 A).
 CONSISTENT_COVERAGE_MATCH_TOLERANCE = 0.005
+# Tolerance in profile fraction below one half that still counts as covered.
+COVERAGE_FRACTION_TOLERANCE = 1.0e-3
+# Width of the smoothed coverage step in profile fraction, with a fitted redshift.
+COVERAGE_FRACTION_SMOOTHING = 0.02
 
 
 class LineCoverage(NamedTuple):
-    """Per-component and per-template-line decisions of :func:`_consistent_line_coverage`."""
+    """Per-component and per-template-line decisions of :func:`_consistent_line_coverage`.
+
+    ``broad_template_outside`` and ``narrow_template_outside`` are the weights with
+    which each template line's broad and narrow parts are extrapolated; the two can
+    differ when a narrow core falls in a masked region that the broad wings span.
+    """
 
     component_covered: Any
     broad_anchor_weight: Any
     narrow_anchor_weight: Any
-    template_outside: Any
+    broad_template_outside: Any
+    narrow_template_outside: Any
     broad_template_covered: Any
     narrow_template_covered: Any
 
 
-def _inside_spectral_data(context: ModelContext, cfg: FitConfig, line_wave, redshift):
-    """Weight in [0, 1] that a rest wavelength lies inside the valid spectral pixels' range.
+def _inside_spectral_data(context: ModelContext, cfg: FitConfig, line_wave, redshift, family):
+    """Weight in [0, 1] that a line at rest wavelength ``line_wave`` is covered by the data.
 
-    With a fixed redshift this is a hard step at the first and last valid
-    pixel (no velocity margin). With a fitted redshift it is smoothed with the
-    same sigmoid width as :func:`_photometric_agn_line_mask`.
+    A line is covered when at least half of its profile, a Gaussian at the
+    nominal width of its family (``family`` 0: broad, 1: narrow; see
+    ``preload.LINE_COVERAGE_FWHM_KMS``), falls on valid spectral pixels. At an
+    edge of a spectrum this is the same as the centre lying inside the data; it
+    also leaves out lines in masked regions and in gaps of the wavelength grid,
+    while a broad line with a few masked pixels at its peak but well-sampled
+    wings stays covered. The profile fraction is read from the per-object table
+    ``context.spec_line_coverage_fraction``. With a fixed redshift the decision
+    is a hard step; with a fitted redshift it is smoothed over profile fractions
+    of about 0.45-0.55.
     """
-    spec_wave = jnp.asarray(context.spec_wave_obs, dtype=jnp.float64)
-    valid = jnp.asarray(context.spec_mask, dtype=bool) & jnp.isfinite(spec_wave) & (spec_wave > 0.0)
-    spec_min = jnp.min(jnp.where(valid, spec_wave, jnp.inf))
-    spec_max = jnp.max(jnp.where(valid, spec_wave, -jnp.inf))
     line_obs = jnp.asarray(line_wave, dtype=jnp.float64) * jnp.maximum(1.0 + redshift, 1.0e-8)
+    grid = jnp.asarray(context.spec_line_coverage_grid, dtype=jnp.float64)
+    table = jnp.asarray(context.spec_line_coverage_fraction, dtype=jnp.float64)[family]
+    log_grid = grid[0] + grid[1] * jnp.arange(table.shape[0], dtype=jnp.float64)
+    fraction = jnp.interp(jnp.log(jnp.maximum(line_obs, 1.0e-30)), log_grid, table, left=0.0, right=0.0)
     if not cfg.observation.fits_redshift:
-        return ((line_obs >= spec_min) & (line_obs <= spec_max)).astype(jnp.float64)
-    margin = max(float(cfg.agn.line_coverage_margin_kms), 0.0) / C_KMS
-    transition = jnp.maximum(margin * 0.5 * (spec_min + spec_max) / 6.0, 1.0e-3)
-    return jax.nn.sigmoid((line_obs - spec_min) / transition) * jax.nn.sigmoid((spec_max - line_obs) / transition)
+        # A line centred exactly on an edge pixel (fraction 0.5) counts as covered;
+        # the tolerance absorbs the table interpolation error.
+        return (fraction >= 0.5 - COVERAGE_FRACTION_TOLERANCE).astype(jnp.float64)
+    return jax.nn.sigmoid((fraction - 0.5) / COVERAGE_FRACTION_SMOOTHING)
 
 
 def _nearest_template_match(nominal, line_wave):
@@ -4156,16 +4173,21 @@ def _consistent_line_coverage(
     line_blagn,
     line_narrow_template,
 ):
-    """Decide fitted-or-extrapolated for every line with one rule: is the centre inside the data?
+    """Decide fitted-or-extrapolated for every line with one rule: is it covered by the data?
+
+    A line is covered when at least half of its profile, at the nominal broad
+    or narrow width of its family, falls on valid spectral pixels (see
+    :func:`_inside_spectral_data`). This is the centre rule at the edges of a
+    spectrum, and it also handles masked regions and gaps inside the spectrum.
 
     * Each fitted component is matched to its nearest SED template line (0.5%
-      tolerance). A matched component and its template line share one
-      decision, taken at the template line's centre: inside the valid
-      spectral pixels -> the fitted component enters the photometry and the
-      template line is not extrapolated; outside -> the template line is
-      extrapolated and the component is left out. Unmatched components use
-      their own nominal centre. Every transition is counted exactly once, also
-      at the edges where the two tables' wavelengths differ slightly.
+      tolerance). A matched component and its template line's part of the same
+      family share one decision, taken at the template line's centre: covered
+      -> the fitted component enters the photometry and that part of the
+      template line is not extrapolated; not covered -> it is extrapolated and
+      the component is left out. Unmatched components use their own nominal
+      centre. Every transition is counted exactly once, also at the edges where
+      the two tables' wavelengths differ slightly.
     * Template lines inside the data without a fitted counterpart are not
       extrapolated (the spectral model, which the spectrum constrains there,
       does not contain them).
@@ -4173,34 +4195,40 @@ def _consistent_line_coverage(
       template line with non-zero weight in the same family (broad / narrow),
       and the denominators sum exactly those template lines.
 
-    ``agn.line_coverage_margin_kms`` is not used by this rule (only, for a
-    fitted redshift, as the smoothing width of the data edges).
+    ``agn.line_coverage_margin_kms`` is not used by this rule.
     """
     amps = jnp.asarray(state["line_amp_per_component"], dtype=jnp.float64)
     mus = jnp.asarray(state["line_mu_per_component"], dtype=jnp.float64)
     broad_mask = jnp.asarray(state["line_broad_mask_per_component"], dtype=jnp.float64)
     nominal = jnp.exp(jnp.asarray(state.get("line_ln_lambda0_per_component", mus), dtype=jnp.float64))
     line_wave = jnp.asarray(line_wave, dtype=jnp.float64)
-    template_inside = _inside_spectral_data(context, cfg, line_wave, redshift)
+    # Broad and narrow parts are judged with their own nominal widths.
+    broad_inside = _inside_spectral_data(context, cfg, line_wave, redshift, 0)
+    narrow_inside = _inside_spectral_data(context, cfg, line_wave, redshift, 1)
     match = _nearest_template_match(nominal, line_wave)
     matched = jnp.sum(match, axis=0)
-    component_covered = matched * jnp.sum(match * template_inside[:, None], axis=0) + (1.0 - matched) * (
-        _inside_spectral_data(context, cfg, nominal, redshift)
-    )
+    template_inside_for_component = broad_mask * jnp.sum(match * broad_inside[:, None], axis=0) + (
+        1.0 - broad_mask
+    ) * jnp.sum(match * narrow_inside[:, None], axis=0)
+    own_inside = broad_mask * _inside_spectral_data(context, cfg, nominal, redshift, 0) + (
+        1.0 - broad_mask
+    ) * _inside_spectral_data(context, cfg, nominal, redshift, 1)
+    component_covered = matched * template_inside_for_component + (1.0 - matched) * own_inside
     live = (amps != 0.0).astype(jnp.float64)
     broad_line = (jnp.asarray(line_blagn, dtype=jnp.float64) > 0.0).astype(jnp.float64)
     narrow_line = (jnp.asarray(line_narrow_template, dtype=jnp.float64) > 0.0).astype(jnp.float64)
     has_broad = jnp.max(match * (live * broad_mask)[None, :], axis=1)
     has_narrow = jnp.max(match * (live * (1.0 - broad_mask))[None, :], axis=1)
-    broad_template_covered = template_inside * has_broad * broad_line
-    narrow_template_covered = template_inside * has_narrow * narrow_line
+    broad_template_covered = broad_inside * has_broad * broad_line
+    narrow_template_covered = narrow_inside * has_narrow * narrow_line
     broad_anchor_weight = live * broad_mask * jnp.sum(match * broad_template_covered[:, None], axis=0)
     narrow_anchor_weight = live * (1.0 - broad_mask) * jnp.sum(match * narrow_template_covered[:, None], axis=0)
     return LineCoverage(
         component_covered=component_covered,
         broad_anchor_weight=broad_anchor_weight,
         narrow_anchor_weight=narrow_anchor_weight,
-        template_outside=1.0 - template_inside,
+        broad_template_outside=1.0 - broad_inside,
+        narrow_template_outside=1.0 - narrow_inside,
         broad_template_covered=broad_template_covered,
         narrow_template_covered=narrow_template_covered,
     )
@@ -4244,7 +4272,6 @@ def _spectral_family_extrapolation(
         coverage = _consistent_line_coverage(
             context, cfg, state, redshift, line_wave, line_blagn, line_narrow_template
         )
-    outside_mask = coverage.template_outside
     broad_template_anchor = jnp.sum(line_blagn * coverage.broad_template_covered)
     narrow_template_anchor = jnp.sum(line_narrow_template * coverage.narrow_template_covered)
     broad_numerator = jnp.sum(intrinsic_lumin * coverage.broad_anchor_weight)
@@ -4263,8 +4290,8 @@ def _spectral_family_extrapolation(
         narrow_numerator / jnp.maximum(narrow_template_anchor, 1.0e-30),
         0.0,
     )
-    broad_lumin = broad_norm * line_blagn * outside_mask
-    narrow_lumin = narrow_norm * line_narrow_template * outside_mask
+    broad_lumin = broad_norm * line_blagn * coverage.broad_template_outside
+    narrow_lumin = narrow_norm * line_narrow_template * coverage.narrow_template_outside
     positive = jnp.clip(intrinsic_lumin, 0.0, None)
     broad_weight = positive * broad_mask
     narrow_weight = positive * narrow_family

@@ -335,6 +335,13 @@ class ModelContext:
     spec_line_coverage_rest: np.ndarray = field(default_factory=lambda: np.full(2, np.nan))
     # True for masked pixels appended to give spectra a common length (fit_batch).
     spec_padding: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
+    # Fraction of a broad / narrow line profile on valid pixels against observed
+    # ln(wavelength) (see ``spectral_line_coverage_table``): grid (start, step) and
+    # values, shape (2, LINE_COVERAGE_GRID_SIZE).
+    spec_line_coverage_grid: np.ndarray = field(default_factory=lambda: np.array([0.0, 1.0]))
+    spec_line_coverage_fraction: np.ndarray = field(
+        default_factory=lambda: np.zeros((2, LINE_COVERAGE_GRID_SIZE))
+    )
     # With agn.line_activation_rest: this object's (init, min, max) tied-line group
     # amplitudes, which replace the placeholders left in the shared line table.
     spec_line_amp_groups: np.ndarray = field(default_factory=lambda: np.zeros((3, 0)))
@@ -436,6 +443,114 @@ def spectral_aperture_capture_tables(aperture_diameter_arcsec, psf_fwhm_arcsec, 
             radius = 0.5 * aperture[i] if has_aperture else np.sqrt(2.0) * fwhm[i] / 2.354820045
             host_table[i] = radius**2 / (radius**2 + host_scale**2)
     return host_table, agn_capture
+
+
+# Nominal line widths (FWHM, km/s) of the broad and narrow families that decide
+# whether a line is covered by the spectrum (model.DEFAULT_*_LINE_WIDTH_KMS).
+LINE_COVERAGE_FWHM_KMS = (3000.0, 500.0)
+# Points of the per-object coverage table in observed log wavelength.
+LINE_COVERAGE_GRID_SIZE = 8192
+# A pixel spacing more than this many times the spacing on the other side is a gap.
+GAP_SPACING_RATIO = 1.5
+
+
+def spectral_pixel_intervals(wave, mask, spectrum_index, padding=None):
+    """Observed-frame wavelength interval [lo, hi] of every valid spectral pixel.
+
+    Each pixel extends half-way to its neighbours in the same spectrum, so
+    neighbouring pixels tile the range without holes. It does not extend past
+    the first or last pixel of a spectrum, nor into a gap in the wavelength grid
+    (a spacing more than ``GAP_SPACING_RATIO`` times the spacing on the other
+    side, e.g. a detector gap or pixels removed from the data). Masked, padded
+    and non-finite pixels get an empty interval.
+
+    Parameters
+    ----------
+    wave : array_like
+        Observed wavelengths in Angstrom, shape (n_pixels,).
+    mask : array_like
+        True for valid pixels.
+    spectrum_index : array_like
+        Spectrum of each pixel.
+    padding : array_like, optional
+        True for padding pixels.
+
+    Returns
+    -------
+    lo, hi : numpy.ndarray
+        Interval edges in Angstrom.
+    """
+    wave = np.asarray(wave, dtype=float)
+    index = np.asarray(spectrum_index)
+    valid = np.asarray(mask, dtype=bool) & np.isfinite(wave) & (wave > 0.0)
+    if padding is not None and np.size(padding) == wave.size:
+        valid &= ~np.asarray(padding, dtype=bool)
+    n = wave.size
+    gap_left = np.full(n, np.inf)
+    gap_right = np.full(n, np.inf)
+    if n > 1:
+        d = np.diff(wave)
+        same = (index[1:] == index[:-1]) & (d > 0.0)
+        gap_left[1:] = np.where(same, d, np.inf)
+        gap_right[:-1] = np.where(same, d, np.inf)
+    with np.errstate(invalid="ignore"):
+        extend_left = np.isfinite(gap_left) & (~np.isfinite(gap_right) | (gap_left <= GAP_SPACING_RATIO * gap_right))
+        extend_right = np.isfinite(gap_right) & (~np.isfinite(gap_left) | (gap_right <= GAP_SPACING_RATIO * gap_left))
+    # Neither spectrum ends nor pixels next to a gap extend outward; an end
+    # pixel has no finite spacing on its outer side, so extend_* is False there.
+    left = np.where(extend_left, 0.5 * np.where(np.isfinite(gap_left), gap_left, 0.0), 0.0)
+    right = np.where(extend_right, 0.5 * np.where(np.isfinite(gap_right), gap_right, 0.0), 0.0)
+    left = np.where(valid, left, 0.0)
+    right = np.where(valid, right, 0.0)
+    return wave - left, wave + right
+
+
+def spectral_line_coverage_table(wave, mask, spectrum_index, padding=None, n_spectra=1):
+    """Fraction of a broad and of a narrow line profile that falls on valid pixels.
+
+    The fraction depends only on the observed wavelength (the profile widths are
+    fixed velocities), so it is tabulated once per object on a log-wavelength
+    grid and interpolated in the model. With several spectra the largest
+    fraction among them counts (repeated spectra of one range are not added).
+
+    Returns
+    -------
+    grid : numpy.ndarray
+        ``(log_start, log_step)`` of the grid in ln(Angstrom).
+    fraction : numpy.ndarray
+        Shape (2, LINE_COVERAGE_GRID_SIZE): broad, then narrow.
+    """
+    from scipy.special import ndtr
+
+    wave = np.asarray(wave, dtype=float)
+    index = np.asarray(spectrum_index)
+    lo, hi = spectral_pixel_intervals(wave, mask, index, padding)
+    occupied = hi > lo
+    fraction = np.zeros((2, LINE_COVERAGE_GRID_SIZE))
+    if not np.any(occupied):
+        return np.array([0.0, 1.0]), fraction
+    pad = 8.0 * max(LINE_COVERAGE_FWHM_KMS) / 299792.458
+    log_lo = float(np.log(lo[occupied].min())) - pad
+    log_hi = float(np.log(hi[occupied].max())) + pad
+    step = (log_hi - log_lo) / (LINE_COVERAGE_GRID_SIZE - 1)
+    centre = np.exp(log_lo + step * np.arange(LINE_COVERAGE_GRID_SIZE))
+    for k in range(max(int(n_spectra), 1)):
+        sel = occupied & (index == k)
+        if not np.any(sel):
+            continue
+        # Merge touching pixel intervals into runs: the profile integral over a
+        # run is the difference of two normal CDFs.
+        order = np.argsort(lo[sel])
+        run_lo, run_hi = lo[sel][order], hi[sel][order]
+        starts = np.r_[True, run_lo[1:] > run_hi[:-1] * (1.0 + 1.0e-12)]
+        runs_lo = run_lo[starts]
+        runs_hi = np.maximum.reduceat(run_hi, np.flatnonzero(starts))
+        for f, fwhm in enumerate(LINE_COVERAGE_FWHM_KMS):
+            sigma = centre * (fwhm / 299792.458) / 2.354820045
+            frac = (ndtr((runs_hi[None, :] - centre[:, None]) / sigma[:, None])
+                    - ndtr((runs_lo[None, :] - centre[:, None]) / sigma[:, None])).sum(axis=1)
+            fraction[f] = np.maximum(fraction[f], np.clip(frac, 0.0, 1.0))
+    return np.array([log_lo, step]), fraction
 
 
 def clear_per_object_caches() -> None:
@@ -2543,6 +2658,13 @@ def build_model_context(cfg: FitConfig, spec_pad_to: Sequence[int] | None = None
             spec_wave_obs, spec_mask, cfg.observation.redshift, cfg.agn.line_coverage_margin_kms
         )
 
+    if np.size(spec_wave_obs):
+        line_coverage_grid, line_coverage_fraction = spectral_line_coverage_table(
+            spec_wave_obs, spec_mask, spec_spectrum_index, spec_padding, n_spectra=len(spec_instruments)
+        )
+    else:
+        line_coverage_grid = np.array([0.0, 1.0])
+        line_coverage_fraction = np.zeros((2, LINE_COVERAGE_GRID_SIZE))
     return ModelContext(
         fit_config=cfg,
         rest_wave=rest_wave,
@@ -2606,5 +2728,7 @@ def build_model_context(cfg: FitConfig, spec_pad_to: Sequence[int] | None = None
         spec_has_data=bool(spec_wave_obs.size > 0 and np.any(spec_mask)),
         spec_line_coverage_rest=np.asarray(spec_coverage if spec_coverage is not None else (np.nan, np.nan), dtype=float),
         spec_padding=np.asarray(spec_padding, dtype=bool),
+        spec_line_coverage_grid=line_coverage_grid,
+        spec_line_coverage_fraction=line_coverage_fraction,
         spec_line_amp_groups=spec_line_amp_groups,
     )
