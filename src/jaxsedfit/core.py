@@ -535,6 +535,13 @@ def _trace_latent_values(model, rng_seed: int) -> dict[str, Any]:
 
 def _get_nested_sampler_cls():
     """Resolve NumPyro's optional nested sampler lazily."""
+    try:
+        import jaxns  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            'Nested sampling (inference.method="ns") needs the optional jaxns dependency: '
+            'pip install "jaxsedfit[ns]".'
+        ) from exc
     from numpyro.contrib.nested_sampling import NestedSampler
 
     return NestedSampler

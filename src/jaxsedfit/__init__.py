@@ -5,7 +5,14 @@ its parts), the single-object fitter :class:`JAXSEDFit`, :func:`fit_batch` for m
 objects, results, plotting and simulation helpers.
 """
 
-from .config import (
+import jax as _jax
+
+# The model needs float64 throughout (fluxes span tens of orders of magnitude). It
+# used to be switched on as a side effect of importing jaxns (and some dsps
+# versions), which is now an optional dependency.
+_jax.config.update("jax_enable_x64", True)
+
+from .config import (  # noqa: E402
     AGNConfig,
     EmissionLineTemplate,
     FeIITemplate,
