@@ -1663,3 +1663,21 @@ def test_spectrum_aperture_and_seeing_set_host_and_agn_capture(monkeypatch, cali
         assert agn_capture[0] == 1.0
     else:
         assert 0.9 < agn_capture[0] < 0.95
+
+
+def test_subset_prediction_samples_spans_all_draws():
+    """max_draws thins evenly over the whole draw axis (all chains), not the first draws."""
+    draws = {"a": np.arange(2000.0), "b": np.arange(4000.0).reshape(2000, 2), "scalar": np.float64(3.0)}
+    out = JAXSEDFit._subset_prediction_samples(draws, 256)
+    assert out["a"].shape == (256,)
+    assert out["b"].shape == (256, 2)
+    assert out["a"][0] == 0 and out["a"][-1] == 1999
+    # every one of four 500-draw chains (stored chain after chain) contributes about a quarter
+    counts = np.bincount((out["a"] // 500).astype(int), minlength=4)
+    assert counts.min() >= 60
+    np.testing.assert_array_equal(out["b"][:, 0], 2 * out["a"])
+    assert float(out["scalar"]) == 3.0
+    assert np.array_equal(JAXSEDFit._subset_prediction_samples(draws, 256)["a"], out["a"])
+    assert JAXSEDFit._subset_prediction_samples(draws, None)["a"].shape == (2000,)
+    assert JAXSEDFit._subset_prediction_samples(draws, 5000)["a"].shape == (2000,)
+    assert JAXSEDFit._subset_prediction_samples(draws, 0)["a"].shape == (1,)

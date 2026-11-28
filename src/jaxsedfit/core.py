@@ -804,20 +804,29 @@ class JAXSEDFit:
 
     @staticmethod
     def _subset_prediction_samples(samples: Mapping[str, Any], max_draws: int | None) -> dict[str, Any]:
-        """Return posterior samples optionally limited along the leading draw axis.
+        """Return posterior samples optionally thinned along the leading draw axis.
+
+        The kept draws are evenly spaced over the whole draw axis, so a limited
+        prediction represents every chain (NUTS draws are stored chain after
+        chain) rather than only the start of the first one. The selection is
+        deterministic, so cached predictions stay reproducible.
 
         Parameters
         ----------
         samples : Mapping[str, Any]
             Posterior samples keyed by site name, draws on the leading axis.
         max_draws : int or None
-            Maximum number of leading draws to keep (at least 1); None keeps all.
+            Maximum number of draws to keep (at least 1); None keeps all.
         """
-        out: dict[str, Any] = {}
         n = None if max_draws is None else max(int(max_draws), 1)
+        total = max((int(np.shape(v)[0]) for v in samples.values() if np.ndim(v) > 0), default=None)
+        if n is None or total is None or n >= total:
+            return {key: np.asarray(value) for key, value in samples.items()}
+        index = np.unique(np.round(np.linspace(0, total - 1, n)).astype(int))
+        out: dict[str, Any] = {}
         for key, value in samples.items():
             arr = np.asarray(value)
-            out[key] = arr if n is None or arr.ndim == 0 else arr[:n]
+            out[key] = arr if arr.ndim == 0 else arr[index]
         return out
 
     @staticmethod
@@ -1169,7 +1178,8 @@ class JAXSEDFit:
         kind : str, optional
             Prediction product set, ``"plot"`` or ``"photometry"`` (or alias).
         max_draws : int, optional
-            Maximum number of posterior draws to evaluate; None uses all.
+            Maximum number of posterior draws to evaluate, evenly spaced over
+            all stored draws (all chains); None uses all.
         extra_return_sites : iterable of str, optional
             Best-effort additional NumPyro sites to include alongside the
             selected product set.
@@ -2112,8 +2122,9 @@ class JAXSEDFit:
             full component SED arrays where possible; ``"plot"`` includes the
             component arrays used by :meth:`plot_sed`.
         max_draws : int, optional
-            Maximum number of posterior draws to evaluate. If omitted, all
-            available draws are used.
+            Maximum number of posterior draws to evaluate, evenly spaced over
+            all stored draws so that every chain is represented. If omitted,
+            all available draws are used.
         extra_return_sites : iterable of str, optional
             Best-effort additional NumPyro sample or deterministic sites to
             return with the standard products selected by ``kind``.
