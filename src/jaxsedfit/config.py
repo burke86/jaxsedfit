@@ -369,12 +369,6 @@ class AGNConfig:
     # photometry as a fitted line or as an extrapolated template line is
     # decided by its centre inside the valid pixels, without this margin.
     line_coverage_margin_kms: float = 3000.0
-    # Narrow lines outside the spectral coverage: "template" (default) scales
-    # the Seyfert-2/LINER template to the fitted narrow lines; "optical_only"
-    # drops extrapolated narrow lines blueward of rest 3000 A (Ly-beta/O VI to
-    # Mg II, where fitted "narrow" components absorb broad-line cores and
-    # continuum-EW anchors already include them); "none" drops all.
-    narrow_line_extrapolation: str = "template"
     # Rest-frame range [A] that fixes the tied-line set instead of each spectrum's
     # coverage; lines the spectra do not cover are then masked (zero amplitude), so
     # objects at different redshifts share one model structure (see fit_batch).
@@ -424,24 +418,14 @@ class AGNConfig:
         if int(self.feature_grid_size) < 256:
             raise ValueError("AGNConfig.feature_grid_size must be at least 256.")
         self.feature_grid_size = int(self.feature_grid_size)
-        self._normalize_narrow_line_extrapolation()
         if self.line_activation_rest is not None:
             lo, hi = (float(v) for v in self.line_activation_rest)
             if not (np.isfinite(lo) and np.isfinite(hi) and 0.0 < lo < hi):
                 raise ValueError("AGNConfig.line_activation_rest must be an increasing pair of positive wavelengths.")
             self.line_activation_rest = (lo, hi)
 
-    def _normalize_narrow_line_extrapolation(self) -> None:
-        mode = str(self.narrow_line_extrapolation).strip().lower()
-        if mode not in {"template", "optical_only", "none"}:
-            raise ValueError(
-                "AGNConfig.narrow_line_extrapolation must be 'template', 'optical_only' or 'none'."
-            )
-        self.narrow_line_extrapolation = mode
-
     def validate(self) -> None:
         """Validate inline template units and array shapes."""
-        self._normalize_narrow_line_extrapolation()
         allowed_units = {"angstrom", "angstroms", "aa", "a", "nm", "nanometer", "nanometers", "um", "micron", "microns"}
         for label, template in (("feii_template", self.feii_template), ("emission_line_template", self.emission_line_template)):
             unit = None if template.wavelength_unit is None else str(template.wavelength_unit).strip().lower()

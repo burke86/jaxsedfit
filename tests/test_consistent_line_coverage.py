@@ -430,77 +430,11 @@ def test_native_lines_not_corrected_without_local_line_photometry(fake_ssp, monk
     np.testing.assert_allclose(_continuum_minus_disc(tr), native_in_agn, atol=1e-9 * scale)
 
 
-def test_narrow_line_extrapolation_modes(fake_ssp, monkeypatch):
-    import copy
-
-    from jaxsedfit.model import NARROW_EXTRAPOLATION_OPTICAL_MIN_A
-
-    assert AGNConfig().narrow_line_extrapolation == "template"
-    with pytest.raises(ValueError, match="narrow_line_extrapolation"):
-        AGNConfig(narrow_line_extrapolation="uv")
-    context, tr_t, cap = _run(_config(), monkeypatch)
-    band = list(BANDS_REST).index("lya_band")
-    assert _site(tr_t, "spectral_extrapolated_narrow_photometry")[band] > 0.0
-    args = list(cap["args"])
-    line_wave = np.asarray(args[7])
-    results = {}
-    for mode in ("template", "optical_only", "none"):
-        cfg = copy.deepcopy(args[1])
-        cfg.agn.narrow_line_extrapolation = mode
-        broad, narrow, _, _ = model_module._spectral_family_extrapolation(
-            args[0], cfg, *args[2:], **cap["kwargs"]
-        )
-        results[mode] = (np.asarray(broad), np.asarray(narrow))
-    broad_t, narrow_t = results["template"]
-    optical = line_wave >= NARROW_EXTRAPOLATION_OPTICAL_MIN_A
-    assert narrow_t[~optical].sum() > 0.0 and narrow_t[optical].sum() > 0.0
-    np.testing.assert_array_equal(results["optical_only"][1][optical], narrow_t[optical])
-    assert np.all(results["optical_only"][1][~optical] == 0.0)
-    assert np.all(results["none"][1] == 0.0)
-    for mode in ("optical_only", "none"):
-        np.testing.assert_array_equal(results[mode][0], broad_t)
-    cfg = _config()
-    cfg.agn.narrow_line_extrapolation = "none"
-    _, tr_none, _ = _run(cfg, monkeypatch)
-    assert np.all(_site(tr_none, "spectral_extrapolated_narrow_photometry") == 0.0)
-
-
-def test_optical_only_threshold_on_fixed_lines(fake_ssp, monkeypatch):
-    import copy
-
-    # The spectrum stops at rest 2600 A so Mg II 2798 is extrapolated too.
-    context, _, cap = _run(_config(spec_rest=(1250.5, 2600.0)), monkeypatch)
-    args = list(cap["args"])
-    line_wave = np.asarray(args[7])
-    out = {}
-    for mode in ("template", "optical_only"):
-        cfg = copy.deepcopy(args[1])
-        cfg.agn.narrow_line_extrapolation = mode
-        out[mode] = np.asarray(model_module._spectral_family_extrapolation(args[0], cfg, *args[2:], **cap["kwargs"])[1])
-    for rest, kept in ((1215.0, False), (2798.0, False), (3426.0, True), (3727.0, True), (5007.0, True)):
-        index = np.flatnonzero(np.abs(line_wave - rest) < 2.0)
-        assert index.size, rest
-        index = int(index[0])
-        assert out["template"][index] > 0.0, rest
-        assert (out["optical_only"][index] == out["template"][index]) == kept, rest
-        assert (out["optical_only"][index] == 0.0) == (not kept), rest
-
-
 def test_removed_switches_are_rejected():
     with pytest.raises(TypeError, match="consistent_line_coverage"):
         from jaxsedfit.config import _coerce_dataclass
 
         _coerce_dataclass(AGNConfig, {"consistent_line_coverage": True})
-
-
-def test_narrow_mode_is_normalized_in_validate():
-    cfg = _config()
-    cfg.agn.narrow_line_extrapolation = " Optical_Only "
-    cfg.validate()
-    assert cfg.agn.narrow_line_extrapolation == "optical_only"
-    cfg.agn.narrow_line_extrapolation = "uv"
-    with pytest.raises(ValueError, match="narrow_line_extrapolation"):
-        cfg.validate()
 
 
 def test_fitted_redshift_weights_sum_to_one(fake_ssp, monkeypatch):

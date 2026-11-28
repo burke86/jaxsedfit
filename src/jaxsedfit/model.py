@@ -4106,10 +4106,6 @@ def _project_spectral_line_state_filters(
 # spectral line component (template and spectral tables use slightly different
 # wavelengths and blend definitions, e.g. 1215 vs 1215.67 A, 1400 vs 1396.76/1402.06 A).
 CONSISTENT_COVERAGE_MATCH_TOLERANCE = 0.005
-# narrow_line_extrapolation="optical_only" keeps extrapolated narrow lines at
-# or redward of this rest wavelength ([Ne V] 3426, [O II] 3727 and redder) and
-# drops the UV ones (Ly-beta/O VI, Ly-alpha, N V, Si IV, C IV, He II, C III], Mg II).
-NARROW_EXTRAPOLATION_OPTICAL_MIN_A = 3000.0
 
 
 class LineCoverage(NamedTuple):
@@ -4269,11 +4265,6 @@ def _spectral_family_extrapolation(
     )
     broad_lumin = broad_norm * line_blagn * outside_mask
     narrow_lumin = narrow_norm * line_narrow_template * outside_mask
-    narrow_mode = getattr(cfg.agn, "narrow_line_extrapolation", "template")
-    if narrow_mode == "none":
-        narrow_lumin = jnp.zeros_like(narrow_lumin)
-    elif narrow_mode == "optical_only":
-        narrow_lumin = jnp.where(jnp.asarray(line_wave) >= NARROW_EXTRAPOLATION_OPTICAL_MIN_A, narrow_lumin, 0.0)
     positive = jnp.clip(intrinsic_lumin, 0.0, None)
     broad_weight = positive * broad_mask
     narrow_weight = positive * narrow_family

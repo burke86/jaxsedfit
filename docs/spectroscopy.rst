@@ -178,16 +178,6 @@ With the host-capture model the photometry contains only the host-captured
 fraction of the native narrow SED lines; when the spectral model replaces the
 native lines, exactly that captured amount is removed.
 
-``AGNConfig(narrow_line_extrapolation=...)`` controls the narrow lines outside
-the coverage: ``"template"`` (default) scales the Seyfert-2 (or LINER) template
-to the fitted narrow components; ``"optical_only"`` drops the extrapolated
-narrow lines blueward of rest 3000 Å (Ly-beta/O VI to Mg II) and keeps the
-optical forbidden lines; ``"none"`` drops all. In quasars the fitted "narrow"
-UV components mostly absorb broad-line cores, so scaling a Seyfert-2 template
-(Ly-alpha / C IV = 35 / 8) to them can add a large narrow Ly-alpha; with a
-continuum-EW broad-line anchor, whose QSOGEN equivalent widths already include
-any line core, a narrow UV extrapolation double counts by construction.
-
 Multiple spectra
 ----------------
 
