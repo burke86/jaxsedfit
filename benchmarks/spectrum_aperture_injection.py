@@ -17,8 +17,8 @@ AGN variability term. Scenarios:
   (including the narrow lines) unchanged. Fit with the
   aperture and seeing given, the photometry labeled total ("model") and the host
   capture model on.
-- fiber_capture_default: the same spectra fit with the default settings
-  (use_host_capture_model=False), so the aperture is ignored.
+- fiber_capture_default: the same spectra fit with the host capture model off
+  (the default before it was turned on), so the aperture is ignored.
 """
 from __future__ import annotations
 
@@ -76,10 +76,10 @@ def _fit(rows, spectra, scenario, args):
     configs = cv._configs(rows, args.dsps_ssp_fn, args.steps, args.learning_rate, spectra)
     for cfg in configs:
         cfg.likelihood.fit_spectrum_scale = True
+        cfg.likelihood.spectrum_scale_prior_sigma_dex = args.scale_prior_dex
         cfg.likelihood.fit_spectrum_agn_variability = True
         cfg.agn.fit_spectrum_tilt = scenario.endswith("_tilt")
-        if scenario == "fiber_capture":
-            cfg.likelihood.use_host_capture_model = True
+        cfg.likelihood.use_host_capture_model = scenario != "fiber_capture_default"
         if scenario.startswith("fiber_capture"):
             cfg.spectroscopy.aperture_diameter_arcsec = FIBER_DIAMETER
             cfg.spectroscopy.psf_fwhm_arcsec = SEEING_FWHM
@@ -110,6 +110,7 @@ def main(argv=None):
     p.add_argument("--learning-rate", type=float, default=0.02)
     p.add_argument("--chunk", type=int, default=10)
     p.add_argument("--scenarios", nargs="+", default=list(SCENARIOS))
+    p.add_argument("--scale-prior-dex", type=float, default=0.1, help="spectrum_scale_prior_sigma_dex.")
     p.add_argument("--output-dir", required=True)
     args = p.parse_args(argv)
 

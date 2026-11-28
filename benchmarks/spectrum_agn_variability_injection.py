@@ -77,6 +77,7 @@ def _fit(rows, spectra, mode, args):
     for cfg in configs:
         cfg.likelihood.fit_spectrum_scale = mode in ("gray", "var")
         cfg.likelihood.fit_spectrum_agn_variability = mode == "var"
+        cfg.likelihood.spectrum_scale_prior_sigma_dex = args.scale_prior_dex
     derived = ["log_agn_bol_luminosity_fit"] + (["spectrum_agn_log_amplitude"] if mode == "var" else [])
     t0 = time.time()
     batch = fit_batch(configs, method="laplace", chunk_size=args.chunk, derived_sites=derived)
@@ -107,6 +108,9 @@ def main(argv=None):
     p.add_argument("--steps", type=int, default=1500)
     p.add_argument("--learning-rate", type=float, default=0.02)
     p.add_argument("--chunk", type=int, default=10)
+    p.add_argument("--modes", nargs="+", default=list(MODES[1:]), choices=MODES[1:],
+                   help="Fit modes for the injected spectra.")
+    p.add_argument("--scale-prior-dex", type=float, default=0.1, help="spectrum_scale_prior_sigma_dex.")
     p.add_argument("--output-dir", required=True)
     args = p.parse_args(argv)
 
@@ -124,7 +128,7 @@ def main(argv=None):
         spectra = _spectra(table, rows, log_amp, args.index)
         key = f"lnA={log_amp:+.3f}"
         print(key, flush=True)
-        results[key] = {mode: _fit(rows, spectra, mode, args) for mode in MODES[1:]}
+        results[key] = {mode: _fit(rows, spectra, mode, args) for mode in args.modes}
         (outdir / "results.json").write_text(json.dumps(results, indent=1))
     (outdir / "results.json").write_text(json.dumps(results, indent=1))
     return 0
