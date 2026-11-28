@@ -229,6 +229,20 @@ def test_fit_batch_fits_spectra(tmp_path, monkeypatch):
     assert result[0].predict().spectrum.lines
 
 
+def test_fit_batch_fits_joint_spectra_without_agn_lines(tmp_path, monkeypatch):
+    # Without AGN lines there is no tied-line table, but the batch still needs a shared
+    # coverage range (it used to fail converting traced spectral pixels to numpy).
+    configs = _spectral_configs(tmp_path, monkeypatch, photometry=True, n=2)
+    for cfg in configs:
+        cfg.agn.fit_lines = False
+        cfg.agn.fit_feii = False
+        cfg.inference.staged_map = False
+        cfg.inference.map_steps = 3
+    result = fit_batch(configs, method="map", chunk_size=2, progress_bar=False, redshift_window=None)
+    assert all(cfg.agn.line_activation_rest is not None for cfg in result.configs)
+    assert all(np.isfinite(diag["loss"]) for diag in result.diagnostics)
+
+
 def test_qso_model_pixel_mask_ignores_padding():
     from jaxsedfit.spectral_model import FSPSTemplateGrid, qso_fsps_joint_model
 

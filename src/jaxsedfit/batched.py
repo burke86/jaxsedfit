@@ -601,9 +601,14 @@ def _batch_signature(cfg: FitConfig) -> str:
 
 
 def _uses_line_table(cfg: FitConfig) -> bool:
-    """Whether the config fits a tied-line table chosen from spectral coverage."""
-    return bool(cfg.spectroscopy_list and cfg.agn.fit_lines and cfg.agn.tied_lines
-                and not cfg.observation.fits_redshift)
+    """Whether the config needs a spectral coverage range fixed across the batch.
+
+    Any fixed-redshift spectroscopic fit does: the coverage range also sets the
+    spectral Fe II, Balmer-continuum and native-line bookkeeping, and computing
+    it from each object's (stacked, traced) pixels would fail inside the batched
+    program. With tied lines it is also the shared line table.
+    """
+    return bool(cfg.spectroscopy_list and not cfg.observation.fits_redshift)
 
 
 def _share_line_tables(configs: list[FitConfig], redshift_window: float | None) -> list[FitConfig]:
