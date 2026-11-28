@@ -75,8 +75,13 @@ def test_collapsed_metallicity_basis_matches_full_contraction(fake_ssp):
     lgmet_weights = _lgmet_weights(lgmet, scatter, ctx.host_basis_jax.ssp_lgmet)
     host_weights = lgmet_weights[:, None] * age_weights[None, :]
     host_weights = host_weights / jnp.sum(host_weights)
-    full = _contract_host_basis(host_weights, age_weights, basis, None)
-    np.testing.assert_allclose(_contract_host_basis(host_weights, age_weights, basis, fixed), full, rtol=1e-12)
+    scale = ctx.host_basis_jax.rest_llambda_scale
+    full = _contract_host_basis(host_weights, age_weights, basis, None, scale)
+    exact = scale * np.tensordot(np.asarray(host_weights), np.asarray(basis, dtype=float), axes=((0, 1), (0, 1)))
+    # The basis is stored in float32 (normalized), so both paths agree to float32 rounding.
+    np.testing.assert_allclose(full, exact, rtol=1e-6, atol=1e-6 * np.max(np.abs(exact)))
+    np.testing.assert_allclose(_contract_host_basis(host_weights, age_weights, basis, fixed, scale), full,
+                               rtol=1e-6, atol=1e-6 * np.max(np.abs(exact)))
 
 
 @pytest.mark.parametrize("key", ["gal_lgmet", "gal_lgmet_scatter", "log_gal_lgmet_scatter", "nebular_zgas"])

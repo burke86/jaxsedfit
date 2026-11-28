@@ -2041,6 +2041,41 @@ def _host_metallicity_parameters(
     return gal_lgmet, gal_lgmet_scatter
 
 
+def _contract_ssp_basis(weights, basis, axes, scale=1.0):
+    """Return scale * sum(weights * basis) over ``axes`` in float64.
+
+    jaxsedfit stores the SSP bases in float32, divided by their maximum, with a
+    float64 scale (see ``preload.HostBasisJax``). Contracting in the basis dtype
+    halves the memory traffic of these contractions, the largest arrays read in
+    each model evaluation. A float64 basis is contracted in float64.
+
+    Parameters
+    ----------
+    weights : jax.Array
+        SSP weights.
+    basis : jax.Array
+        SSP basis (``HostBasisJax.rest_llambda``).
+    axes : int or tuple
+        ``jnp.tensordot`` axes.
+    scale : float or jax.Array
+        ``HostBasisJax.rest_llambda_scale``.
+    """
+    basis = jnp.asarray(basis)
+    contracted = jnp.tensordot(jnp.asarray(weights).astype(basis.dtype), basis, axes=axes)
+    return contracted.astype(jnp.float64) * jnp.asarray(scale, dtype=jnp.float64)
+
+
+def _young_age_indices(host_basis_jax, young_age_cut_myr):
+    """Static indices of the SSP ages at or below ``young_age_cut_myr``, or None.
+
+    None when the ages are traced (not known at trace time).
+    """
+    if isinstance(host_basis_jax.ssp_lg_age_gyr, jax.core.Tracer):
+        return None
+    age_myr = np.power(10.0, np.asarray(host_basis_jax.ssp_lg_age_gyr, dtype=float)) * 1.0e3
+    return np.flatnonzero(age_myr <= float(young_age_cut_myr))
+
+
 def _fixed_metallicity_host_basis(context: ModelContext, prior_config: dict[str, Any]):
     """Return the host SSP basis pre-summed over metallicity when no metallicity is sampled.
 
@@ -2063,10 +2098,11 @@ def _fixed_metallicity_host_basis(context: ModelContext, prior_config: dict[str,
             gal_lgmet, gal_lgmet_scatter, context.host_basis_jax.ssp_lgmet
         )
         lgmet_weights = lgmet_weights / jnp.maximum(jnp.sum(lgmet_weights), 1.0e-30)
-        return jnp.tensordot(lgmet_weights, context.host_basis_jax.rest_llambda, axes=(0, 0))
+        basis = context.host_basis_jax.rest_llambda
+        return jnp.tensordot(lgmet_weights.astype(basis.dtype), basis, axes=(0, 0))
 
 
-def _contract_host_basis(host_weights, age_weights, host_basis_rest, fixed_basis):
+def _contract_host_basis(host_weights, age_weights, host_basis_rest, fixed_basis, scale=1.0):
     """Return sum_{met, age} w * basis, using the metallicity-collapsed basis when available.
 
     ``host_weights`` is the normalized outer product of the metallicity and age weights, so
@@ -2074,9 +2110,9 @@ def _contract_host_basis(host_weights, age_weights, host_basis_rest, fixed_basis
     pre-summed basis.
     """
     if fixed_basis is None:
-        return jnp.tensordot(host_weights, host_basis_rest, axes=((0, 1), (0, 1)))
+        return _contract_ssp_basis(host_weights, host_basis_rest, ((0, 1), (0, 1)), scale)
     age_norm = age_weights / jnp.maximum(jnp.sum(age_weights), 1.0e-30)
-    return age_norm @ fixed_basis
+    return _contract_ssp_basis(age_norm, fixed_basis, (0, 0), scale)
 
 
 def _build_diffstar_host(
@@ -2166,7 +2202,8 @@ def _build_diffstar_host(
     base_formed_mass = jnp.clip(base_history.smh[-1], 1e-30, 1.0e40)
     sfh_scale = target_formed_mass / base_formed_mass
     host_rest = target_formed_mass * _contract_host_basis(
-        host_weights, age_weights, host_basis_rest, _fixed_metallicity_host_basis(context, prior_config)
+        host_weights, age_weights, host_basis_rest, _fixed_metallicity_host_basis(context, prior_config),
+        getattr(context.host_basis_jax, "rest_llambda_scale", 1.0),
     )
     state = {
         "host_rest": host_rest,
@@ -2503,7 +2540,8 @@ def _build_delayed_host(
     target_formed_mass = target_surviving_mass / surviving_mass_fraction
     sfh_scale = target_formed_mass / base_formed_mass
     host_rest = target_formed_mass * _contract_host_basis(
-        host_weights, age_weights, host_basis_rest, _fixed_metallicity_host_basis(context, prior_config)
+        host_weights, age_weights, host_basis_rest, _fixed_metallicity_host_basis(context, prior_config),
+        getattr(context.host_basis_jax, "rest_llambda_scale", 1.0),
     )
     state = {
         "host_rest": host_rest,
@@ -2600,13 +2638,14 @@ def _host_rest_on_basis(host_state: dict[str, Any], host_basis_jax):
     host_state : dict[str, Any]
         Host state with ``formed_mass`` and ``host_ssp_weights`` (n_met, n_age).
     host_basis_jax : HostBasisJax
-        SSP basis whose ``rest_llambda`` (n_met, n_age, n_wave) is in W/Angstrom per
+        SSP basis whose ``rest_llambda * rest_llambda_scale`` (n_met, n_age, n_wave) is in W/Angstrom per
         Msun.
     """
-    return host_state["formed_mass"] * jnp.tensordot(
+    return host_state["formed_mass"] * _contract_ssp_basis(
         host_state["host_ssp_weights"],
         host_basis_jax.rest_llambda,
-        axes=((0, 1), (0, 1)),
+        ((0, 1), (0, 1)),
+        getattr(host_basis_jax, "rest_llambda_scale", 1.0),
     )
 
 
@@ -2622,12 +2661,23 @@ def _young_host_rest_on_basis(context: ModelContext, host_state: dict[str, Any],
     host_basis_jax : HostBasisJax
         SSP basis to evaluate on (the SED grid or the spectral pixels).
     """
+    cut_myr = float(context.fit_config.nebular.young_age_cut_myr)
+    young_index = _young_age_indices(host_basis_jax, cut_myr)
+    if young_index is not None:
+        # Contract only the young ages instead of masking the full basis.
+        return host_state["formed_mass"] * _contract_ssp_basis(
+            host_state["host_ssp_weights"][:, young_index],
+            host_basis_jax.rest_llambda[:, young_index],
+            ((0, 1), (0, 1)),
+            getattr(host_basis_jax, "rest_llambda_scale", 1.0),
+        )
     age_myr = jnp.power(10.0, host_basis_jax.ssp_lg_age_gyr) * 1.0e3
-    young = (age_myr <= float(context.fit_config.nebular.young_age_cut_myr)).astype(jnp.float64)
-    return host_state["formed_mass"] * jnp.tensordot(
+    young = (age_myr <= cut_myr).astype(jnp.float64)
+    return host_state["formed_mass"] * _contract_ssp_basis(
         host_state["host_ssp_weights"] * young[None, :],
         host_basis_jax.rest_llambda,
-        axes=((0, 1), (0, 1)),
+        ((0, 1), (0, 1)),
+        getattr(host_basis_jax, "rest_llambda_scale", 1.0),
     )
 
 

@@ -2959,3 +2959,37 @@ def test_unlabeled_photometry_without_scale_is_total_flux(monkeypatch):
     context = build_model_context(cfg)
 
     assert context.photometry_total_capture.tolist() == [True, True, True, False, False, False, True]
+
+
+def test_ssp_contraction_runs_in_basis_dtype_and_returns_float64():
+    from jaxsedfit.model import _contract_ssp_basis
+
+    rng = np.random.default_rng(0)
+    basis64 = jnp.asarray(10.0 ** rng.uniform(-30.0, 27.0, (3, 5, 7)))
+    weights = jnp.asarray(rng.random((3, 5)))
+    exact = jnp.tensordot(weights, basis64, axes=((0, 1), (0, 1)))
+    got32 = _contract_ssp_basis(weights, basis64.astype(jnp.float32), ((0, 1), (0, 1)))
+    got64 = _contract_ssp_basis(weights, basis64, ((0, 1), (0, 1)))
+    assert got32.dtype == jnp.float64 and got64.dtype == jnp.float64
+    np.testing.assert_allclose(got32, exact, rtol=1e-6)
+    np.testing.assert_array_equal(got64, exact)
+
+
+def test_young_host_contraction_slices_the_young_ages():
+    from jaxsedfit.model import _young_age_indices, _young_host_rest_on_basis
+
+    rng = np.random.default_rng(1)
+    lg_age = np.log10(np.array([1.0e-3, 5.0e-3, 9.0e-3, 0.1, 1.0, 10.0]))  # Gyr
+    basis = SimpleNamespace(ssp_lg_age_gyr=jnp.asarray(lg_age), rest_llambda=jnp.asarray(rng.random((2, 6, 4)), dtype=jnp.float32))
+    host_state = {"formed_mass": jnp.asarray(3.0), "host_ssp_weights": jnp.asarray(rng.random((2, 6)))}
+    context = SimpleNamespace(fit_config=SimpleNamespace(nebular=SimpleNamespace(young_age_cut_myr=10.0)))
+
+    np.testing.assert_array_equal(_young_age_indices(basis, 10.0), [0, 1, 2])
+    young = (10.0 ** lg_age * 1.0e3 <= 10.0).astype(float)
+    expected = 3.0 * np.tensordot(np.asarray(host_state["host_ssp_weights"]) * young[None, :],
+                                  np.asarray(basis.rest_llambda, dtype=float), axes=((0, 1), (0, 1)))
+    np.testing.assert_allclose(_young_host_rest_on_basis(context, host_state, basis), expected, rtol=1e-6)
+    # Traced ages fall back to the mask.
+    traced = jax.jit(lambda a: _young_host_rest_on_basis(
+        context, host_state, SimpleNamespace(ssp_lg_age_gyr=a, rest_llambda=basis.rest_llambda)))(jnp.asarray(lg_age))
+    np.testing.assert_allclose(traced, expected, rtol=1e-6)
